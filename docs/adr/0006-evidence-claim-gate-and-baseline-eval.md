@@ -55,33 +55,67 @@ George wants the review UI to show the research alongside the draft.
        quote: Optional[str]
    )
    ```
-   Activity payloads use plain `str` Literals, not `str`-Enums (str-Enum decodes as a char list at the Temporal activity boundary). Code joins segments into the draft text (no untagged text by construction), then re-splits the joined draft into sentences and rejects if any sentence doesn't map to a segment.
+   Activity payloads use plain `str` Literals, not `str`-Enums (str-Enum decodes as a char list at the Temporal activity boundary). Code joins segments into the draft text (no untagged text by construction), then re-splits the joined draft into sentences and rejects if any sentence doesn't map to a segment. Empty segment lists and empty segment text are rejected.
 
-2. **Coverage verified in code:** For claim segments:
+2. **Closed-set non_claim determination (code decides):** A segment is classified as `non_claim` ONLY if it matches one of these closed forms:
+   - A question (ends with `?`)
+   - A greeting or thanks (`thanks`, `thank you`, `hi`, `hello`, `happy to`, `glad to`, etc.)
+   - An explicit first-person opinion frame (`I think`, `I believe`, `In my opinion`, `In my experience`, `I've found`, etc.)
+   
+   Anything that doesn't match a closed-set pattern must cite a passage, regardless of the model's tag. The model's `kind` field is only a proposal; code determines the effective kind using deterministic rules.
+
+3. **Opinion/question frames don't launder claims:** If a sentence uses an opinion or question frame but mentions the product (`we`, `our`, `it`, `this`, `the product`, etc.) together with a claim indicator (comparatives, numbers, capability verbs, or competitor names), it is classified as a claim. Examples:
+   - "I think it's 2x faster." → CLAIM (opinion frame + product + number)
+   - "In my experience it cuts costs in half." → CLAIM (opinion frame + product + quantification)
+   - "I think this is a hard problem." → NON_CLAIM (opinion without product claim)
+
+4. **Near-verbatim support against the QUOTE (not the passage):** For claim segments, every content word, every number, and every negation in the segment text must appear in the quote field after NFKC normalization and casefolding. Light stemming is applied for matching (e.g., "provides"/"provide", "systems"/"system"). Negation must match in both directions: if the segment has a negation, the quote must have it; if the quote has a negation, the segment must have it.
+   
+   Coverage requirements:
    - `source_passage_id` must exist in this product's founder material
    - `quote` must be a normalized substring of that passage
-   - Plus a cheap support check: key numbers, entities, and nouns in the segment appear in the quoted passage
+   - Near-verbatim support: all content words, numbers, and negations in the segment must appear in the quote
    
-   A model citation alone is not coverage. The gate verifies all three conditions deterministically.
+   The previous 50%-of-passage support check has been removed. A model citation alone is not coverage. The gate verifies all conditions deterministically.
 
-3. **Pattern backstop overrides a `non_claim` tag.** Widened beyond keywords to include:
-   - First/second person or "it" + capability verb (our/we/it/you get, supports, provides, handles, includes, offers, integrates)
+5. **Pattern backstop (always claims):** These patterns always classify a segment as a claim, overriding any `non_claim` tag:
    - Any digit or unit (10k, 99%, 5 GB, 24/7)
    - Compliance/security terms (SOC2, SSO, RBAC, HIPAA, GDPR, encrypted)
    - Availability terms (24/7, uptime, SLA, 99.9%)
+   - Risky absolutes (always, never, guarantee, best, fastest, unlimited, instant, zero, exactly-once)
    
    If a segment matches a backstop pattern but lacks `source_passage_id`/`quote`, the gate fails. Model tags are never trusted on their own.
 
-4. **On failure:** Exactly one redraft carrying the gate's per-sentence reasons as the steer, then gate again. A second failure ends the `Review` as `skipped: not enough evidence` with the reasons recorded in the evidence trail. A failed draft never reaches a card. Budget reservation and reconciliation cover the redraft call.
+6. **On failure:** Exactly one redraft carrying the gate's per-sentence reasons as the steer, then gate again. A second failure ends the `Review` as `skipped: not enough evidence` with the reasons recorded in the evidence trail. A failed draft never reaches a card. Budget reservation and reconciliation cover the redraft call.
 
 **Regression tests added:**
-- 'Our tool is SOC2 compliant.' (tagged non_claim, no passage) → REJECTED
-- 'You get 24/7 support.' (tagged non_claim, no passage) → REJECTED
-- 'Handles 10k requests per second.' (tagged non_claim, no passage) → REJECTED
-- 'Gives you exactly-once delivery.' (tagged non_claim, no passage) → REJECTED
-- 'Supports SSO.' (tagged non_claim, no passage) → REJECTED
-- 'Provides role-based access control.' (tagged non_claim, no passage) → REJECTED
-- Properly covered claim with correct passage and quote → PASSES
-- Quote not in cited passage → REJECTED
+- 'We eliminate on-call pain.' → REJECTED (no quote)
+- 'Teams ship twice as fast with it.' → REJECTED (no quote)
+- 'Used by thousands of engineers.' → REJECTED (no quote)
+- 'Cuts your infra bill in half.' → REJECTED (no quote)
+- 'Beats Temporal on latency.' → REJECTED (no quote)
+- 'Works on Kubernetes.' → REJECTED (no quote)
+- 'Battle-tested in production.' → REJECTED (no quote)
+- 'Ships with a free tier.' → REJECTED (no quote)
+- 'I think it's 2x faster.' → REJECTED (opinion launders claim with product + number)
+- 'In my experience it cuts costs in half.' → REJECTED (opinion launders claim)
+- Real quote + '100 times faster' → REJECTED (number not in quote)
+- Real quote + 'is SOC2 certified' → REJECTED (certification not in quote)
+- One segment with two sentences where the second is uncovered → REJECTED
+- 'Our product is not open source' quoting 'It is open source' → REJECTED (negation mismatch)
+- 'Our product is open source' quoting 'It is not open source' → REJECTED (negation mismatch)
+- A question → PASSES (closed-set non_claim)
+- A thanks → PASSES (closed-set non_claim)
+- 'I think this is a hard problem.' → PASSES (opinion without product claim)
+- Claim whose content words all appear in its quote → PASSES
 
-**Why:** This design makes it impossible for the model to circumvent the gate by misclassifying claims, and ensures every assertion is traceable to founder material by code, not trust.
+**Deferred items:**
+- Independent verifier call as an option (b) alternative to near-verbatim matching is deferred to the ADR-0003 eval program. Near-verbatim matching is the baseline; a verifier call would be evaluated for precision/recall improvement.
+- Founder-edit re-gate with explicit `post_anyway` override is approved in principle and will be implemented in a subsequent change. This allows the founder to override a gate failure with an explicit acknowledgment.
+
+**Alternatives considered:**
+- **Option (b): Independent verifier LLM call.** Instead of near-verbatim matching, call an LLM to judge whether the segment is supported by the quote. Rejected for the baseline because it adds cost, latency, and non-determinism. Deferred to eval as a potential improvement.
+- **Looser stemming or semantic similarity.** Rejected: near-verbatim matching with light stemming provides a clear, testable boundary. Semantic similarity would make the gate unpredictable.
+- **Allow model tags without code override.** Rejected: model tags are proposals only. Code must decide using deterministic rules to prevent circumvention.
+
+**Why:** This design prevents the model from circumventing the gate through opinion/question laundering or misclassification, and ensures every product assertion is traceable to founder material through near-verbatim matching checked by code, not trust.

@@ -516,7 +516,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             assert card["status"] == "skipped"
             # New skip reason format per ADR-0006 Amendment: includes per-sentence failures
             assert "not enough evidence" in card["skip_reason"].lower()
-            assert "insufficient support" in card["skip_reason"].lower()
+            assert "verbatim" in card["skip_reason"].lower() or "not found" in card["skip_reason"].lower()
             
             # Gap 2: Verify ALL failed sentences are recorded in evidence, not just summary
             assert card["evidence"]["draft"] is not None
@@ -527,7 +527,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
                 assert "sentence" in failure
                 assert "reason" in failure
                 assert len(failure["sentence"]) > 0
-                assert "insufficient support" in failure["reason"].lower()
+                assert "verbatim" in failure["reason"].lower() or "not found" in failure["reason"].lower()
             # Verify this is more than what's in skip_reason (which is capped at 3 with 30 char limit)
             assert card["skip_reason"] is not None
 

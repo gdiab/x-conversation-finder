@@ -5,14 +5,16 @@ Per ADR-0006 Amendment 2026-11-21: Segments-based claim gate.
 - Model returns structured segments {text, kind, source_passage_id?, quote?}
 - Activity payloads use plain str Literals, not str-Enums
 - Code joins segments into draft, re-splits into sentences, verifies mapping
-- Coverage: source_passage_id exists, quote is substring, cheap support check
-- Pattern backstop overrides non_claim tags
+- Coverage: near-verbatim support against quote, passage must exist
+- Closed-set non_claim: questions, greetings/thanks, explicit first-person opinion only
+- Opinion/question frames that mention product with comparatives/numbers/capabilities are claims
 """
 
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List, Dict, Set
 from temporalio import activity
 import re
+import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
 
@@ -26,19 +28,39 @@ class ClaimGateInput:
     idempotency_key: str
 
 
-# Pattern backstop: these patterns override a non_claim tag
-# Per ADR-0006 Amendment: widen beyond keywords to capability verbs, digits, compliance terms
+# Closed-set non_claim patterns: code decides, not the model
+# A segment is non_claim ONLY if it matches one of these closed forms
+NON_CLAIM_PATTERNS = [
+    # Questions (simple heuristic: ends with ?)
+    r'\?$',
+    # Greetings and thanks (including "happy to help", "glad to help", etc.)
+    r'\b(?:thanks|thank you|hi|hello|hey|greetings|appreciate|happy to|glad to|pleased to)\b',
+    # Explicit first-person opinion/experience frames
+    r'\b(?:I think|I believe|I feel|In my (?:opinion|experience|view)|I\'ve found|I found|I\'d say|personally)\b',
+]
+
+# Product mention patterns: if a sentence mentions the product along with these, it's a claim
+# even if it looks like an opinion/question
+PRODUCT_INDICATORS = [
+    r'\b(?:we|our|my|it|this|the tool|the product|the platform|the service|the app|the system)\b',
+]
+
+# Claim indicators that combine with product mention to override non_claim
+CLAIM_INDICATORS = [
+    # Comparatives and superlatives
+    r'\b(?:better|worse|faster|slower|more|less|best|worst|fastest|slowest|most|least|than|compared to)\b',
+    # Numbers and quantifications
+    r'\b\d+\.?\d*\s*(?:%|percent|pct|times|x|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|k|K|M|B)?\b',
+    # Capability verbs
+    r'\b(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates|cut|cuts|reduce|reduces|eliminate|eliminates|beat|beats|work|works|ship|ships|come|comes)\b',
+    # Competitor/alternative mentions
+    r'\b(?:Temporal|Kubernetes|AWS|Azure|GCP|Docker|Jenkins|CircleCI|GitHub Actions|Slack|Teams|Jira|Confluence)\b',
+]
+
+# Pattern backstop: these patterns override a non_claim tag (always claims, regardless of context)
 BACKSTOP_PATTERNS = [
-    # First/second person + capability verbs (including "gives")
-    r'\b(?:we|our|my|you|your)\s+(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates)\b',
-    # "it" or "this" + capability verbs
-    r'\b(?:it|this)\s+(?:gets|gives|supports|provides|handles|includes|offers|integrates|delivers|enables|builds|creates|manages|monitors|tracks|analyzes|solves|fixes|improves|optimizes|ensures|automates)\b',
-    # Bare capability verbs at start of sentence (common in product descriptions)
-    r'^(?:Gets|Gives|Supports|Provides|Handles|Includes|Offers|Integrates|Delivers|Enables|Builds|Creates|Manages|Monitors|Tracks|Analyzes|Solves|Fixes|Improves|Optimizes|Ensures|Automates)\b',
-    # "integrates with", "works with", "ships with", "comes with", "includes" patterns
-    r'\b(?:integrates?|works?|ships?|comes?)\s+with\b',
-    # Any digit or unit
-    r'\b\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|k|K|M|B)?\b',
+    # Any digit or unit (without opinion frame)
+    r'\b\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|k|K|M|B)\b',
     # Compliance/security terms
     r'\b(?:SOC2|SSO|RBAC|HIPAA|GDPR|encrypted|encryption|compliance|compliant|certified|certification|audit|auditing|audit logs|role-based access control)\b',
     # Availability terms
@@ -48,30 +70,90 @@ BACKSTOP_PATTERNS = [
 ]
 
 
+def is_closed_set_non_claim(text: str) -> bool:
+    """
+    Check if text is a closed-set non_claim (question, greeting/thanks, explicit opinion).
+    Returns True only if it matches one of the closed forms.
+    """
+    for pattern in NON_CLAIM_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+    return False
+
+
+def mentions_product_with_claim_indicator(text: str) -> bool:
+    """
+    Check if text mentions the product along with a claim indicator.
+    If yes, it's a claim even if it looks like an opinion/question.
+    """
+    # Check for product mention
+    has_product = any(re.search(p, text, re.IGNORECASE) for p in PRODUCT_INDICATORS)
+    if not has_product:
+        return False
+    
+    # Check for claim indicator
+    has_claim_indicator = any(re.search(p, text, re.IGNORECASE) for p in CLAIM_INDICATORS)
+    return has_claim_indicator
+
+
 def matches_backstop_pattern(text: str) -> bool:
-    """Check if text matches any backstop pattern."""
+    """
+    Check if text matches any backstop pattern.
+    These patterns always indicate a claim, overriding any non_claim tag.
+    """
     for pattern in BACKSTOP_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
 
 
+def determine_effective_kind(segment_text: str, model_kind: str) -> str:
+    """
+    Determine the effective kind of a segment using code rules.
+    
+    Rules (in order):
+    1. If matches backstop pattern → claim (numbers, compliance, availability, risky words)
+    2. If mentions product with claim indicator → claim (overrides opinion/question frames)
+    3. If closed-set non_claim pattern (and not caught by rules 1-2) → non_claim
+    4. Otherwise → claim (must cite a passage)
+    
+    The model's tag is only a proposal; code decides.
+    Per requirement B: Opinion/question frames don't launder claims.
+    """
+    # Rule 1: Backstop patterns always make it a claim
+    if matches_backstop_pattern(segment_text):
+        return "claim"
+    
+    # Rule 2: Product mention with claim indicator → claim
+    # This MUST come before closed-set check to prevent opinion/question laundering
+    if mentions_product_with_claim_indicator(segment_text):
+        return "claim"
+    
+    # Rule 3: Closed-set non_claim patterns (only if not caught above)
+    if is_closed_set_non_claim(segment_text):
+        return "non_claim"
+    
+    # Rule 4: Default to claim (anything else must cite a passage)
+    return "claim"
+
+
 def normalize_text(text: str) -> str:
     """
-    Normalize text for comparison: NFKC, lowercase, collapse whitespace, normalize quotes.
+    Normalize text for comparison: NFKC, casefold, collapse whitespace, normalize quotes.
     
-    Per QA r9 item 4: NFKC normalization plus whitespace/case/quote-char normalization.
+    Per ADR-0006 Amendment 2026-11-21: NFKC normalization plus casefold.
     """
-    import unicodedata
-    
     # NFKC normalization (compatibility decomposition + canonical composition)
     text = unicodedata.normalize('NFKC', text)
     
     # Normalize quote characters to standard ASCII quotes
     text = text.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
     
-    # Lowercase and collapse whitespace
-    return ' '.join(text.lower().split())
+    # Casefold (more aggressive than lowercase for international text)
+    text = text.casefold()
+    
+    # Collapse whitespace
+    return ' '.join(text.split())
 
 
 def split_into_sentences(text: str) -> List[str]:
@@ -93,44 +175,110 @@ def check_quote_in_passage(quote: str, passage: str) -> bool:
     return norm_quote in norm_passage
 
 
-def check_cheap_support(segment_text: str, passage: str) -> bool:
+def light_stem(word: str) -> str:
     """
-    Cheap support check: key numbers, entities, nouns in segment appear in passage.
-    
-    Extracts:
-    - Numbers (e.g., "99", "24/7")
-    - Capitalized terms (e.g., "SSO", "RBAC")
-    - Common nouns (simple heuristic: words longer than 4 chars)
-    
-    Returns True if at least 50% of extracted terms appear in passage.
+    Light stemming: remove common English suffixes for matching.
+    Just handles basic plural/verb forms, not full Porter stemming.
     """
-    norm_segment = normalize_text(segment_text)
-    norm_passage = normalize_text(passage)
+    # Remove trailing 's' for plurals (but not for words ending in 'ss')
+    if word.endswith('s') and len(word) > 3 and not word.endswith('ss'):
+        return word[:-1]
+    # Remove 'ing' suffix
+    if word.endswith('ing') and len(word) > 5:
+        return word[:-3]
+    # Remove 'ed' suffix
+    if word.endswith('ed') and len(word) > 4:
+        return word[:-2]
+    return word
+
+
+def extract_content_words(text: str) -> Set[str]:
+    """
+    Extract content words from text: words of 3+ chars, excluding common stopwords.
+    Returns normalized and lightly stemmed forms.
+    """
+    # Common stopwords to exclude
+    stopwords = {
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+        'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'be',
+        'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'can',
+        'could', 'will', 'would', 'should', 'may', 'might', 'must', 'shall',
+        'this', 'that', 'these', 'those', 'it', 'its', 'what', 'which', 'who',
+        'when', 'where', 'why', 'how', 'all', 'each', 'every', 'some', 'any',
+        'you', 'your', 'we', 'our'
+    }
     
-    # Extract terms
-    terms = []
+    norm_text = normalize_text(text)
+    words = re.findall(r'\b[a-z]{3,}\b', norm_text)
     
-    # Numbers (including decimals and percentages)
-    numbers = re.findall(r'\d+\.?\d*%?', segment_text)
-    terms.extend(numbers)
+    # Filter stopwords and apply light stemming
+    content_words = set()
+    for word in words:
+        if word not in stopwords:
+            stemmed = light_stem(word)
+            content_words.add(stemmed)
     
-    # Capitalized terms (SSO, RBAC, etc.)
-    cap_terms = re.findall(r'\b[A-Z][A-Z0-9]+\b', segment_text)
-    terms.extend([t.lower() for t in cap_terms])
+    return content_words
+
+
+def extract_numbers(text: str) -> Set[str]:
+    """Extract all numbers from text, normalized."""
+    norm_text = normalize_text(text)
+    # Match numbers including decimals, percentages, and common units
+    numbers = re.findall(r'\d+\.?\d*', norm_text)
+    return set(numbers)
+
+
+def extract_negations(text: str) -> Set[str]:
+    """Extract negation words from text."""
+    norm_text = normalize_text(text)
+    negations = {'not', 'no', 'never', 'none', 'nothing', 'nowhere', 'neither', "n't"}
+    found = set()
     
-    # Words longer than 4 chars (rough noun filter)
-    words = re.findall(r'\b[a-z]{5,}\b', norm_segment)
-    terms.extend(words)
+    # Check for negation words
+    words = set(re.findall(r'\b[a-z]+\b', norm_text))
+    for neg in negations:
+        if neg in words or any(w.endswith("n't") for w in words):
+            found.add(neg)
     
-    if not terms:
-        # No terms to check, pass by default
-        return True
+    return found
+
+
+def check_near_verbatim_support(segment_text: str, quote: str) -> tuple[bool, str]:
+    """
+    Near-verbatim support check against the QUOTE (not the passage).
     
-    # Check how many terms appear in passage
-    found = sum(1 for term in terms if term.lower() in norm_passage)
-    support_ratio = found / len(terms)
+    Per ADR-0006 Amendment 2026-11-21:
+    - Every content word in the segment must appear in the quote (after NFKC + casefold + light stemming)
+    - Every number in the segment must appear in the quote
+    - Every negation in the segment must appear in the quote (and vice versa)
     
-    return support_ratio >= 0.5
+    Returns (passed, failure_reason).
+    """
+    segment_content = extract_content_words(segment_text)
+    quote_content = extract_content_words(quote)
+    
+    segment_numbers = extract_numbers(segment_text)
+    quote_numbers = extract_numbers(quote)
+    
+    segment_negations = extract_negations(segment_text)
+    quote_negations = extract_negations(quote)
+    
+    # Check negations FIRST (must match in both directions) - this is critical
+    if segment_negations != quote_negations:
+        return False, f"Negation mismatch: segment has {segment_negations or 'none'}, quote has {quote_negations or 'none'}"
+    
+    # Check numbers
+    missing_numbers = segment_numbers - quote_numbers
+    if missing_numbers:
+        return False, f"Numbers in segment not found in quote: {', '.join(sorted(missing_numbers))}"
+    
+    # Check content words
+    missing_words = segment_content - quote_content
+    if missing_words:
+        return False, f"Content words in segment not found in quote: {', '.join(sorted(missing_words)[:5])}"
+    
+    return True, ""
 
 
 def verify_segment_coverage(
@@ -140,10 +288,11 @@ def verify_segment_coverage(
     """
     Verify coverage for a claim segment.
     
-    Per ADR-0006 Amendment:
+    Per ADR-0006 Amendment 2026-11-21:
     1. source_passage_id must exist in founder material
     2. quote must be a normalized substring of that passage
-    3. cheap support check (key numbers, entities, nouns appear in passage)
+    3. near-verbatim support: every content word, number, and negation in the segment
+       must appear in the quote (after NFKC + casefold + light stemming)
     
     Returns (passed, failure_reason).
     """
@@ -168,9 +317,10 @@ def verify_segment_coverage(
     if not check_quote_in_passage(segment.quote, passage):
         return False, f"Quote '{segment.quote}' not found in cited passage"
     
-    # Cheap support check
-    if not check_cheap_support(segment.text, passage):
-        return False, f"Insufficient support: key terms in segment not found in cited passage"
+    # Near-verbatim support check against the quote
+    supported, reason = check_near_verbatim_support(segment.text, segment.quote)
+    if not supported:
+        return False, f"Near-verbatim support failed: {reason}"
     
     return True, ""
 
@@ -246,20 +396,20 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
             activity.logger.warning(f"Unmapped sentence: '{sentence[:50]}...'")
             continue
         
-        # Step 4: Check coverage for claim segments
+        # Step 4: Determine effective kind using code rules
         # Take the first matching segment (in practice, should be 1-to-1)
         segment = matching_segments[0]
         
-        # Step 5: Pattern backstop - override non_claim if pattern matches
-        effective_kind = segment.kind
-        if segment.kind == "non_claim" and matches_backstop_pattern(segment.text):
-            effective_kind = "claim"
+        # Step 5: Determine effective kind (code decides, not the model)
+        effective_kind = determine_effective_kind(segment.text, segment.kind)
+        
+        if effective_kind != segment.kind:
             activity.logger.info(
-                f"Pattern backstop triggered for segment: '{segment.text[:50]}...' "
-                f"(tagged non_claim but matches backstop pattern)"
+                f"Code override: segment '{segment.text[:50]}...' "
+                f"tagged as {segment.kind} but determined as {effective_kind}"
             )
         
-        # Verify coverage if it's a claim (or backstop-promoted)
+        # Verify coverage if it's a claim
         if effective_kind == "claim":
             # Create a segment with effective kind for verification
             verify_seg = Segment(

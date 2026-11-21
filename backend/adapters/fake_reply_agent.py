@@ -54,7 +54,7 @@ class FakeReplyAgent(ReplyAgentPort):
             founder_materials=[
                 FounderMaterial(
                     source="product_brief.md",
-                    passage="Our product helps developers build reliable systems.",
+                    passage="Our product helps developers build reliable distributed systems with strong consistency guarantees.",
                     relevance="Directly relevant to the post's discussion of reliability",
                     passage_id="passage_0",
                 )
@@ -93,7 +93,7 @@ class FakeReplyAgent(ReplyAgentPort):
                     text="Our product helps developers build reliable systems.",
                     kind="claim",
                     source_passage_id="passage_0",
-                    quote="helps developers build reliable systems"
+                    quote="product helps developers build reliable systems"
                 ),
                 Segment(
                     text="Happy to share more.",
@@ -107,10 +107,10 @@ class FakeReplyAgent(ReplyAgentPort):
                     kind="non_claim"
                 ),
                 Segment(
-                    text="our system uses distributed consensus and eventual consistency to handle this.",
+                    text="our system uses distributed consensus to handle this.",
                     kind="claim",
                     source_passage_id="passage_0",
-                    quote="distributed consensus"
+                    quote="distributed systems with strong consistency"
                 ),
                 Segment(
                     text="Details in our docs.",
@@ -128,7 +128,7 @@ class FakeReplyAgent(ReplyAgentPort):
                     text="Our product helps developers build reliable systems.",
                     kind="claim",
                     source_passage_id="passage_0",
-                    quote="helps developers build reliable systems"
+                    quote="product helps developers build reliable systems"
                 ),
                 Segment(
                     text="Would be happy to share more details if useful.",
