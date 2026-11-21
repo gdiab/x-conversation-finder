@@ -414,7 +414,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
     that generates unsupported claims (not a stub gate).
     """
     from backend.activities.claim_gate_activity import claim_gate
-    from backend.adapters.reply_agent_port import ReplyAgentPort
+    from backend.ports import ReplyAgentPort
     from backend.activities.reply_activities import ReplyActivities
     from backend.models import Evidence, FounderMaterial, Claim, ClaimGateResult, Draft
     from typing import Optional

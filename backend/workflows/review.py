@@ -282,133 +282,132 @@ class ReviewWorkflow:
         workflow_id = workflow.info().workflow_id
         created_at = workflow.now().isoformat()
         
+        # Step 1: Research
+        evidence = await self._research_post(workflow_id, created_at)
+        if evidence is None:
+            return "skipped"
+        
+        # Step 2: Draft (with claim gate retry logic)
+        evidence = await self._draft_and_validate(evidence, workflow_id, created_at)
+        if evidence is None:
+            return "skipped"
+        
+        self.evidence = evidence
+        
+        # Store pending card
+        card = self._build_card(workflow_id, input.post, created_at)
+        
+        await workflow.execute_activity(
+            store_card,
+            StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:pending"),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
+        )
+        
+        # Step 3: Wait for human decision
+        result = await self._wait_for_decision(workflow_id)
+        if result:
+            return result
+        
+        # Handle approval (approved is True at this point)
+        workflow.logger.info(f"Approved by founder")
+        
+        # Update to approved status
+        await workflow.execute_activity(
+            update_card,
+            UpdateCardInput(
+                workflow_id=workflow_id,
+                updates={
+                    "status": ReviewStatus.APPROVED.value,
+                    "posted_url": self.posted_url,
+                },
+                idempotency_key=f"{workflow_id}:update:approve",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        
+        # Step 4: Wait for confirm_posted and update completion
+        timeout_hours = input.config.review_timeout_hours
+        workflow.logger.info(f"Waiting for reply URL confirmation ({timeout_hours}h timeout)")
+        
         try:
-            # Step 1: Research
-            evidence = await self._research_post(workflow_id, created_at)
-            if evidence is None:
-                return "skipped"
-            
-            # Step 2: Draft (with claim gate retry logic)
-            evidence = await self._draft_and_validate(evidence, workflow_id, created_at)
-            if evidence is None:
-                return "skipped"
-            
-            self.evidence = evidence
-            
-            # Store pending card
-            card = self._build_card(workflow_id, input.post, created_at)
-            
-            await workflow.execute_activity(
-                store_card,
-                StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:pending"),
-                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
+            await workflow.wait_condition(
+                lambda: self.confirmed,
+                timeout=timedelta(hours=timeout_hours),
             )
-            
-            # Step 3: Wait for human decision
-            result = await self._wait_for_decision(workflow_id)
-            if result:
-                return result
-            
-            # Handle approval (approved is True at this point)
-            workflow.logger.info(f"Approved by founder")
-            
-            # Update to approved status
-            await workflow.execute_activity(
-                update_card,
-                UpdateCardInput(
-                    workflow_id=workflow_id,
-                    updates={
-                        "status": ReviewStatus.APPROVED.value,
-                        "posted_url": self.posted_url,
-                    },
-                    idempotency_key=f"{workflow_id}:update:approve",
-                ),
-                start_to_close_timeout=timedelta(seconds=10),
-            )
-            
-            # Step 4: Wait for confirm_posted and update completion
-            timeout_hours = input.config.review_timeout_hours
-            workflow.logger.info(f"Waiting for reply URL confirmation ({timeout_hours}h timeout)")
-            
-            try:
-                await workflow.wait_condition(
-                    lambda: self.confirmed,
-                    timeout=timedelta(hours=timeout_hours),
-                )
-            except asyncio.TimeoutError:
-                self.status = ReviewStatus.APPROVED_NOT_CONFIRMED
-                workflow.logger.info(f"Approved but not confirmed after {timeout_hours}h")
-                
-                await workflow.execute_activity(
-                    update_card,
-                    UpdateCardInput(
-                        workflow_id=workflow_id,
-                        updates={"status": ReviewStatus.APPROVED_NOT_CONFIRMED.value},
-                        idempotency_key=f"{workflow_id}:update:not_confirmed",
-                    ),
-                    start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
-                )
-                
-                return "approved_not_confirmed"
-            
-            # Step 5: Start follow-up timer (from config) - interruptible
-            followup_delay = input.config.followup_delay_days
-            followup_seconds = followup_delay * SECONDS_PER_DAY
-            workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
-            
-            # Determinism: Use wait_condition for interruptible timer
-            try:
-                await workflow.wait_condition(
-                    lambda: self._cancel_followup,
-                    timeout=timedelta(seconds=followup_seconds)
-                )
-                workflow.logger.info("Follow-up timer cancelled")
-                return "followup_cancelled"
-            except asyncio.TimeoutError:
-                # Timer expired normally
-                workflow.logger.info("Follow-up timer completed")
-            
-            # Step 6: Check for follow-up replies (capped)
-            workflow.logger.info("Follow-up timer fired, checking for replies")
-            
-            followup_posts = await workflow.execute_activity(
-                "check_followup",
-                CheckFollowupInput(
-                    reply_post_id=self.reply_post_id,
-                    idempotency_key=f"{workflow_id}:followup",
-                ),
-                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
-                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
-                result_type=List[Post],
-            )
-            
-            workflow.logger.info(f"Found {len(followup_posts)} follow-up replies")
-            
-            # Update card with followup_due status and replies (no auto-draft)
-            followup_replies = [
-                {
-                    "id": p.id,
-                    "text": p.text,
-                    "author": p.author.username,
-                    "url": p.url,
-                }
-                for p in followup_posts
-            ]
+        except asyncio.TimeoutError:
+            self.status = ReviewStatus.APPROVED_NOT_CONFIRMED
+            workflow.logger.info(f"Approved but not confirmed after {timeout_hours}h")
             
             await workflow.execute_activity(
                 update_card,
                 UpdateCardInput(
                     workflow_id=workflow_id,
-                    updates={
-                        "status": ReviewStatus.FOLLOWUP_DUE.value,
-                        "followup_replies": followup_replies,
-                    },
-                    idempotency_key=f"{workflow_id}:update:followup_due",
+                    updates={"status": ReviewStatus.APPROVED_NOT_CONFIRMED.value},
+                    idempotency_key=f"{workflow_id}:update:not_confirmed",
                 ),
-                start_to_close_timeout=timedelta(seconds=10),
+                start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
             )
             
-            return "followup_due"
+            return "approved_not_confirmed"
+        
+        # Step 5: Start follow-up timer (from config) - interruptible
+        followup_delay = input.config.followup_delay_days
+        followup_seconds = followup_delay * SECONDS_PER_DAY
+        workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
+        
+        # Determinism: Use wait_condition for interruptible timer
+        try:
+            await workflow.wait_condition(
+                lambda: self._cancel_followup,
+                timeout=timedelta(seconds=followup_seconds)
+            )
+            workflow.logger.info("Follow-up timer cancelled")
+            return "followup_cancelled"
+        except asyncio.TimeoutError:
+            # Timer expired normally
+            workflow.logger.info("Follow-up timer completed")
+        
+        # Step 6: Check for follow-up replies (capped)
+        workflow.logger.info("Follow-up timer fired, checking for replies")
+        
+        followup_posts = await workflow.execute_activity(
+            "check_followup",
+            CheckFollowupInput(
+                reply_post_id=self.reply_post_id,
+                idempotency_key=f"{workflow_id}:followup",
+            ),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
+            retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+            result_type=List[Post],
+        )
+        
+        workflow.logger.info(f"Found {len(followup_posts)} follow-up replies")
+        
+        # Update card with followup_due status and replies (no auto-draft)
+        followup_replies = [
+            {
+                "id": p.id,
+                "text": p.text,
+                "author": p.author.username,
+                "url": p.url,
+            }
+            for p in followup_posts
+        ]
+        
+        await workflow.execute_activity(
+            update_card,
+            UpdateCardInput(
+                workflow_id=workflow_id,
+                updates={
+                    "status": ReviewStatus.FOLLOWUP_DUE.value,
+                    "followup_replies": followup_replies,
+                },
+                idempotency_key=f"{workflow_id}:update:followup_due",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        
+        return "followup_due"
     
     @workflow.signal
     async def approve(self, posted_url: str, client_request_id: str):
