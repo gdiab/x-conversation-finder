@@ -547,10 +547,13 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
     from typing import Optional
     
     class AlwaysFailingClaimAgent(ReplyAgentPort):
-        """Agent that generates drafts that always fail the gate."""
+        """Agent that generates drafts with valid composition that fail the gate."""
+        
+        def __init__(self):
+            self.draft_call_count = 0
         
         async def research(self, post, topic, product_brief, idempotency_key) -> Evidence:
-            """Generate fake evidence."""
+            """Generate fake evidence with a passage."""
             evidence = Evidence(
                 post_id=post.id,
                 matched_topic=topic,
@@ -569,28 +572,32 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             return evidence
         
         async def draft(self, evidence, steer=None, idempotency_key=None) -> Evidence:
-            """Generate draft with multiple unsupported claims that will fail."""
+            """
+            Generate draft with valid composition that fails gate at insertion.
+            
+            QA R15: Valid composition [opener.hi, claim with out-of-range sentence_index].
+            Composition rules pass, but claim insertion fails with per-sentence reason.
+            """
+            self.draft_call_count += 1
             from backend.models import Segment
             
-            # Draft with non_claims that have backstop patterns (will fail gate)
+            # Valid composition: opener + claim
+            # The claim has out-of-range sentence_index (passage has 1 sentence, index 0)
             segments = [
                 Segment(
-                    text="We offer 100x faster performance.",
-                    kind="non_claim",  # Tagged as non_claim but has backstop (100x)
+                    kind="non_claim",
+                    phrase_id="opener.hi",  # Valid opener
                 ),
                 Segment(
-                    text="Used by millions of developers.",
-                    kind="non_claim",  # Tagged as non_claim but has backstop (millions)
-                ),
-                Segment(
-                    text="Beats all competitors.",
-                    kind="non_claim",  # Tagged as non_claim, not closed-set
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    sentence_index=99,  # Out of range - passage only has 1 sentence at index 0
                 ),
             ]
-            draft_text = ' '.join(s.text for s in segments)
             
+            # No draft_text yet - gate will fail during insertion
             evidence.draft = Draft(
-                text=draft_text,
+                text="",
                 segments=segments,
                 claim_gate=ClaimGateResult(
                     passed=True,
@@ -599,7 +606,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
                     reasoning="Gate not yet run",
                 ),
                 steers_applied=[steer] if steer else [],
-                token_count=len(draft_text.split()),
+                token_count=0,
                 model_used="failing-agent",
             )
             return evidence
@@ -641,23 +648,28 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
             
-            # Verify failed sentence is recorded (composition violation)
-            # R14: Non-claim segments without phrase_id trigger composition violation
+            # QA R15: Verify failed sentence with per-sentence failure reason
+            # Valid composition [opener.hi, claim with out-of-range sentence_index]
+            # Gate fails during claim insertion with specific reason
             assert card["evidence"]["draft"] is not None
             failed_sentences = card["evidence"]["draft"]["claim_gate"]["failed_sentences"]
-            assert len(failed_sentences) == 1  # Composition violation
-            assert failed_sentences[0]["sentence"] == "[draft composition]"
-            assert "phrase_id" in failed_sentences[0]["reason"]
+            assert len(failed_sentences) == 1
+            assert failed_sentences[0]["sentence"] == "[claim segment]"
+            assert "sentence_index 99 out of range" in failed_sentences[0]["reason"]
             
-            # Verify full evidence is stored
+            # Verify full evidence is stored for each failed sentence
             for failure in failed_sentences:
                 assert "sentence" in failure
                 assert "reason" in failure
                 assert len(failure["sentence"]) > 0
+                assert len(failure["reason"]) > 0
             
             # Verify card status is skipped, not pending
             assert card["status"] == "skipped"
             assert "not enough evidence" in card["skip_reason"].lower()
+            
+            # QA R15: Verify exactly 2 draft_reply calls (initial + 1 redraft)
+            assert failing_agent.draft_call_count == 2
 
 
 @pytest.mark.asyncio
