@@ -6,7 +6,7 @@ from temporalio import activity
 
 from backend.models import Evidence, Post
 from backend.ports import ReplyAgentPort
-from backend.budget import check_inference_budget, record_inference
+from backend.budget import reserve_inference_budget, BudgetExceeded
 
 
 @dataclass
@@ -51,10 +51,13 @@ class ReplyActivities:
             f"(key: {input.idempotency_key})"
         )
         
-        # Check inference budget
-        if not check_inference_budget():
-            activity.logger.warning("Daily inference budget exceeded")
-            raise RuntimeError("Daily inference budget exceeded")
+        # Reserve inference budget with token estimates (NB3: per-token pricing)
+        # Estimate: ~500 input tokens, ~200 output tokens for research
+        try:
+            cost_usd = reserve_inference_budget(input_tokens=500, output_tokens=200)
+        except BudgetExceeded as e:
+            activity.logger.error(f"Budget exceeded: {e}")
+            raise
         
         evidence = await self.reply_agent.research(
             post=input.post,
@@ -62,9 +65,6 @@ class ReplyActivities:
             product_brief=input.product_brief,
             idempotency_key=input.idempotency_key,
         )
-        
-        # Record inference (estimate)
-        record_inference(cost_usd=0.001)
         
         activity.logger.info(
             f"Research complete: confidence={evidence.confidence_score:.2f}, "
@@ -90,19 +90,19 @@ class ReplyActivities:
             f"steer={input.steer} (key: {input.idempotency_key})"
         )
         
-        # Check inference budget
-        if not check_inference_budget():
-            activity.logger.warning("Daily inference budget exceeded")
-            raise RuntimeError("Daily inference budget exceeded")
+        # Reserve inference budget with token estimates (NB3: per-token pricing)
+        # Estimate: ~800 input tokens, ~100 output tokens for draft
+        try:
+            cost_usd = reserve_inference_budget(input_tokens=800, output_tokens=100)
+        except BudgetExceeded as e:
+            activity.logger.error(f"Budget exceeded: {e}")
+            raise
         
         evidence = await self.reply_agent.draft(
             evidence=input.evidence,
             steer=input.steer,
             idempotency_key=input.idempotency_key,
         )
-        
-        # Record inference (estimate)
-        record_inference(cost_usd=0.002)
         
         if evidence.draft:
             activity.logger.info(

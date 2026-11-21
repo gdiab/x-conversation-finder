@@ -6,7 +6,7 @@ from temporalio import activity
 
 from backend.models import Post
 from backend.ports import XClientPort
-from backend.budget import check_x_budget, record_x_reads
+from backend.budget import reserve_x_budget, BudgetExceeded
 from backend.config import get_settings
 
 
@@ -67,14 +67,13 @@ class XActivities:
         
         settings = get_settings()
         
-        # Check budget before making the call
-        if not check_x_budget(input.max_results):
-            activity.logger.warning(f"Daily X budget cap reached, returning empty results")
-            return SearchRecentOutput(
-                posts=[],
-                newest_id=input.since_id,
-                cost_usd=0.0,
-            )
+        # Reserve budget atomically (NB3: reserve-then-commit)
+        # This raises BudgetExceeded if cap would be exceeded
+        try:
+            cost_usd = reserve_x_budget(input.max_results, settings.x_post_read_cost)
+        except BudgetExceeded as e:
+            activity.logger.error(f"Budget exceeded: {e}")
+            raise
         
         posts, newest_id = await self.x_client.search_recent(
             query=input.query,
@@ -82,18 +81,22 @@ class XActivities:
             max_results=input.max_results,
         )
         
-        # Calculate cost from config
-        cost_usd = len(posts) * settings.x_post_read_cost
+        # Actual cost based on posts returned
+        actual_reads = len(posts)
+        actual_cost = actual_reads * settings.x_post_read_cost
         
-        # Record in ledger
-        record_x_reads(len(posts), cost_usd)
+        if actual_reads < input.max_results:
+            activity.logger.info(
+                f"Reserved budget for {input.max_results} reads (${cost_usd:.4f}), "
+                f"but got {actual_reads} posts (${actual_cost:.4f})"
+            )
         
-        activity.logger.info(f"Found {len(posts)} posts, cost ${cost_usd:.4f}")
+        activity.logger.info(f"Found {len(posts)} posts, cost ${actual_cost:.4f}")
         
         return SearchRecentOutput(
             posts=posts,
             newest_id=newest_id,
-            cost_usd=cost_usd,
+            cost_usd=actual_cost,
         )
     
     @activity.defn(name="lookup_post")
@@ -109,19 +112,19 @@ class XActivities:
         
         settings = get_settings()
         
-        # Check budget
-        if not check_x_budget(1):
-            activity.logger.warning(f"Daily X budget cap reached, skipping lookup")
-            return None
+        # Reserve budget atomically (NB3: raise if over budget, never return None)
+        try:
+            cost_usd = reserve_x_budget(1, settings.x_post_read_cost)
+        except BudgetExceeded as e:
+            activity.logger.error(f"Budget exceeded: {e}")
+            raise
         
         post = await self.x_client.lookup_post(input.post_id)
         
         if post:
-            activity.logger.info(f"Found post {input.post_id} by @{post.author.username}")
-            # Record cost
-            record_x_reads(1, settings.x_post_read_cost)
+            activity.logger.info(f"Found post {input.post_id} by @{post.author.username}, cost ${cost_usd:.4f}")
         else:
-            activity.logger.info(f"Post {input.post_id} not found (deleted or 404)")
+            activity.logger.info(f"Post {input.post_id} not found (deleted or 404), cost ${cost_usd:.4f}")
         
         return post
     

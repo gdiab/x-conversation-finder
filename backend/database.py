@@ -4,7 +4,7 @@ Database setup and models for SQLite persistence.
 Per B3: Worker and API are separate processes, so in-memory store doesn't work.
 """
 
-from sqlalchemy import create_engine, Column, String, Float, JSON, DateTime
+from sqlalchemy import create_engine, Column, String, Float, JSON, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone
@@ -44,6 +44,7 @@ class BudgetLedgerDB(Base):
     x_cost_usd = Column(Float, default=0.0)
     inference_calls = Column(Float, default=0.0)
     inference_cost_usd = Column(Float, default=0.0)
+    kill_switch = Column(Boolean, default=False)
     last_updated = Column(String, nullable=False)
 
 

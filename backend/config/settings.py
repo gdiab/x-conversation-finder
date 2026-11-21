@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # Budget limits
     daily_spend_limit_usd: float = 5.0
     daily_inference_limit_usd: float = 10.0
+    budget_kill_switch: bool = False
+    
+    # Inference pricing (per-token, NB3)
+    inference_input_token_cost_usd: float = 0.00000015
+    inference_output_token_cost_usd: float = 0.0000006
     
     # Database
     database_url: str = "sqlite:///./x_conversation_finder.db"
