@@ -301,9 +301,6 @@ class ReviewWorkflow:
                     lambda: self.approved or self.skipped,
                     timeout=timedelta(hours=timeout_hours),
                 )
-                
-                # Wait for signal handler to complete
-                await workflow.wait_condition(lambda: True)
             except asyncio.TimeoutError:
                 self.status = ReviewStatus.EXPIRED
                 workflow.logger.info(f"Review expired after {timeout_hours}h")
@@ -364,9 +361,6 @@ class ReviewWorkflow:
                     lambda: self.confirmed,
                     timeout=timedelta(hours=timeout_hours),
                 )
-                
-                # Wait for update handler to complete
-                await workflow.wait_condition(lambda: True)
             except asyncio.TimeoutError:
                 self.status = ReviewStatus.APPROVED_NOT_CONFIRMED
                 workflow.logger.info(f"Approved but not confirmed after {timeout_hours}h")
@@ -455,9 +449,6 @@ class ReviewWorkflow:
         self.approved = True
         self.posted_url = posted_url
         self.status = ReviewStatus.APPROVED
-        
-        # Signal completion
-        await workflow.wait_condition(lambda: True)
     
     @workflow.signal
     async def skip(self, reason: str, client_request_id: str):
@@ -473,9 +464,6 @@ class ReviewWorkflow:
         self.skipped = True
         self.skip_reason = reason
         self.status = ReviewStatus.SKIPPED
-        
-        # Signal completion
-        await workflow.wait_condition(lambda: True)
     
     @workflow.update
     async def confirm_posted(self, reply_url: str, client_request_id: str) -> str:
