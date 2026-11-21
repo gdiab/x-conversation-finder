@@ -22,6 +22,8 @@ class FakeXClient(XClientPort):
     REPLY_TO_PARENT_MAP = {
         # Test compatibility (used by test_review_workflow.py)
         "9999": "1001",
+        # E2E test (used by scripts/e2e-review-direct.sh)
+        "99999": "e2e_9999",
         # 10000-19999 range: replies to 1001-1009
         "10001": "1001", "10002": "1002", "10003": "1003", "10004": "1004", "10005": "1005",
         "10006": "1006", "10007": "1007", "10008": "1008", "10009": "1009",

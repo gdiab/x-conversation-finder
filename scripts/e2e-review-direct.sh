@@ -119,7 +119,7 @@ from backend.config import get_settings
 async def main():
     post = Post(
         id="e2e_9999",
-        text="Just shipped our new distributed consensus algorithm! Handles network partitions gracefully.",
+        text="Just shipped our new reliable distributed system! Handles network partitions gracefully.",
         author=Author(
             id="111",
             username="test_user",
@@ -141,7 +141,7 @@ async def main():
     workflow_input = ReviewInput(
         post=post,
         account="e2e-test",
-        topic="distributed-systems",
+        topic="reliability",
         product_brief="We build tools for reliable distributed systems.",
         confidence_threshold=0.7,
         config=config

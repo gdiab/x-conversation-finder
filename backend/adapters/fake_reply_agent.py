@@ -123,7 +123,7 @@ class FakeReplyAgent(ReplyAgentPort):
             segments = [
                 Segment(
                     kind="non_claim",
-                    text=f"Thanks for raising this point about {evidence.matched_topic}."
+                    text="Thanks!"
                 ),
                 Segment(
                     kind="claim",
@@ -132,7 +132,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    text="Would be happy to share more details if useful."
+                    text="Happy to share more details."
                 ),
             ]
         
