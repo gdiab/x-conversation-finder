@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     # Follow-up settings (ADR-0002: follow-up timer)
     # Set 2026-11-21: 3 days after confirmation
     followup_delay_days: int = 3
+    # Optional: override with seconds for E2E testing (takes precedence over days)
+    followup_delay_seconds: Optional[int] = None
     
     # Activity timeouts (Temporal)
     # Set 2026-11-21: timeouts for activity execution

@@ -19,7 +19,7 @@ export REPLY_AGENT_ADAPTER=fake
 export DATABASE_URL="sqlite:////tmp/x-finder-e2e.db"
 export TEMPORAL_ADDRESS=localhost:7233
 export WATCH_POLL_INTERVAL_HOURS=0  # Immediate poll for testing
-export FOLLOWUP_DELAY_DAYS=0  # Immediate follow-up for testing
+export FOLLOWUP_DELAY_SECONDS=8  # Real durable timer for E2E (8 seconds)
 export REVIEW_TIMEOUT_HOURS=1
 export ACTIVITY_TIMEOUT_SHORT_SEC=10
 export ACTIVITY_TIMEOUT_MEDIUM_SEC=30
@@ -34,7 +34,7 @@ export BUDGET_KILL_SWITCH=false
 
 echo "Configuration:"
 echo "  ADAPTERS: X=$X_CLIENT_ADAPTER, Reply=$REPLY_AGENT_ADAPTER"
-echo "  Follow-up delay: $FOLLOWUP_DELAY_DAYS days (immediate for testing)"
+echo "  Follow-up delay: $FOLLOWUP_DELAY_SECONDS seconds (real durable timer)"
 echo ""
 
 # Initialize database
@@ -184,8 +184,9 @@ echo "$CONFIRM_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$CONFIRM_RE
 echo ""
 
 # Step 6: Wait for follow-up timer to fire
-echo "[6] Waiting 12 seconds for follow-up timer to fire and check_followup to run..."
-sleep 12
+WAIT_TIME=$((FOLLOWUP_DELAY_SECONDS + 4))
+echo "[6] Waiting ${WAIT_TIME}s for follow-up timer (${FOLLOWUP_DELAY_SECONDS}s) to fire and check_followup to run..."
+sleep $WAIT_TIME
 echo ""
 
 # Step 7: Check final status
@@ -214,7 +215,7 @@ echo "✓ TopicWatch started and polled"
 echo "✓ Review card created with draft"
 echo "✓ Review approved with posted URL"
 echo "✓ Posted reply confirmed"
-echo "✓ Follow-up timer fired (~8.6 seconds)"
+echo "✓ Follow-up timer fired (${FOLLOWUP_DELAY_SECONDS}s - real durable timer)"
 echo "✓ check_followup activity executed"
 echo ""
 echo "All operations used fake adapters (no real X API calls)"

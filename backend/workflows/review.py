@@ -49,6 +49,7 @@ class ReviewConfig:
     activity_timeout_long_sec: int = 60
     claim_gate_max_attempts: int = 2
     followup_delay_days: int = 3
+    followup_delay_seconds: Optional[int] = None  # Override for E2E testing
     activity_max_attempts: int = 3
     review_timeout_hours: int = 48
     
@@ -61,6 +62,7 @@ class ReviewConfig:
             activity_timeout_long_sec=settings.activity_timeout_long_sec,
             claim_gate_max_attempts=settings.claim_gate_max_attempts,
             followup_delay_days=settings.followup_delay_days,
+            followup_delay_seconds=settings.followup_delay_seconds,
             activity_max_attempts=settings.activity_max_attempts,
             review_timeout_hours=settings.review_timeout_hours,
         )
@@ -357,9 +359,13 @@ class ReviewWorkflow:
             return "approved_not_confirmed"
         
         # Step 5: Start follow-up timer (from config) - interruptible
-        followup_delay = input.config.followup_delay_days
-        followup_seconds = followup_delay * SECONDS_PER_DAY
-        workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
+        if input.config.followup_delay_seconds is not None:
+            followup_seconds = input.config.followup_delay_seconds
+            workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_seconds}s follow-up timer")
+        else:
+            followup_delay = input.config.followup_delay_days
+            followup_seconds = followup_delay * SECONDS_PER_DAY
+            workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
         
         # Wait for follow-up delay
         await asyncio.sleep(followup_seconds)
