@@ -54,7 +54,13 @@ class ReplyActivities:
         # Reserve inference budget with token estimates (NB3: per-token pricing)
         # Estimate: ~500 input tokens, ~200 output tokens for research
         try:
-            reserved_cost, reservation_date = reserve_inference_budget(input_tokens=500, output_tokens=200)
+            reserved_cost, reservation_date = reserve_inference_budget(
+                input_tokens=500,
+                output_tokens=200,
+                workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
+                activity_id=activity.info().activity_id,
+            )
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
@@ -114,7 +120,13 @@ class ReplyActivities:
         # Reserve inference budget with token estimates (NB3: per-token pricing)
         # Estimate: ~800 input tokens, ~100 output tokens for draft
         try:
-            reserved_cost, reservation_date = reserve_inference_budget(input_tokens=800, output_tokens=100)
+            reserved_cost, reservation_date = reserve_inference_budget(
+                input_tokens=800,
+                output_tokens=100,
+                workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
+                activity_id=activity.info().activity_id,
+            )
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise

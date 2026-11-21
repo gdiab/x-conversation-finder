@@ -260,3 +260,40 @@ async def test_topic_watch_duplicate_post_skipped(make_topic_watch_input, x_acti
             
             # Verify no Review was started for post 1001
             # (it would fail if Review workflow was started since it's already seen)
+
+
+@pytest.mark.asyncio
+async def test_direct_start_with_zero_poll_non_fake_adapter_clamped():
+    """S-3: Direct TopicWatch start with 0h poll on non-fake adapter gets clamped to 1h with warning."""
+    from backend.workflows.topic_watch import TopicWatchInput, TopicWatchConfig
+    from backend.config import get_settings
+    import os
+    
+    # Override adapter to non-fake
+    original_adapter = os.environ.get('X_CLIENT_ADAPTER')
+    os.environ['X_CLIENT_ADAPTER'] = 'real'
+    
+    try:
+        # Clear cached settings
+        from backend.config.settings import get_settings
+        get_settings.cache_clear()
+        
+        # Create input with 0h poll directly (bypasses Settings validation)
+        input_data = TopicWatchInput(
+            account="test_account",
+            topic="test_topic",
+            query="test query",
+            product_brief="test brief",
+            config=TopicWatchConfig(poll_interval_hours=0)
+        )
+        
+        # __post_init__ should clamp to 1h and log warning
+        assert input_data.config.poll_interval_hours == 1, "Should be clamped to 1h"
+    
+    finally:
+        # Restore original adapter
+        if original_adapter:
+            os.environ['X_CLIENT_ADAPTER'] = original_adapter
+        else:
+            os.environ.pop('X_CLIENT_ADAPTER', None)
+        get_settings.cache_clear()

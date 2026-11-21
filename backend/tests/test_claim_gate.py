@@ -569,3 +569,101 @@ async def test_third_party_claim_allowed_with_evidence():
     
     assert result.passed
     assert "1 product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_comes_with_blocked_without_evidence():
+    """S-4: 'comes with' pattern blocked without founder material evidence."""
+    draft_text = "It comes with audit logs."
+    
+    materials = []
+    claims = []
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_comes_with",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_ships_with_blocked_without_evidence():
+    """S-4: 'ships with' pattern blocked without founder material evidence."""
+    draft_text = "This ships with built-in monitoring."
+    
+    materials = []
+    claims = []
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_ships_with",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_includes_blocked_without_evidence():
+    """S-4: 'includes' pattern blocked without founder material evidence."""
+    draft_text = "The platform includes SSO and RBAC."
+    
+    materials = []
+    claims = []
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_includes",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_comes_with_allowed_with_evidence():
+    """S-4: 'comes with' pattern allowed when backed by founder material."""
+    draft_text = "It comes with audit logs."
+    
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform includes comprehensive audit logging for all actions.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    claims = [
+        Claim(
+            text="It comes with audit logs",
+            cited_passage_ids=["passage_0"],
+            quoted_spans=["audit logging"],
+        )
+    ]
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_comes_with_evidence",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert result.passed
+    assert "1 product capability" in result.reasoning.lower()

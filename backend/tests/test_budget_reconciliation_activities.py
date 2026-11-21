@@ -416,7 +416,13 @@ async def test_reconcile_across_continue_as_new():
 
 @pytest.mark.asyncio
 async def test_retried_activity_reuses_reservation():
-    """Test that activity retry (attempt 2) uses same workflow_run_id so reconciliation is idempotent."""
+    """
+    Test that activity retry reuses the same reservation instead of double-reserving.
+    
+    Covers both paths:
+    1. Retry after reconcile: reserve -> reconcile -> retry (reserve again) -> reconcile (idempotent)
+    2. Retry after failure: reserve -> fail -> retry (reserve again) -> reconcile
+    """
     settings = get_settings()
     
     # Get initial ledger state
@@ -431,57 +437,132 @@ async def test_retried_activity_reuses_reservation():
     finally:
         db.close()
     
-    # Reserve budget
-    cost, date = reserve_x_budget(10, settings.x_post_read_cost)
+    # Path 1: reserve -> reconcile -> retry reserve -> retry reconcile
+    # Attempt 1: reserve
+    cost1, date1 = reserve_x_budget(
+        reads_needed=10,
+        cost_per_read=settings.x_post_read_cost,
+        workflow_id="test_wf_retry_path1",
+        workflow_run_id="run-id-path1",
+        activity_id="test_act_retry_path1",
+    )
     
-    # First attempt reconciles
+    # Attempt 1: reconcile
     first_cost = reconcile_x_reads(
         reserved_reads=10,
-        actual_reads=7,
-        reservation_date=date,
-        workflow_id="test_wf_retry",
-        workflow_run_id="same-run-id",  # Same run
-        activity_id="test_act_retry",
+        actual_reads=4,
+        reservation_date=date1,
+        workflow_id="test_wf_retry_path1",
+        workflow_run_id="run-id-path1",
+        activity_id="test_act_retry_path1",
         cost_per_read=settings.x_post_read_cost,
     )
     
-    # Verify first reconciliation
+    # Check ledger after first attempt
     db = get_db()
     try:
         ledger = db.query(BudgetLedgerDB).filter(
-            BudgetLedgerDB.date == date
+            BudgetLedgerDB.date == date1
         ).first()
         reads_after_first = ledger.x_reads
-        cost_after_first = ledger.x_cost_usd
-        assert reads_after_first == initial_reads + 7
+        assert reads_after_first == initial_reads + 4, "First attempt should charge 4 reads"
     finally:
         db.close()
     
-    # Activity retries (attempt 2) - same workflow_run_id means idempotent
+    # Attempt 2: reserve (retry) - should reuse existing reservation
+    cost2, date2 = reserve_x_budget(
+        reads_needed=10,
+        cost_per_read=settings.x_post_read_cost,
+        workflow_id="test_wf_retry_path1",
+        workflow_run_id="run-id-path1",  # Same run_id
+        activity_id="test_act_retry_path1",  # Same activity_id
+    )
+    
+    # Attempt 2: reconcile (should be idempotent no-op)
     second_cost = reconcile_x_reads(
         reserved_reads=10,
-        actual_reads=7,  # Same result
-        reservation_date=date,
-        workflow_id="test_wf_retry",
-        workflow_run_id="same-run-id",  # SAME run_id (retry within same attempt)
-        activity_id="test_act_retry",
+        actual_reads=4,
+        reservation_date=date2,
+        workflow_id="test_wf_retry_path1",
+        workflow_run_id="run-id-path1",
+        activity_id="test_act_retry_path1",
         cost_per_read=settings.x_post_read_cost,
     )
     
-    # Verify ledger unchanged (idempotent - no leak)
+    # Verify ledger did NOT double-count
     db = get_db()
     try:
         ledger = db.query(BudgetLedgerDB).filter(
-            BudgetLedgerDB.date == date
+            BudgetLedgerDB.date == date2
         ).first()
-        assert ledger.x_reads == reads_after_first, "Ledger should be unchanged (idempotent)"
-        assert ledger.x_cost_usd == cost_after_first, "Cost should be unchanged (idempotent)"
-        
-        # Verify only one reconciliation record exists for this workflow
-        recon_count = db.query(BudgetReconciliationDB).filter(
-            BudgetReconciliationDB.reconciliation_key == "test_wf_retry:same-run-id:test_act_retry:x_reads"
-        ).count()
-        assert recon_count == 1, f"Expected 1 reconciliation record, got {recon_count}"
+        reads_after_second = ledger.x_reads
+        assert reads_after_second == initial_reads + 4, f"Ledger should still be {initial_reads + 4}, got {reads_after_second}"
+    finally:
+        db.close()
+    
+    # Path 2: reserve -> fail -> retry reserve -> reconcile
+    # Attempt 1: reserve
+    cost3, date3 = reserve_x_budget(
+        reads_needed=10,
+        cost_per_read=settings.x_post_read_cost,
+        workflow_id="test_wf_retry_path2",
+        workflow_run_id="run-id-path2",
+        activity_id="test_act_retry_path2",
+    )
+    
+    # (Attempt 1 fails before reconcile - no reconcile call)
+    
+    # Check ledger - should have the full reservation
+    db = get_db()
+    try:
+        ledger = db.query(BudgetLedgerDB).filter(
+            BudgetLedgerDB.date == date3
+        ).first()
+        reads_before_retry = ledger.x_reads
+        assert reads_before_retry == initial_reads + 4 + 10, "Failed attempt reserves but doesn't reconcile"
+    finally:
+        db.close()
+    
+    # Attempt 2: reserve (retry) - should reuse existing reservation
+    cost4, date4 = reserve_x_budget(
+        reads_needed=10,
+        cost_per_read=settings.x_post_read_cost,
+        workflow_id="test_wf_retry_path2",
+        workflow_run_id="run-id-path2",  # Same run_id
+        activity_id="test_act_retry_path2",  # Same activity_id
+    )
+    
+    # Check ledger - should NOT have added another 10
+    db = get_db()
+    try:
+        ledger = db.query(BudgetLedgerDB).filter(
+            BudgetLedgerDB.date == date4
+        ).first()
+        reads_after_retry_reserve = ledger.x_reads
+        assert reads_after_retry_reserve == initial_reads + 4 + 10, "Retry reserve should reuse, not add"
+    finally:
+        db.close()
+    
+    # Attempt 2: reconcile (closes the reservation)
+    third_cost = reconcile_x_reads(
+        reserved_reads=10,
+        actual_reads=4,
+        reservation_date=date4,
+        workflow_id="test_wf_retry_path2",
+        workflow_run_id="run-id-path2",
+        activity_id="test_act_retry_path2",
+        cost_per_read=settings.x_post_read_cost,
+    )
+    
+    # Verify final ledger
+    db = get_db()
+    try:
+        ledger = db.query(BudgetLedgerDB).filter(
+            BudgetLedgerDB.date == date4
+        ).first()
+        final_reads = ledger.x_reads
+        # Path 1: +4, Path 2: +4 (10 reserved, reconciled to 4)
+        assert final_reads == initial_reads + 4 + 4, f"Final ledger should be {initial_reads + 8}, got {final_reads}"
     finally:
         db.close()
 

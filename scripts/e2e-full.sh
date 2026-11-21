@@ -16,6 +16,7 @@ export PYTHONPATH="$WORKSPACE_ROOT"
 # Configuration - TEST-ONLY overrides for E2E (never use in production)
 export X_CLIENT_ADAPTER=fake
 export REPLY_AGENT_ADAPTER=fake
+export E2E_X_FIXTURES_PATH="$WORKSPACE_ROOT/backend/tests/fixtures/e2e_x.json"
 export DATABASE_URL="sqlite:////tmp/x-finder-e2e-full.db"
 export TEMPORAL_ADDRESS=localhost:7233
 export WATCH_POLL_INTERVAL_HOURS=0  # TEST-ONLY: Immediate poll (production enforces 1+ hour minimum)

@@ -12,8 +12,8 @@ Per NB3 and R3-B3: Atomic reserve-then-commit in one SQLite transaction (BEGIN I
 from datetime import datetime, timezone
 from sqlalchemy import text
 from temporalio.exceptions import ApplicationError
-from typing import Tuple
-from backend.database import get_db, BudgetLedgerDB, GlobalSettingsDB, BudgetReconciliationDB
+from typing import Tuple, Optional
+from backend.database import get_db, BudgetLedgerDB, GlobalSettingsDB, BudgetReconciliationDB, BudgetReservationDB
 from backend.config import get_settings
 
 
@@ -53,7 +53,13 @@ def _check_kill_switch(db):
         raise BudgetExceeded("Budget kill switch enabled in database")
 
 
-def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tuple[float, str]:
+def reserve_x_budget(
+    reads_needed: int = 1,
+    cost_per_read: float = None,
+    workflow_id: Optional[str] = None,
+    workflow_run_id: Optional[str] = None,
+    activity_id: Optional[str] = None,
+) -> Tuple[float, str]:
     """
     Atomically reserve X API budget.
     
@@ -66,6 +72,10 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tupl
     the last allowed call might reserve reads 91-100, so actual usage could reach 100.
     Reconciliation adjusts down to actual usage but never prevents a reservation that
     would stay within the cap.
+    
+    If workflow_id, workflow_run_id, and activity_id are provided, checks for an existing
+    open reservation with the same key and reuses it instead of creating a new one. This
+    prevents double-reserving on activity retries.
     
     Returns (cost in USD, reservation date YYYY-MM-DD).
     
@@ -87,6 +97,17 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tupl
         db.execute(text("BEGIN IMMEDIATE"))
         
         _check_kill_switch(db)
+        
+        # Check for existing open reservation
+        if workflow_id and workflow_run_id and activity_id:
+            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:x_reads"
+            existing = db.query(BudgetReservationDB).filter(
+                BudgetReservationDB.reservation_key == reservation_key
+            ).first()
+            
+            if existing:
+                db.commit()
+                return existing.cost_usd, existing.reservation_date
         
         ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
         
@@ -133,6 +154,23 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tupl
             ledger.x_cost_usd = projected_cost
             ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
+        # Record the reservation for retry idempotency
+        if workflow_id and workflow_run_id and activity_id:
+            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:x_reads"
+            reservation = BudgetReservationDB(
+                reservation_key=reservation_key,
+                workflow_id=workflow_id,
+                workflow_run_id=workflow_run_id,
+                activity_id=activity_id,
+                reservation_date=today,
+                budget_type='x_reads',
+                reserved_amount=reads_needed,
+                cost_usd=cost,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                reconciled=0,
+            )
+            db.add(reservation)
+        
         db.commit()
         return cost, today
         
@@ -146,13 +184,23 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tupl
         db.close()
 
 
-def reserve_inference_budget(input_tokens: int, output_tokens: int) -> Tuple[float, str]:
+def reserve_inference_budget(
+    input_tokens: int,
+    output_tokens: int,
+    workflow_id: Optional[str] = None,
+    workflow_run_id: Optional[str] = None,
+    activity_id: Optional[str] = None,
+) -> Tuple[float, str]:
     """
     Atomically reserve inference budget.
     
     Uses per-token pricing from config (NB3).
     Uses BEGIN IMMEDIATE transaction for atomic reserve-then-commit.
     Cap enforced on first call too.
+    
+    If workflow_id, workflow_run_id, and activity_id are provided, checks for an existing
+    open reservation with the same key and reuses it instead of creating a new one. This
+    prevents double-reserving on activity retries.
     
     Returns (cost in USD, reservation date YYYY-MM-DD).
     
@@ -167,12 +215,24 @@ def reserve_inference_budget(input_tokens: int, output_tokens: int) -> Tuple[flo
         input_tokens * settings.inference_input_token_cost_usd +
         output_tokens * settings.inference_output_token_cost_usd
     )
+    total_tokens = input_tokens + output_tokens
     
     db = get_db()
     try:
         db.execute(text("BEGIN IMMEDIATE"))
         
         _check_kill_switch(db)
+        
+        # Check for existing open reservation
+        if workflow_id and workflow_run_id and activity_id:
+            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:inference"
+            existing = db.query(BudgetReservationDB).filter(
+                BudgetReservationDB.reservation_key == reservation_key
+            ).first()
+            
+            if existing:
+                db.commit()
+                return existing.cost_usd, existing.reservation_date
         
         ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
         
@@ -201,6 +261,23 @@ def reserve_inference_budget(input_tokens: int, output_tokens: int) -> Tuple[flo
             ledger.inference_calls = current_calls + 1
             ledger.inference_cost_usd = projected_cost
             ledger.last_updated = datetime.now(timezone.utc).isoformat()
+        
+        # Record the reservation for retry idempotency
+        if workflow_id and workflow_run_id and activity_id:
+            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:inference"
+            reservation = BudgetReservationDB(
+                reservation_key=reservation_key,
+                workflow_id=workflow_id,
+                workflow_run_id=workflow_run_id,
+                activity_id=activity_id,
+                reservation_date=today,
+                budget_type='inference',
+                reserved_amount=total_tokens,
+                cost_usd=cost,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                reconciled=0,
+            )
+            db.add(reservation)
         
         db.commit()
         return cost, today
@@ -317,6 +394,14 @@ def reconcile_x_reads(
         )
         db.add(reconciliation)
         
+        # Mark the reservation as reconciled
+        reservation_key_str = f"{workflow_id}:{workflow_run_id}:{activity_id}:{reservation_date}:x_reads"
+        reservation = db.query(BudgetReservationDB).filter(
+            BudgetReservationDB.reservation_key == reservation_key_str
+        ).first()
+        if reservation:
+            reservation.reconciled = 1
+        
         db.commit()
         return actual_cost
         
@@ -426,6 +511,14 @@ def reconcile_inference_tokens(
             budget_type='inference',
         )
         db.add(reconciliation)
+        
+        # Mark the reservation as reconciled
+        reservation_key_str = f"{workflow_id}:{workflow_run_id}:{activity_id}:{reservation_date}:inference"
+        reservation = db.query(BudgetReservationDB).filter(
+            BudgetReservationDB.reservation_key == reservation_key_str
+        ).first()
+        if reservation:
+            reservation.reconciled = 1
         
         db.commit()
         return actual_cost

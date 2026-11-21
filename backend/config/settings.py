@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     x_user_read_cost: float = 0.010
     x_post_create_cost: float = 0.015
     
+    # E2E test fixtures (optional, for FakeXClient only)
+    e2e_x_fixtures_path: str = ""
+    
     # LLM
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
@@ -84,10 +87,12 @@ class Settings(BaseSettings):
         """R5-S3: Enforce minimum poll interval of 1 hour for production.
         
         Exception: 0 hours is allowed only when x_client_adapter='fake' (for tests).
-        This validation runs after all fields are set, so it covers:
+        This validation runs when Settings() is constructed, covering:
         - API endpoint creating TopicWatch via settings.watch_poll_interval_hours
-        - Direct workflow starts that build TopicWatchInput from settings
         - Worker startup validation
+        
+        Direct workflow starts that construct TopicWatchInput(config=TopicWatchConfig(poll_interval_hours=0))
+        bypass this validator and are validated in TopicWatchInput.__post_init__ instead (clamped with warning).
         """
         # Allow 0 only for fake adapter
         if self.watch_poll_interval_hours == 0 and self.x_client_adapter == 'fake':

@@ -31,7 +31,9 @@ async def main():
     
     # X Client adapter
     if settings.x_client_adapter == "fake":
-        x_client = FakeXClient()
+        x_client = FakeXClient(
+            e2e_fixtures_path=settings.e2e_x_fixtures_path if settings.e2e_x_fixtures_path else None
+        )
     elif settings.x_client_adapter == "real":
         if not settings.x_bearer_token:
             logger.error("X_BEARER_TOKEN is required when x_client_adapter=real")

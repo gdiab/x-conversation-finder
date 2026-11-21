@@ -4,7 +4,7 @@ Database setup and models for SQLite persistence.
 Per B3: Worker and API are separate processes, so in-memory store doesn't work.
 """
 
-from sqlalchemy import create_engine, Column, String, Float, JSON, DateTime, Boolean, text
+from sqlalchemy import create_engine, Column, String, Float, JSON, DateTime, Boolean, Integer, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone
@@ -58,6 +58,24 @@ class GlobalSettingsDB(Base):
     key = Column(String, primary_key=True)
     value = Column(String, nullable=False)
     last_updated = Column(String, nullable=False)
+
+
+class BudgetReservationDB(Base):
+    """Track open budget reservations for retry idempotency."""
+    
+    __tablename__ = "budget_reservations"
+    
+    # Composite key: workflow_id:workflow_run_id:activity_id:date:budget_type
+    reservation_key = Column(String, primary_key=True)
+    workflow_id = Column(String, nullable=False)
+    workflow_run_id = Column(String, nullable=False)
+    activity_id = Column(String, nullable=False)
+    reservation_date = Column(String, nullable=False)  # UTC date
+    budget_type = Column(String, nullable=False)  # 'x_reads' or 'inference'
+    reserved_amount = Column(Float, nullable=False)  # reads or tokens
+    cost_usd = Column(Float, nullable=False)
+    created_at = Column(String, nullable=False)
+    reconciled = Column(Integer, default=0)  # 0 = open, 1 = reconciled
 
 
 class BudgetReconciliationDB(Base):

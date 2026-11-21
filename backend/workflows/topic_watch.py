@@ -49,11 +49,29 @@ class TopicWatchInput:
     review_config: ReviewConfig = None
     
     def __post_init__(self):
-        """Default configs if not provided."""
+        """Default configs if not provided, and validate poll interval."""
         if self.config is None:
             object.__setattr__(self, 'config', TopicWatchConfig())
         if self.review_config is None:
             object.__setattr__(self, 'review_config', ReviewConfig())
+        
+        # Validate poll interval floor (S-3: catch direct workflow starts with 0h on non-fake adapter)
+        # Allow 0h only with fake adapter for testing
+        from backend.config import get_settings
+        settings = get_settings()
+        
+        if self.config.poll_interval_hours < 1 and settings.x_client_adapter != 'fake':
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Poll interval {self.config.poll_interval_hours}h is below 1h minimum "
+                f"and adapter is '{settings.x_client_adapter}', clamping to 1h"
+            )
+            object.__setattr__(
+                self.config,
+                'poll_interval_hours',
+                1
+            )
 
 
 @workflow.defn(name="TopicWatch")

@@ -78,7 +78,13 @@ class XActivities:
         # Reserve budget atomically (NB3: reserve-then-commit)
         # This raises BudgetExceeded if cap would be exceeded
         try:
-            reserved_cost, reservation_date = reserve_x_budget(input.max_results, settings.x_post_read_cost)
+            reserved_cost, reservation_date = reserve_x_budget(
+                reads_needed=input.max_results,
+                cost_per_read=settings.x_post_read_cost,
+                workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
+                activity_id=activity.info().activity_id,
+            )
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
@@ -130,7 +136,13 @@ class XActivities:
         
         # Reserve budget atomically (NB3: raise if over budget, never return None)
         try:
-            cost_usd, reservation_date = reserve_x_budget(1, settings.x_post_read_cost)
+            cost_usd, reservation_date = reserve_x_budget(
+                reads_needed=1,
+                cost_per_read=settings.x_post_read_cost,
+                workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
+                activity_id=activity.info().activity_id,
+            )
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
@@ -163,7 +175,13 @@ class XActivities:
         
         # Reserve budget atomically (S-2: check_followup must reserve)
         try:
-            reserved_cost, reservation_date = reserve_x_budget(max_results, settings.x_post_read_cost)
+            reserved_cost, reservation_date = reserve_x_budget(
+                reads_needed=max_results,
+                cost_per_read=settings.x_post_read_cost,
+                workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
+                activity_id=activity.info().activity_id,
+            )
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise

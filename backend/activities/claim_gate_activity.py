@@ -76,6 +76,7 @@ def find_product_capability_sentences(text: str) -> List[str]:
     - Pronoun/implicit subjects: "it"/"this"/"the app"/"the tool"/"the product"/product-name + capability verbs
     - Third-party claims: "they"/"X" + capability verbs (SF-5: catches "They offer a free tier")
     - Integration claims: "works with"/"integrates with" (SF-5: catches "This works with Kafka")
+    - Inclusion claims: "comes with"/"ships with"/"includes" (S-4: catches "It comes with audit logs")
     
     Known limits (acceptable false positives):
     - "They work hard on reliability" (blocked - contains 'they' + capability verb)
@@ -103,12 +104,17 @@ def find_product_capability_sentences(text: str) -> List[str]:
         ))
         has_third_party = bool(re.search(r'\b(?:they|he|she)\b', sentence, re.IGNORECASE))
         has_integration_claim = bool(re.search(r'\bworks?\s+with\b', sentence, re.IGNORECASE))
+        has_inclusion_claim = bool(re.search(
+            r'\b(?:comes?\s+with|ships?\s+with|includes?)\b', 
+            sentence, 
+            re.IGNORECASE
+        ))
         
-        if not (has_first_person or has_pronoun_subject or has_third_party or has_integration_claim):
+        if not (has_first_person or has_pronoun_subject or has_third_party or has_integration_claim or has_inclusion_claim):
             continue
         
-        # "works with" is itself a capability pattern, so no additional verb check needed
-        if has_integration_claim:
+        # "works with", "comes with", "ships with", "includes" are capability patterns - no additional verb check needed
+        if has_integration_claim or has_inclusion_claim:
             capability_sentences.append(sentence.strip())
             continue
         

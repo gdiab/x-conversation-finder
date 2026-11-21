@@ -7,6 +7,8 @@ No real API calls, returns synthetic data.
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 import hashlib
+import json
+from pathlib import Path
 
 from backend.models import Post, Author
 from backend.ports import XClientPort
@@ -18,8 +20,8 @@ class FakeXClient(XClientPort):
     # Explicit reply-to-parent mapping (replaces formula-based derivation)
     # Maps reply post IDs to their conversation/parent IDs
     REPLY_TO_PARENT_MAP = {
-        "9999": "1001",  # E2E test compatibility
-        "99999": "e2e_9999",  # Special E2E case
+        # Test compatibility (used by test_review_workflow.py)
+        "9999": "1001",
         # 10000-19999 range: replies to 1001-1009
         "10001": "1001", "10002": "1002", "10003": "1003", "10004": "1004", "10005": "1005",
         "10006": "1006", "10007": "1007", "10008": "1008", "10009": "1009",
@@ -28,9 +30,48 @@ class FakeXClient(XClientPort):
         # Add more as needed for specific test cases
     }
     
-    def __init__(self):
+    def __init__(self, e2e_fixtures_path: Optional[str] = None):
         self.posts_database = self._generate_fake_posts()
         self.call_count = 0
+        if e2e_fixtures_path:
+            self.load_e2e_fixtures(e2e_fixtures_path)
+    
+    def load_e2e_fixtures(self, fixtures_path: str):
+        """Load E2E-specific fixtures (followup posts, reply mappings) from JSON file."""
+        path = Path(fixtures_path)
+        if not path.exists():
+            raise FileNotFoundError(f"E2E fixtures not found: {fixtures_path}")
+        
+        with open(path, 'r') as f:
+            fixtures = json.load(f)
+        
+        # Load synthetic followup posts
+        for post_data in fixtures.get("synthetic_followup_posts", []):
+            author = Author(
+                id=post_data["author"]["id"],
+                username=post_data["author"]["username"],
+                name=post_data["author"]["name"],
+                followers_count=0,
+                verified=False,
+            )
+            post = Post(
+                id=post_data["id"],
+                text=post_data["text"],
+                author=author,
+                created_at=post_data["created_at"],
+                like_count=0,
+                reply_count=0,
+                repost_count=0,
+                quote_count=0,
+                conversation_id=post_data["conversation_id"],
+                in_reply_to_user_id="founder",
+                reply_settings="everyone",
+            )
+            self.posts_database.append(post)
+        
+        # Load reply-to-parent mappings if present
+        for reply_id, parent_id in fixtures.get("reply_to_parent_map", {}).items():
+            self.REPLY_TO_PARENT_MAP[reply_id] = parent_id
     
     async def search_recent(
         self,
@@ -110,56 +151,6 @@ class FakeXClient(XClientPort):
         base_time = datetime.now(timezone.utc)
         
         posts = []
-        
-        # Add synthetic follow-up replies for E2E testing
-        # These are replies in the conversation thread of post 9999
-        # (used by check_followup activity in E2E test)
-        followup_reply_templates = [
-            {
-                "id": "9999001",
-                "text": "This is really helpful, thanks!",
-                "username": "followup_user1",
-                "name": "Followup User 1",
-                "followers": 100,
-                "hours_ago": 0,
-                "conversation_id": "9999",  # Part of 9999's conversation
-            },
-            {
-                "id": "9999002",
-                "text": "Can you share more details about this?",
-                "username": "followup_user2",
-                "name": "Followup User 2",
-                "followers": 250,
-                "hours_ago": 0,
-                "conversation_id": "9999",  # Part of 9999's conversation
-            },
-        ]
-        
-        for template in followup_reply_templates:
-            author = Author(
-                id=hashlib.md5(template["username"].encode()).hexdigest()[:16],
-                username=template["username"],
-                name=template["name"],
-                followers_count=template["followers"],
-                verified=False,
-            )
-            
-            created_at = base_time - timedelta(hours=template["hours_ago"])
-            
-            post = Post(
-                id=template["id"],
-                text=template["text"],
-                author=author,
-                created_at=created_at.isoformat(),
-                like_count=0,
-                reply_count=0,
-                repost_count=0,
-                quote_count=0,
-                conversation_id=template["conversation_id"],
-                in_reply_to_user_id="founder",
-                reply_settings="everyone",
-            )
-            posts.append(post)
         
         post_templates = [
             {
