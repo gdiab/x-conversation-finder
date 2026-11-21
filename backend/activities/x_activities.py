@@ -57,7 +57,7 @@ class XActivities:
     """X API activities with injected client."""
     
     def __init__(self, x_client: XClientPort):
-        self.x_client = x_client
+        self._x_client = x_client
     
     @activity.defn(name="search_recent")
     async def search_recent(self, input: SearchRecentInput) -> SearchRecentOutput:
@@ -83,7 +83,7 @@ class XActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        posts, newest_id = await self.x_client.search_recent(
+        posts, newest_id = await self._x_client.search_recent(
             query=input.query,
             since_id=input.since_id,
             max_results=input.max_results,
@@ -127,7 +127,7 @@ class XActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        post = await self.x_client.lookup_post(input.post_id)
+        post = await self._x_client.lookup_post(input.post_id)
         
         if post:
             activity.logger.info(f"Found post {input.post_id} by @{post.author.username}, cost ${cost_usd:.4f}")
@@ -150,7 +150,7 @@ class XActivities:
         
         # Search for posts in the conversation thread
         query = f"conversation_id:{input.reply_post_id}"
-        posts, _ = await self.x_client.search_recent(
+        posts, _ = await self._x_client.search_recent(
             query=query,
             max_results=10,
         )

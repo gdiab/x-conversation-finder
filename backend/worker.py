@@ -75,9 +75,13 @@ async def main():
         task_queue="x-conversation-finder",
         workflows=[ReviewWorkflow, TopicWatchWorkflow],
         activities=[
-            # Activity class instances (B5: one registration path, injected deps)
-            x_activities,
-            reply_activities,
+            # Activity class methods (B5: injected deps via constructor)
+            x_activities.search_recent,
+            x_activities.lookup_post,
+            x_activities.check_followup,
+            x_activities.notify,
+            reply_activities.research_post,
+            reply_activities.draft_reply,
             # Standalone activity functions
             store_card,
             update_card,

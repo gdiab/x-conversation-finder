@@ -134,6 +134,16 @@ async def start_watch(request: StartWatchRequest):
     settings = get_settings()
     workflow_id = f"watch:{request.account}:{request.topic}"
     
+    # Create configs for determinism
+    from backend.workflows.review import ReviewConfig
+    from backend.workflows.topic_watch import TopicWatchConfig
+    review_config = ReviewConfig.from_settings(settings)
+    topic_watch_config = TopicWatchConfig(
+        poll_interval_hours=settings.watch_poll_interval_hours,
+        activity_timeout_medium_sec=settings.activity_timeout_medium_sec,
+        activity_max_attempts=settings.activity_max_attempts,
+    )
+    
     try:
         await temporal_client.start_workflow(
             TopicWatchWorkflow.run,
@@ -142,9 +152,10 @@ async def start_watch(request: StartWatchRequest):
                 topic=request.topic,
                 query=request.query,
                 product_brief=request.product_brief,
-                poll_interval_hours=settings.watch_poll_interval_hours,
                 max_results=settings.watch_max_results,
                 confidence_threshold=settings.confidence_threshold,
+                config=topic_watch_config,
+                review_config=review_config,
             ),
             id=workflow_id,
             task_queue="x-conversation-finder",

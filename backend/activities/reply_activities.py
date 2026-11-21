@@ -32,7 +32,7 @@ class ReplyActivities:
     """Reply agent activities with injected agent."""
     
     def __init__(self, reply_agent: ReplyAgentPort):
-        self.reply_agent = reply_agent
+        self._reply_agent = reply_agent
     
     @activity.defn(name="research_post")
     async def research_post(self, input: ResearchPostInput) -> Evidence:
@@ -59,7 +59,7 @@ class ReplyActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        evidence = await self.reply_agent.research(
+        evidence = await self._reply_agent.research(
             post=input.post,
             topic=input.topic,
             product_brief=input.product_brief,
@@ -98,7 +98,7 @@ class ReplyActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        evidence = await self.reply_agent.draft(
+        evidence = await self._reply_agent.draft(
             evidence=input.evidence,
             steer=input.steer,
             idempotency_key=input.idempotency_key,
