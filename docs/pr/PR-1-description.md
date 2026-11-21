@@ -2,7 +2,7 @@
 
 **Status:** ✅ Ready for review  
 **HEAD:** `5eeb730` - Add complete E2E test starting from TopicWatch  
-**Base:** `3973ae2` - R4-B2: Implement real budget reconciliation for reads and tokens  
+**Base:** `dfb08a6` - Initial commit (empty repository)  
 **Tests:** 62/62 passing (0 skipped, 0 xfails)  
 **Frontend:** ✅ Build passing
 
