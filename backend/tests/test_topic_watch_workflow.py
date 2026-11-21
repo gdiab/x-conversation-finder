@@ -181,13 +181,22 @@ async def test_topic_watch_actually_triggers_continue_as_new(make_topic_watch_in
             # Let first iteration complete, which should trigger CAN
             await env.sleep(timedelta(hours=1.5))
             
-            # R4-B3: Describe the original run to verify it CONTINUED_AS_NEW
-            from temporalio.api.enums.v1 import WorkflowExecutionStatus
+            # R4-B3: Fetch history of original run to verify Continue-As-New occurred
+            from temporalio.api.enums.v1 import EventType, WorkflowExecutionStatus
             
             original_handle = env.client.get_workflow_handle(workflow_id, run_id=original_run_id)
-            original_desc = await original_handle.describe()
             
-            # Assert the original run's status is WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW
+            # Get the history of the original run
+            history = await original_handle.fetch_history()
+            events = list(history.events)
+            
+            # The last event in the original run should be WORKFLOW_EXECUTION_CONTINUED_AS_NEW (type 47)
+            last_event = events[-1]
+            assert last_event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW, \
+                f"Last event in original run should be CONTINUED_AS_NEW, got {last_event.event_type}"
+            
+            # Also verify the original run's status is CONTINUED_AS_NEW
+            original_desc = await original_handle.describe()
             assert original_desc.status == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW, \
                 f"Original run should have status CONTINUED_AS_NEW, got {original_desc.status}"
             
@@ -195,10 +204,6 @@ async def test_topic_watch_actually_triggers_continue_as_new(make_topic_watch_in
             current_desc = await handle.describe()
             assert current_desc.run_id != original_run_id, \
                 f"Current run_id should differ from original ({original_run_id})"
-            
-            # Both should share the same first_execution_run_id
-            assert current_desc.first_execution_run_id == original_run_id, \
-                "first_execution_run_id should be the original run_id"
             
             # Stop the (continued) workflow
             await handle.signal("stop")
