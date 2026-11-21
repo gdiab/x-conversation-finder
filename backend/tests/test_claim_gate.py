@@ -212,16 +212,19 @@ async def test_is_closed_set_non_claim_questions():
 
 @pytest.mark.asyncio
 async def test_is_closed_set_non_claim_greetings_thanks():
-    """QA R13: v2.0.0 - Only exact phrase matches pass."""
+    """QA R13: v2.0.0 - Only exact phrase matches pass (after normalization)."""
     # Exact phrase matches from the fixed list
     assert is_closed_set_non_claim("Thanks for sharing.")
     assert is_closed_set_non_claim("Hi!")
     assert is_closed_set_non_claim("Happy to help.")
     assert is_closed_set_non_claim("Thanks!")
     
-    # NOT exact matches - fail (even if they contain phrases)
-    assert not is_closed_set_non_claim("Thanks for sharing!")  # Extra '!'
-    assert not is_closed_set_non_claim("Hi there!")  # "Hi there" not in list
+    # Normalization strips trailing punctuation, so these also match
+    assert is_closed_set_non_claim("Thanks for sharing!")  # Normalizes to match
+    assert is_closed_set_non_claim("Happy to help!")  # Normalizes to match
+    
+    # NOT in phrase list - fail
+    assert not is_closed_set_non_claim("Hi there!")  # "Hi there" not in list (even after normalization)
     assert not is_closed_set_non_claim("Thanks! It's way cheaper.")  # Multiple sentences
     assert not is_closed_set_non_claim("Hi! Ours is 10x quicker.")
     assert not is_closed_set_non_claim("Hello, many teams switched from Temporal to us.")
@@ -261,8 +264,8 @@ async def test_qa_r11_b1_passing_examples():
     assert is_closed_set_non_claim("Thanks!")
     assert is_closed_set_non_claim("Happy to share more details.")
     assert is_closed_set_non_claim("What stack are you on?")
-    # QA R13: "Love this thread" needs "I" prefix to match phrase
-    assert is_closed_set_non_claim("I love this thread.")
+    # QA R13: "I love this thread" was removed (evaluative). Use another phrase.
+    assert is_closed_set_non_claim("Interesting question.")
 
 
 # QA R13: DELETED - Frame assertions test removed in v2.0.0
@@ -468,9 +471,11 @@ async def test_b5a_regression_trailing_question_mark():
 
 @pytest.mark.asyncio
 async def test_b5a_regression_confusables():
-    """B5a: Confusables (Cyrillic) must be detected."""
+    """QA R13: Confusables (Cyrillic) must be detected (TEST-ONLY)."""
+    from backend.gate.non_claim_set import _test_only_matches_backstop
+    
     # Cyrillic S in "Supports SSO"
-    assert _matches_backstop_pattern("Thanks. Ѕupports ЅЅO.")
+    assert _test_only_matches_backstop("Thanks. Ѕupports ЅЅO.")
 
 
 @pytest.mark.asyncio
