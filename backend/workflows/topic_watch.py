@@ -102,7 +102,7 @@ class TopicWatchWorkflow:
                         max_results=input.max_results,
                         idempotency_key=f"{input.account}:{input.topic}:{iteration}",
                     ),
-                    start_to_close_timeout=timedelta(seconds=30),
+                    start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 

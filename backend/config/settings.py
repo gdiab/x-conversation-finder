@@ -58,6 +58,22 @@ class Settings(BaseSettings):
     # Follow-up settings (ADR-0002: follow-up timer)
     # Set 2026-11-21: 3 days after confirmation
     followup_delay_days: int = 3
+    followup_check_max_results: int = 10
+    
+    # Activity timeouts (Temporal)
+    # Set 2026-11-21: timeouts for activity execution
+    activity_timeout_short_sec: int = 10  # DB operations
+    activity_timeout_medium_sec: int = 30  # X API reads
+    activity_timeout_long_sec: int = 60  # LLM calls
+    
+    # Retry policy
+    activity_max_attempts: int = 3
+    
+    # Claim gate settings
+    claim_gate_max_attempts: int = 2
+    
+    # Continue-As-New threshold
+    can_threshold_posts: int = 100
     
     # Adapter selection (B5: injected adapters)
     # Set 2026-11-21: "fake" for tests, "real" for production

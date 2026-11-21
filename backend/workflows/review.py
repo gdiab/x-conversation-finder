@@ -135,7 +135,7 @@ class ReviewWorkflow:
             
             # Step 2: Draft (with claim gate retry logic)
             claim_gate_attempts = 0
-            max_claim_gate_attempts = 2
+            max_claim_gate_attempts = settings.claim_gate_max_attempts
             
             while claim_gate_attempts < max_claim_gate_attempts:
                 claim_gate_attempts += 1
@@ -149,8 +149,8 @@ class ReviewWorkflow:
                         steer=steer,
                         idempotency_key=f"{input.post.id}:draft:attempt{claim_gate_attempts}",
                     ),
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
+                    start_to_close_timeout=timedelta(seconds=settings.activity_timeout_long_sec),
+                    retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
                 )
                 
                 # Run deterministic claim gate
@@ -162,7 +162,7 @@ class ReviewWorkflow:
                             founder_materials=evidence.founder_materials,
                             idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
                         ),
-                        start_to_close_timeout=timedelta(seconds=10),
+                        start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
                     )
                     
                     # Update evidence with gate result
