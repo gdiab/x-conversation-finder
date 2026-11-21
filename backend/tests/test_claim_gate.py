@@ -317,6 +317,70 @@ async def test_b5b_its_handling():
 
 
 @pytest.mark.asyncio
+async def test_regression_modal_swap_rejected():
+    """Regression: Modal swap (changing can/might/will) must be rejected.
+    
+    QA r10: Passage says "can support SSO", model outputs "supports SSO".
+    This is not verbatim and must be rejected.
+    """
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product can support SSO authentication.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Model tries to output "supports SSO" (modal swap: can → does)
+    # This fails because it's not closed-set non_claim (has SSO backstop)
+    segments = [
+        Segment(kind="non_claim", text="Supports SSO authentication."),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_modal_swap"
+    ))
+    
+    assert not result.passed  # Backstop catches "SSO", requires verbatim citation
+    assert len(result.failed_sentences) > 0
+
+
+@pytest.mark.asyncio
+async def test_regression_dropped_qualifier_rejected():
+    """Regression: Dropped qualifiers (hedge words) must be rejected.
+    
+    QA r10: Passage says "might support SSO in the future", model outputs "supports SSO".
+    This drops the qualifier and must be rejected.
+    """
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="We might support SSO in the future.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Model tries to output "supports SSO" (dropped qualifier: might...in the future)
+    # This fails because it's not closed-set non_claim (has SSO backstop)
+    segments = [
+        Segment(kind="non_claim", text="We support SSO."),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_dropped_qualifier"
+    ))
+    
+    assert not result.passed  # Backstop catches "SSO", requires verbatim citation
+    assert len(result.failed_sentences) > 0
+
+
+@pytest.mark.asyncio
 async def test_regression_paraphrase_rejected():
     """Regression: Paraphrased claims (not verbatim) must be rejected.
     

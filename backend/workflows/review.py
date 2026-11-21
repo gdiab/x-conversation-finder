@@ -130,6 +130,8 @@ class ReviewWorkflow:
         self.edited_text_gate_results: Optional[List[SentenceGateResult]] = None
         self.post_anyway: Optional[bool] = None
         self.post_anyway_failing_sentences: Optional[List[str]] = None
+        # S-3: Concurrency guard for edit-in-flight
+        self._edit_in_flight = False
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -490,14 +492,18 @@ class ReviewWorkflow:
         Validator for approve Update.
         
         Per ADR-0006 Amendment E: Rejects approve without post_anyway=True when edited text fails gate.
-        S-3: The edit Update completes (and sets self.edited_text_gate_results) before returning,
-        so by the time approve is called, the latest edit's gate result is already recorded in workflow memory.
+        S-3: Concurrency guard - rejects if edit is in flight to prevent race condition where
+        approve sees stale edited_text_gate_results while edit's gate activity is running.
         """
         if self.status not in ["pending", "approved"]:
             raise ValueError(f"Cannot approve in status {self.status}")
         
+        # S-3: Reject if edit is currently in flight - we can't safely check gate results yet
+        if self._edit_in_flight:
+            raise ValueError("Cannot approve while edit gate is in progress. Retry after edit completes.")
+        
         # Check if edited text exists and has failing sentences
-        # S-3: This check happens after edit completes, so we see the latest gate results
+        # S-3: Now safe to check - edit completed and set the latest gate results
         if self.edited_text_gate_results:
             has_failures = any(not r.passed for r in self.edited_text_gate_results)
             if has_failures and not post_anyway:
@@ -637,42 +643,51 @@ class ReviewWorkflow:
         
         workflow_id = workflow.info().workflow_id
         
-        # Re-gate edited text (ADR-0006 Amendment E)
-        workflow.logger.info(f"Running re-gate on edited text")
-        gate_results = await workflow.execute_activity(
-            verify_edited_text,
-            EditedTextGateInput(
-                edited_text=new_text,
-                gated_segments=self.evidence.draft.segments,
-                founder_materials=self.evidence.founder_materials,
-                idempotency_key=f"{workflow_id}:edit_gate:{client_request_id}",
-            ),
-            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_medium_sec),
-            result_type=List[SentenceGateResult],
-        )
-        
-        # Store gate results
-        self.edited_text_gate_results = gate_results
-        
-        # Log gate results
-        passed_count = sum(1 for r in gate_results if r.passed)
-        workflow.logger.info(
-            f"Edit gate: {passed_count}/{len(gate_results)} sentences passed"
-        )
-        
-        # Update card with edited text and gate results
-        await workflow.execute_activity(
-            update_card,
-            UpdateCardInput(
-                workflow_id=workflow_id,
-                idempotency_key=f"{workflow_id}:update:edit:{client_request_id}",
-                evidence=self.evidence,
-                edited_text_gate_results=gate_results,
-            ),
-            start_to_close_timeout=timedelta(seconds=10),
-        )
-        
-        return self.evidence.draft.text
+        # S-3: Set edit-in-flight flag to prevent concurrent approve from seeing stale gate results
+        # Concurrency scenario: Client A calls edit (awaits gate activity), Client B calls approve
+        # while gate is running. Without this guard, B's validator sees old edited_text_gate_results
+        # and incorrectly allows approval. The flag ensures A's validator rejects until edit completes.
+        self._edit_in_flight = True
+        try:
+            # Re-gate edited text (ADR-0006 Amendment E)
+            workflow.logger.info(f"Running re-gate on edited text")
+            gate_results = await workflow.execute_activity(
+                verify_edited_text,
+                EditedTextGateInput(
+                    edited_text=new_text,
+                    gated_segments=self.evidence.draft.segments,
+                    founder_materials=self.evidence.founder_materials,
+                    idempotency_key=f"{workflow_id}:edit_gate:{client_request_id}",
+                ),
+                start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_medium_sec),
+                result_type=List[SentenceGateResult],
+            )
+            
+            # Store gate results
+            self.edited_text_gate_results = gate_results
+            
+            # Log gate results
+            passed_count = sum(1 for r in gate_results if r.passed)
+            workflow.logger.info(
+                f"Edit gate: {passed_count}/{len(gate_results)} sentences passed"
+            )
+            
+            # Update card with edited text and gate results
+            await workflow.execute_activity(
+                update_card,
+                UpdateCardInput(
+                    workflow_id=workflow_id,
+                    idempotency_key=f"{workflow_id}:update:edit:{client_request_id}",
+                    evidence=self.evidence,
+                    edited_text_gate_results=gate_results,
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            return self.evidence.draft.text
+        finally:
+            # S-3: Clear flag so approve can proceed
+            self._edit_in_flight = False
     
     @edit.validator
     def validate_edit(self, new_text: str, client_request_id: str) -> None:
