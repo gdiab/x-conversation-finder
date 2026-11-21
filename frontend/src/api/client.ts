@@ -40,18 +40,20 @@ export interface ReviewCard {
     draft: {
       text: string;
       segments: Array<{
-        text: string;
         kind: "claim" | "non_claim";
-        source_passage_id: string | null;
-        sentence_index: number | null;
+        text: string;
+        phrase_id?: string;
+        source_passage_id?: string;
+        sentence_index?: number;
       }>;
       claim_gate: {
         passed: boolean;
         segments: Array<{
-          text: string;
           kind: "claim" | "non_claim";
-          source_passage_id: string | null;
-          sentence_index: number | null;
+          text: string;
+          phrase_id?: string;
+          source_passage_id?: string;
+          sentence_index?: number;
         }>;
         failed_sentences: Array<{
           sentence: string;
