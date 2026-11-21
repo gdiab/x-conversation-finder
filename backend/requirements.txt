@@ -1,5 +1,5 @@
 # Temporal
-temporalio>=1.7.1,<2.0
+temporalio==1.7.1
 
 # Web framework for API
 fastapi==0.115.5

@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Optional, Literal
 
 from .evidence import Evidence
@@ -10,17 +9,6 @@ from .post import Post
 
 # R4-B1: Status as Literal for boundary crossing (temporalio enum serialization issue)
 ReviewStatusStr = Literal["pending", "approved", "approved_not_confirmed", "skipped", "expired", "followup_due"]
-
-
-class ReviewStatus(str, Enum):
-    """Review workflow status."""
-    
-    PENDING = "pending"
-    APPROVED = "approved"
-    APPROVED_NOT_CONFIRMED = "approved_not_confirmed"
-    SKIPPED = "skipped"
-    EXPIRED = "expired"
-    FOLLOWUP_DUE = "followup_due"
 
 
 @dataclass

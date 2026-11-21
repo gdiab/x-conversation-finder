@@ -29,15 +29,6 @@ class TopicWatchConfig:
     poll_interval_hours: int = 3
     activity_timeout_medium_sec: int = 30
     activity_max_attempts: int = 3
-    
-    @staticmethod
-    def from_settings(settings):
-        """Create TopicWatchConfig from Settings."""
-        return TopicWatchConfig(
-            poll_interval_hours=settings.poll_interval_hours,
-            activity_timeout_medium_sec=settings.activity_timeout_medium_sec,
-            activity_max_attempts=settings.activity_max_attempts,
-        )
 
 
 @dataclass

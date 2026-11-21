@@ -358,7 +358,7 @@ class ReviewWorkflow:
             
             return "approved_not_confirmed"
         
-        # Step 5: Start follow-up timer (from config) - interruptible
+        # Step 5: Start follow-up timer (from config) - cannot be cancelled (R4-SF2)
         if input.config.followup_delay_seconds is not None:
             followup_seconds = input.config.followup_delay_seconds
             workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_seconds}s follow-up timer")

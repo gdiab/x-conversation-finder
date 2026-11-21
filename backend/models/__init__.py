@@ -2,7 +2,7 @@
 
 from .evidence import Evidence, FounderMaterial, Claim, ClaimGateResult, Draft
 from .post import Post, Author
-from .review import ReviewCard, ReviewStatus
+from .review import ReviewCard
 
 __all__ = [
     "Evidence",
@@ -13,5 +13,4 @@ __all__ = [
     "Post",
     "Author",
     "ReviewCard",
-    "ReviewStatus",
 ]

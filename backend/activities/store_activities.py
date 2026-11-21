@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import asyncio
 
-from backend.models import ReviewCard, ReviewStatus, Evidence
+from backend.models import ReviewCard, Evidence
 from backend.database import get_db, ReviewCardDB
 
 
