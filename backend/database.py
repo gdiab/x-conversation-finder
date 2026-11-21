@@ -10,8 +10,11 @@ from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone
 from typing import Optional
 import json
+import logging
 
 from backend.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -63,13 +66,15 @@ _SessionLocal = None
 
 
 def get_engine():
-    """Get or create the database engine."""
+    """Get or create the database engine (B3: resolved to absolute path)."""
     global _engine
     if _engine is None:
         settings = get_settings()
+        resolved_url = settings.get_resolved_database_url()
+        logger.info(f"Database URL resolved to: {resolved_url}")
         _engine = create_engine(
-            settings.database_url,
-            connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {}
+            resolved_url,
+            connect_args={"check_same_thread": False} if "sqlite" in resolved_url else {}
         )
         Base.metadata.create_all(_engine)
     return _engine

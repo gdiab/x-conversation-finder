@@ -2,6 +2,8 @@
 
 from functools import lru_cache
 from typing import Optional
+from pathlib import Path
+import os
 
 from pydantic_settings import BaseSettings
 
@@ -41,8 +43,34 @@ class Settings(BaseSettings):
     inference_input_token_cost_usd: float = 0.00000015
     inference_output_token_cost_usd: float = 0.0000006
     
-    # Database
-    database_url: str = "sqlite:///./x_conversation_finder.db"
+    # Database (B3: absolute path so worker and API resolve to same file)
+    database_url: str = ""
+    
+    def get_resolved_database_url(self) -> str:
+        """
+        Resolve database_url to an absolute path.
+        
+        Per B3: Both worker and API must resolve to the same file.
+        Default: sqlite:////<repo>/data/x_conversation_finder.db
+        """
+        if not self.database_url:
+            # Default: data/ folder in repo root
+            repo_root = Path(__file__).parent.parent.parent
+            data_dir = repo_root / "data"
+            data_dir.mkdir(exist_ok=True)
+            db_path = data_dir / "x_conversation_finder.db"
+            return f"sqlite:///{db_path.absolute()}"
+        
+        # If already starts with sqlite:///, parse and resolve
+        if self.database_url.startswith("sqlite:///"):
+            path_part = self.database_url[len("sqlite:///"):]
+            if path_part.startswith("./") or not path_part.startswith("/"):
+                # Relative path - resolve against repo root
+                repo_root = Path(__file__).parent.parent.parent
+                resolved = (repo_root / path_part).absolute()
+                return f"sqlite:///{resolved}"
+        
+        return self.database_url
     
     # Topic watch settings (ADR-0005: X access polling)
     # Set 2026-11-21: 3h poll interval matches ADR-0005
