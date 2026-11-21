@@ -180,8 +180,9 @@ async def list_reviews():
     """List all review cards."""
     cards = get_all_cards()
     
+    # get_all_cards() returns dicts directly (NN1: no double JSON encoding)
     return {
-        "cards": [card.to_dict() for card in cards],
+        "cards": cards,
         "count": len(cards),
     }
 
