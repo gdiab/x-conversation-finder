@@ -1,7 +1,7 @@
 """Evidence and claim models."""
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 
 
 @dataclass
@@ -15,8 +15,26 @@ class FounderMaterial:
 
 
 @dataclass
+class Segment:
+    """
+    A segment of reply text with its classification.
+    
+    Per ADR-0006 Amendment 2026-11-21:
+    - text: the segment text
+    - kind: 'claim' or 'non_claim' (str literal, not enum - Temporal activity boundary requirement)
+    - source_passage_id: ID of the founder material passage (for claims)
+    - quote: exact quote from the cited passage (for claims)
+    """
+    
+    text: str
+    kind: Literal["claim", "non_claim"]
+    source_passage_id: Optional[str] = None
+    quote: Optional[str] = None
+
+
+@dataclass
 class Claim:
-    """A product claim with cited evidence."""
+    """A product claim with cited evidence (legacy structure for backwards compatibility)."""
     
     text: str
     cited_passage_ids: List[str]
@@ -28,9 +46,12 @@ class ClaimGateResult:
     """Result of claim gate validation."""
     
     passed: bool
-    claims: List[Claim]
-    failed_claims: List[tuple[Claim, str]]
+    segments: List[Segment]  # New segment-based structure
+    failed_sentences: List[tuple[str, str]]  # (sentence, reason)
     reasoning: str
+    # Legacy fields for backwards compatibility
+    claims: List[Claim] = field(default_factory=list)
+    failed_claims: List[tuple[Claim, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -38,6 +59,7 @@ class Draft:
     """Draft reply with metadata."""
     
     text: str
+    segments: List[Segment]  # Structured segments from the model
     claim_gate: ClaimGateResult
     steers_applied: List[str] = field(default_factory=list)
     token_count: int = 0

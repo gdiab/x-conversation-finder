@@ -105,8 +105,35 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
             ],
             "draft": {
                 "text": card.evidence.draft.text,
+                "segments": [
+                    {
+                        "text": s.text,
+                        "kind": s.kind,
+                        "source_passage_id": s.source_passage_id,
+                        "quote": s.quote,
+                    }
+                    for s in card.evidence.draft.segments
+                ],
                 "claim_gate": {
                     "passed": card.evidence.draft.claim_gate.passed,
+                    "segments": [
+                        {
+                            "text": s.text,
+                            "kind": s.kind,
+                            "source_passage_id": s.source_passage_id,
+                            "quote": s.quote,
+                        }
+                        for s in card.evidence.draft.claim_gate.segments
+                    ],
+                    "failed_sentences": [
+                        {
+                            "sentence": sentence,
+                            "reason": reason,
+                        }
+                        for sentence, reason in card.evidence.draft.claim_gate.failed_sentences
+                    ],
+                    "reasoning": card.evidence.draft.claim_gate.reasoning,
+                    # Legacy fields for backwards compatibility
                     "claims": [
                         {
                             "text": c.text,
@@ -126,11 +153,12 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                         }
                         for c, reason in card.evidence.draft.claim_gate.failed_claims
                     ],
-                    "reasoning": card.evidence.draft.claim_gate.reasoning,
                 },
                 "steers_applied": card.evidence.draft.steers_applied,
                 "token_count": card.evidence.draft.token_count,
                 "model_used": card.evidence.draft.model_used,
+                "input_tokens": card.evidence.draft.input_tokens,
+                "output_tokens": card.evidence.draft.output_tokens,
             } if card.evidence.draft else None,
             "skip_reason": card.evidence.skip_reason,
         },
@@ -210,8 +238,35 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                 if hasattr(value, 'draft') and value.draft:
                     evidence_data["draft"] = {
                         "text": value.draft.text,
+                        "segments": [
+                            {
+                                "text": s.text,
+                                "kind": s.kind,
+                                "source_passage_id": s.source_passage_id,
+                                "quote": s.quote,
+                            }
+                            for s in value.draft.segments
+                        ],
                         "claim_gate": {
                             "passed": value.draft.claim_gate.passed,
+                            "segments": [
+                                {
+                                    "text": s.text,
+                                    "kind": s.kind,
+                                    "source_passage_id": s.source_passage_id,
+                                    "quote": s.quote,
+                                }
+                                for s in value.draft.claim_gate.segments
+                            ],
+                            "failed_sentences": [
+                                {
+                                    "sentence": sentence,
+                                    "reason": reason,
+                                }
+                                for sentence, reason in value.draft.claim_gate.failed_sentences
+                            ],
+                            "reasoning": value.draft.claim_gate.reasoning,
+                            # Legacy fields
                             "claims": [
                                 {
                                     "text": c.text,
@@ -231,11 +286,12 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                                 }
                                 for c, reason in value.draft.claim_gate.failed_claims
                             ],
-                            "reasoning": value.draft.claim_gate.reasoning,
                         },
                         "steers_applied": value.draft.steers_applied,
                         "token_count": value.draft.token_count,
                         "model_used": value.draft.model_used,
+                        "input_tokens": value.draft.input_tokens,
+                        "output_tokens": value.draft.output_tokens,
                     }
                 card_db.evidence_data = evidence_data
         

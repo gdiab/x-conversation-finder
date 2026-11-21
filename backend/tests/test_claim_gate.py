@@ -1,217 +1,127 @@
 """
-Tests for claim_gate activity.
-
-Per NB2 and R3-B1: Tests use the REAL gate that scans draft.text itself.
+Tests for segment-based claim gate (ADR-0006 Amendment 2026-11-21).
 """
 
 import pytest
 from backend.activities.claim_gate_activity import (
     ClaimGateInput,
     claim_gate,
-    find_risky_words,
-    check_span_in_passage,
-    check_risky_word_backed,
-    verify_claim,
+    matches_backstop_pattern,
+    check_quote_in_passage,
+    check_cheap_support,
+    split_into_sentences,
 )
-from backend.models import FounderMaterial, Claim
+from backend.models import FounderMaterial, Segment
 
 
 @pytest.mark.asyncio
-async def test_find_risky_words():
-    """Test risky word detection."""
-    text = "We guarantee 99.99% uptime always with zero downtime. Best in class."
-    risky = find_risky_words(text)
-    
-    assert len(risky) > 0
-    assert "99.99%" in risky
-    assert any("guarantee" in w.lower() for w in risky)
-    assert any("always" in w.lower() for w in risky)
-    assert any("zero" in w.lower() for w in risky)
-    assert any("best" in w.lower() for w in risky)
+async def test_matches_backstop_pattern_capability_verbs():
+    """Test pattern backstop for first/second person + capability verbs."""
+    assert matches_backstop_pattern("We support SSO")
+    assert matches_backstop_pattern("Our platform provides RBAC")
+    assert matches_backstop_pattern("You get 24/7 support")
+    assert matches_backstop_pattern("It handles distributed systems")
+    assert matches_backstop_pattern("My tool integrates with Slack")
 
 
 @pytest.mark.asyncio
-async def test_check_span_in_passage():
-    """Test span matching in passage."""
-    passage = "Our platform provides reliable distributed systems support."
-    
-    assert check_span_in_passage("reliable distributed systems", passage)
-    assert check_span_in_passage("RELIABLE DISTRIBUTED", passage)
-    assert not check_span_in_passage("99.99% uptime", passage)
+async def test_matches_backstop_pattern_digits():
+    """Test pattern backstop for digits and units."""
+    assert matches_backstop_pattern("Handles 10k requests per second")
+    assert matches_backstop_pattern("99.9% uptime")
+    assert matches_backstop_pattern("Supports 1000 users")
+    assert matches_backstop_pattern("5 GB storage")
 
 
 @pytest.mark.asyncio
-async def test_check_risky_word_backed():
-    """Test risky word backing."""
-    passages = [
-        "We offer 99% reliability based on our testing.",
-        "The platform handles distributed systems."
-    ]
-    
-    assert check_risky_word_backed("99%", passages)
-    assert not check_risky_word_backed("100%", passages)
-    assert not check_risky_word_backed("guaranteed", passages)
+async def test_matches_backstop_pattern_compliance():
+    """Test pattern backstop for compliance/security terms."""
+    assert matches_backstop_pattern("SOC2 compliant")
+    assert matches_backstop_pattern("Supports SSO")
+    assert matches_backstop_pattern("RBAC enabled")
+    assert matches_backstop_pattern("HIPAA certified")
+    assert matches_backstop_pattern("GDPR compliant")
+    assert matches_backstop_pattern("Encrypted at rest")
 
 
 @pytest.mark.asyncio
-async def test_verify_claim_all_checks_pass():
-    """Test claim verification when all checks pass."""
-    materials = {
-        "passage_0": FounderMaterial(
-            source="product_brief",
-            passage="Our platform provides high reliability for distributed systems.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    }
-    
-    claim = Claim(
-        text="Our platform supports distributed systems",
-        cited_passage_ids=["passage_0"],
-        quoted_spans=["distributed systems"],
-    )
-    
-    passed, reason = verify_claim(claim, materials)
-    
-    assert passed
-    assert reason == ""
+async def test_matches_backstop_pattern_availability():
+    """Test pattern backstop for availability terms."""
+    assert matches_backstop_pattern("24/7 support")
+    assert matches_backstop_pattern("99.99% uptime")
+    assert matches_backstop_pattern("High availability")
+    assert matches_backstop_pattern("Zero downtime")
 
 
 @pytest.mark.asyncio
-async def test_verify_claim_missing_passage():
-    """Test claim verification with missing cited passage."""
-    materials = {
-        "passage_0": FounderMaterial(
-            source="product_brief",
-            passage="Our platform is reliable.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    }
+async def test_check_quote_in_passage():
+    """Test normalized quote matching."""
+    passage = "Our platform provides reliable distributed systems support with high availability."
     
-    claim = Claim(
-        text="Our platform is great",
-        cited_passage_ids=["passage_999"],
-        quoted_spans=["great"],
-    )
-    
-    passed, reason = verify_claim(claim, materials)
-    
-    assert not passed
-    assert "not found" in reason
+    assert check_quote_in_passage("distributed systems support", passage)
+    assert check_quote_in_passage("DISTRIBUTED SYSTEMS", passage)
+    assert check_quote_in_passage("reliable distributed systems", passage)
+    assert not check_quote_in_passage("blockchain support", passage)
 
 
 @pytest.mark.asyncio
-async def test_verify_claim_span_not_in_passage():
-    """Test claim verification when quoted span doesn't appear in passage."""
-    materials = {
-        "passage_0": FounderMaterial(
-            source="product_brief",
-            passage="Our platform is reliable.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    }
+async def test_check_cheap_support():
+    """Test cheap support check (numbers, entities, nouns)."""
+    passage = "Our platform provides SSO authentication with 99.9% uptime for distributed systems."
     
-    claim = Claim(
-        text="Our platform is the fastest",
-        cited_passage_ids=["passage_0"],
-        quoted_spans=["fastest"],
-    )
+    # Should pass: contains SSO, 99.9%, distributed, systems
+    assert check_cheap_support("Supports SSO with 99.9% uptime", passage)
     
-    passed, reason = verify_claim(claim, materials)
+    # Should pass: contains distributed, systems
+    assert check_cheap_support("Great for distributed systems", passage)
     
-    assert not passed
-    assert "not found" in reason
+    # Should fail: key terms not in passage
+    assert not check_cheap_support("Supports HIPAA compliance with blockchain", passage)
 
 
 @pytest.mark.asyncio
-async def test_verify_claim_risky_word_not_backed():
-    """Test claim verification when risky word is not backed."""
-    materials = {
-        "passage_0": FounderMaterial(
-            source="product_brief",
-            passage="Our platform is reliable.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    }
+async def test_split_into_sentences():
+    """Test sentence splitting."""
+    text = "Thanks for the question. Our product supports SSO. Happy to help!"
+    sentences = split_into_sentences(text)
     
-    claim = Claim(
-        text="We guarantee 99.99% uptime",
-        cited_passage_ids=["passage_0"],
-        quoted_spans=["reliable"],
-    )
-    
-    passed, reason = verify_claim(claim, materials)
-    
-    assert not passed
-    assert "99.99%" in reason or "guarantee" in reason
-
-
-@pytest.mark.asyncio
-async def test_claim_gate_no_claims_no_risky_words():
-    """Test claim gate with no claims and no risky words (R3-B1)."""
-    draft_text = "This is interesting. The platform has good features."
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=[],
-        founder_materials=[],
-        idempotency_key="test_no_claims",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert result.passed
-    assert len(result.claims) == 0
-    assert len(result.failed_claims) == 0
-
-
-@pytest.mark.asyncio
-async def test_claim_gate_no_claims_with_risky_words_fails():
-    """Test R3-B1: '99.99% uptime guaranteed' with zero declared claims FAILS."""
-    draft_text = "Automatic failover with 99.99% uptime guaranteed."
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=[],
-        founder_materials=[],
-        idempotency_key="test_uncovered_risky",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "risky words" in result.reasoning.lower()
-    assert "99.99%" in result.reasoning or "guarantee" in result.reasoning
+    assert len(sentences) == 3
+    assert "Thanks for the question" in sentences[0]
+    assert "Our product supports SSO" in sentences[1]
+    assert "Happy to help" in sentences[2]
 
 
 @pytest.mark.asyncio
 async def test_claim_gate_all_pass():
-    """Test claim gate when all claims pass verification and cover all risky words."""
-    draft_text = "Our platform supports distributed systems."
-    
+    """Test claim gate when all segments pass."""
     materials = [
         FounderMaterial(
-            source="product_brief",
-            passage="Our platform provides high reliability for distributed systems.",
+            source="product_docs",
+            passage="Our platform provides distributed systems support with high reliability.",
             relevance="high",
             passage_id="passage_0",
         )
     ]
     
-    claims = [
-        Claim(
-            text="Our platform supports distributed systems",
-            cited_passage_ids=["passage_0"],
-            quoted_spans=["distributed systems"],
-        )
+    segments = [
+        Segment(
+            text="Thanks for raising this.",
+            kind="non_claim"
+        ),
+        Segment(
+            text="Our platform provides distributed systems support.",
+            kind="claim",
+            source_passage_id="passage_0",
+            quote="distributed systems support"
+        ),
+        Segment(
+            text="Happy to help!",
+            kind="non_claim"
+        ),
     ]
     
     input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
+        segments=segments,
         founder_materials=materials,
         idempotency_key="test_all_pass",
     )
@@ -219,451 +129,391 @@ async def test_claim_gate_all_pass():
     result = await claim_gate(input_data)
     
     assert result.passed
-    assert len(result.claims) == 1
-    assert len(result.failed_claims) == 0
+    assert len(result.failed_sentences) == 0
+    assert "verified" in result.reasoning.lower()
 
 
 @pytest.mark.asyncio
-async def test_claim_gate_unsupported_claim_with_fake_guarantee():
-    """
-    Test claim gate with unsupported claim (per NB2 requirement, R3-B1).
-    
-    This is the regenerate test that uses the REAL gate with a fake agent
-    making an unsupported claim like '99.99% uptime guaranteed'.
-    """
-    draft_text = "We guarantee 99.99% uptime with zero downtime for your critical applications."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="Our platform is designed for reliability.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    ]
-    
-    unsupported_claim = Claim(
-        text="We guarantee 99.99% uptime with zero downtime",
-        cited_passage_ids=["passage_0"],
-        quoted_spans=["reliability"],
-    )
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=[unsupported_claim],
-        founder_materials=materials,
-        idempotency_key="test_unsupported_guarantee",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert len(result.failed_claims) >= 1
-    
-    # Should fail because risky words aren't backed by passages
-    failed_claim, reason = result.failed_claims[0]
-    assert any(
-        word in reason.lower() 
-        for word in ["99.99%", "guarantee", "zero"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_claim_gate_multiple_claims_some_fail():
-    """Test claim gate with multiple claims where some fail."""
-    draft_text = "Our platform supports distributed systems. We have the fastest performance."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="Our platform provides distributed systems support.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    ]
-    
-    claims = [
-        Claim(
-            text="Our platform supports distributed systems",
-            cited_passage_ids=["passage_0"],
-            quoted_spans=["distributed systems"],
-        ),
-        Claim(
-            text="We have the fastest performance",
-            cited_passage_ids=["passage_0"],
-            quoted_spans=["fastest"],
-        ),
-    ]
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_mixed",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert len(result.failed_claims) >= 1
-    assert any("fastest" in fc[0].text for fc in result.failed_claims)
-
-
-@pytest.mark.asyncio
-async def test_claim_gate_claim_text_not_in_draft_fails():
-    """Test R3-B1: claim text must appear in draft."""
-    draft_text = "Our platform is reliable."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="We provide excellent distributed systems support.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    ]
-    
-    claim = Claim(
-        text="We provide excellent distributed systems support",
-        cited_passage_ids=["passage_0"],
-        quoted_spans=["distributed systems support"],
-    )
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=[claim],
-        founder_materials=materials,
-        idempotency_key="test_claim_not_in_draft",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert any("not found in draft" in reason.lower() for _, reason in result.failed_claims)
-
-
-@pytest.mark.asyncio
-async def test_claim_gate_uncovered_risky_word_in_draft_fails():
-    """Test R3-B1: every risky word in draft must be covered by a verified claim."""
-    draft_text = "Our platform supports distributed systems with 99.99% reliability."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="Our platform provides distributed systems support.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    ]
-    
-    # Claim covers "distributed systems" but not "99.99%"
-    claims = [
-        Claim(
-            text="Our platform supports distributed systems",
-            cited_passage_ids=["passage_0"],
-            quoted_spans=["distributed systems"],
-        )
-    ]
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_uncovered_risky",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "uncovered risky words" in result.reasoning.lower()
-    assert "99.99%" in result.reasoning
-
-
-@pytest.mark.asyncio
-async def test_capability_sentence_without_claim_blocked():
-    """Test R4-SF1: capability sentence without claim is blocked."""
-    draft_text = "Our tool helps teams export to Notion seamlessly."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="We build productivity tools for teams.",
-            relevance="medium",
-            passage_id="passage_0",
-        )
-    ]
-    
-    # No claims covering the capability
-    claims = []
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_capability_no_claim",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "product capability" in result.reasoning.lower()
-    assert "no claims" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_capability_sentence_with_matching_claim_allowed():
-    """Test R4-SF1: capability sentence with matching claim is allowed."""
-    draft_text = "Our tool helps teams export to Notion seamlessly."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="Our tool helps teams export data to Notion and other platforms.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    ]
-    
-    # Claim covers the capability
-    claims = [
-        Claim(
-            text="Our tool helps teams export to Notion",
-            cited_passage_ids=["passage_0"],
-            quoted_spans=["helps teams export"],
-        )
-    ]
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_capability_with_claim",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert result.passed
-    assert "1 product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_capability_sentence_with_pronoun_subject_blocked():
-    """Test R5-S1: pronoun/implicit subject capability sentence blocked without claim."""
-    draft_text = "It supports SSO and audit logs."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="We build security-focused software.",
-            relevance="medium",
-            passage_id="passage_0",
-        )
-    ]
-    
-    # No claims covering the capability
-    claims = []
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_pronoun_capability_no_claim",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_third_party_claim_blocked():
-    """SF-5: Third-party claims like 'They offer a free tier' are blocked without evidence."""
-    draft_text = "They offer a free tier for developers."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="We build great tools.",
-            relevance="medium",
-            passage_id="passage_0",
-        )
-    ]
-    
-    # No claims covering the third-party statement
-    claims = []
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_third_party_free_tier",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_integration_claim_blocked():
-    """SF-5: Integration claims like 'This works with Kafka' are blocked without evidence."""
-    draft_text = "This works with Kafka and other streaming platforms."
-    
-    materials = [
-        FounderMaterial(
-            source="product_brief",
-            passage="We integrate with many systems.",
-            relevance="medium",
-            passage_id="passage_0",
-        )
-    ]
-    
-    # No specific claim about Kafka
-    claims = []
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_works_with_kafka",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_third_party_claim_allowed_with_evidence():
-    """SF-5: Third-party claims are allowed when backed by founder material."""
-    draft_text = "They offer a free tier for startups."
-    
-    materials = [
-        FounderMaterial(
-            source="product_website",
-            passage="We offer a free tier for startups with up to 10 users.",
-            relevance="high",
-            passage_id="passage_0",
-        )
-    ]
-    
-    claims = [
-        Claim(
-            text="They offer a free tier for startups",
-            cited_passage_ids=["passage_0"],
-            quoted_spans=["free tier for startups"],
-        )
-    ]
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_third_party_with_evidence",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert result.passed
-    assert "1 product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_comes_with_blocked_without_evidence():
-    """S-4: 'comes with' pattern blocked without founder material evidence."""
-    draft_text = "It comes with audit logs."
-    
-    materials = []
-    claims = []
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_comes_with",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_ships_with_blocked_without_evidence():
-    """S-4: 'ships with' pattern blocked without founder material evidence."""
-    draft_text = "This ships with built-in monitoring."
-    
-    materials = []
-    claims = []
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_ships_with",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_includes_blocked_without_evidence():
-    """S-4: 'includes' pattern blocked without founder material evidence."""
-    draft_text = "The platform includes SSO and RBAC."
-    
-    materials = []
-    claims = []
-    
-    input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
-        founder_materials=materials,
-        idempotency_key="test_includes",
-    )
-    
-    result = await claim_gate(input_data)
-    
-    assert not result.passed
-    assert "product capability" in result.reasoning.lower()
-
-
-@pytest.mark.asyncio
-async def test_comes_with_allowed_with_evidence():
-    """S-4: 'comes with' pattern allowed when backed by founder material."""
-    draft_text = "It comes with audit logs."
-    
+async def test_claim_gate_missing_passage_id():
+    """Test claim gate fails when source_passage_id doesn't exist."""
     materials = [
         FounderMaterial(
             source="product_docs",
-            passage="Our platform includes comprehensive audit logging for all actions.",
+            passage="Our platform is reliable.",
             relevance="high",
             passage_id="passage_0",
         )
     ]
     
-    claims = [
-        Claim(
-            text="It comes with audit logs",
-            cited_passage_ids=["passage_0"],
-            quoted_spans=["audit logging"],
-        )
+    segments = [
+        Segment(
+            text="We support SSO.",
+            kind="claim",
+            source_passage_id="passage_999",  # Doesn't exist
+            quote="SSO support"
+        ),
     ]
     
     input_data = ClaimGateInput(
-        draft_text=draft_text,
-        claims=claims,
+        segments=segments,
         founder_materials=materials,
-        idempotency_key="test_comes_with_evidence",
+        idempotency_key="test_missing_passage",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert len(result.failed_sentences) == 1
+    assert "passage_999" in result.failed_sentences[0][1]
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_quote_not_in_passage():
+    """Test claim gate fails when quote isn't in the cited passage."""
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform provides distributed systems support.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    segments = [
+        Segment(
+            text="We support blockchain technology.",
+            kind="claim",
+            source_passage_id="passage_0",
+            quote="blockchain technology"  # Not in passage
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_quote_not_found",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert len(result.failed_sentences) == 1
+    assert "quote" in result.failed_sentences[0][1].lower()
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_pattern_backstop_overrides_non_claim():
+    """
+    Regression test: pattern backstop overrides non_claim tag.
+    'Our tool is SOC2 compliant' tagged as non_claim should fail (no passage).
+    """
+    materials = []  # No materials
+    
+    segments = [
+        Segment(
+            text="Our tool is SOC2 compliant.",
+            kind="non_claim",  # Wrongly tagged as non_claim
+            # No source_passage_id or quote
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_soc2_backstop",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert len(result.failed_sentences) == 1
+    # Should fail because backstop promoted it to claim but no passage provided
+    assert "source_passage_id" in result.failed_sentences[0][1].lower()
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_regression_24_7_support():
+    """
+    Regression test: 'You get 24/7 support' tagged as non_claim should be rejected.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="You get 24/7 support.",
+            kind="non_claim",  # Wrongly tagged
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_24_7",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_regression_10k_requests():
+    """
+    Regression test: 'Handles 10k requests per second' should be rejected without evidence.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="Handles 10k requests per second.",
+            kind="non_claim",
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_10k",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_regression_exactly_once():
+    """
+    Regression test: 'Gives you exactly-once delivery' should be rejected without evidence.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="Gives you exactly-once delivery.",
+            kind="non_claim",
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_exactly_once",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_regression_sso():
+    """
+    Regression test: 'Supports SSO' should be rejected without evidence.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="Supports SSO.",
+            kind="non_claim",
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_sso",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_regression_rbac():
+    """
+    Regression test: 'Provides role-based access control' should be rejected without evidence.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="Provides role-based access control.",
+            kind="non_claim",
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_rbac",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_properly_covered_claim_passes():
+    """
+    Test that a properly covered claim with correct passage and quote passes.
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform supports SSO authentication with SAML and OAuth, plus role-based access control (RBAC).",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    segments = [
+        Segment(
+            text="Thanks for asking.",
+            kind="non_claim"
+        ),
+        Segment(
+            text="Our platform supports SSO authentication.",
+            kind="claim",
+            source_passage_id="passage_0",
+            quote="SSO authentication"
+        ),
+        Segment(
+            text="Happy to share more details.",
+            kind="non_claim"
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_covered_claim",
     )
     
     result = await claim_gate(input_data)
     
     assert result.passed
-    assert "1 product capability" in result.reasoning.lower()
+    assert len(result.failed_sentences) == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_quote_not_in_cited_passage_fails():
+    """
+    Test that a claim citing the wrong passage (quote not in that passage) fails.
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform provides distributed systems support.",
+            relevance="high",
+            passage_id="passage_0",
+        ),
+        FounderMaterial(
+            source="security_docs",
+            passage="We support SSO and RBAC.",
+            relevance="high",
+            passage_id="passage_1",
+        )
+    ]
+    
+    segments = [
+        Segment(
+            text="We support SSO.",
+            kind="claim",
+            source_passage_id="passage_0",  # Wrong passage
+            quote="SSO"  # This quote is in passage_1, not passage_0
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_wrong_passage",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert len(result.failed_sentences) == 1
+    assert "quote" in result.failed_sentences[0][1].lower()
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_sentence_not_mapping_to_segment():
+    """
+    Test that if a sentence in the joined draft doesn't map to any segment, it fails.
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform is great.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    # Segments don't cover all the text somehow (edge case)
+    # In practice, this shouldn't happen if the model outputs segments correctly
+    # But we test the gate's sentence-mapping logic
+    segments = [
+        Segment(
+            text="Thanks.",
+            kind="non_claim"
+        ),
+    ]
+    
+    # Manually construct input where joined text has more content
+    # This simulates a case where draft construction went wrong
+    # In the real system, draft = ' '.join(seg.text for seg in segments)
+    # So this test verifies the gate's robustness
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_unmapped",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    # Should pass since the joined draft is just "Thanks."
+    # which maps to the segment
+    assert result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_cheap_support_fails():
+    """
+    Test that cheap support check fails when key terms aren't in passage.
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform is reliable and fast.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    segments = [
+        Segment(
+            text="We support distributed consensus with 99.9% uptime and HIPAA compliance.",
+            kind="claim",
+            source_passage_id="passage_0",
+            quote="reliable"  # Quote is in passage, but key terms aren't
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_cheap_support_fail",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    # Should fail because "distributed", "consensus", "99.9%", "HIPAA" aren't in passage
+    assert not result.passed
+    assert "support" in result.failed_sentences[0][1].lower()

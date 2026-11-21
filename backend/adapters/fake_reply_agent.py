@@ -71,42 +71,78 @@ class FakeReplyAgent(ReplyAgentPort):
         steer: Optional[str] = None,
         idempotency_key: Optional[str] = None,
     ) -> Evidence:
-        """Generate fake draft deterministically."""
+        """
+        Generate fake draft deterministically with segments.
+        
+        Per ADR-0006 Amendment 2026-11-21: same segment contract as plain adapter.
+        """
+        from backend.models import Segment
         
         steers = evidence.draft.steers_applied if evidence.draft else []
         if steer:
             steers = steers + [steer]
         
-        # R3-B1: Claim text must appear in draft
-        claim_text = "Our product helps developers build reliable systems"
-        
-        base_text = (
-            f"Thanks for raising this point about {evidence.matched_topic}. "
-            f"{claim_text}. "
-            "Would be happy to share more details if useful."
-        )
-        
+        # Build segments based on steer
         if "shorter" in (steer or "").lower():
-            base_text = f"Great point about {evidence.matched_topic}. {claim_text}. Happy to share more."
+            segments = [
+                Segment(
+                    text=f"Great point about {evidence.matched_topic}.",
+                    kind="non_claim"
+                ),
+                Segment(
+                    text="Our product helps developers build reliable systems.",
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    quote="helps developers build reliable systems"
+                ),
+                Segment(
+                    text="Happy to share more.",
+                    kind="non_claim"
+                ),
+            ]
         elif "technical" in (steer or "").lower():
-            base_text = (
-                f"Re: {evidence.matched_topic} - our system uses distributed "
-                "consensus and eventual consistency to handle this. Details in our docs."
-            )
-            claim_text = "system uses distributed consensus"
+            segments = [
+                Segment(
+                    text=f"Re: {evidence.matched_topic} - ",
+                    kind="non_claim"
+                ),
+                Segment(
+                    text="our system uses distributed consensus and eventual consistency to handle this.",
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    quote="distributed consensus"
+                ),
+                Segment(
+                    text="Details in our docs.",
+                    kind="non_claim"
+                ),
+            ]
+        else:
+            # Default segments
+            segments = [
+                Segment(
+                    text=f"Thanks for raising this point about {evidence.matched_topic}.",
+                    kind="non_claim"
+                ),
+                Segment(
+                    text="Our product helps developers build reliable systems.",
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    quote="helps developers build reliable systems"
+                ),
+                Segment(
+                    text="Would be happy to share more details if useful.",
+                    kind="non_claim"
+                ),
+            ]
         
-        claims = [
-            Claim(
-                text=claim_text,
-                cited_passage_ids=["passage_0"],
-                quoted_spans=["helps developers build reliable systems"],
-            )
-        ]
+        # Construct draft text from segments
+        draft_text = ' '.join(seg.text for seg in segments)
         
         claim_gate = ClaimGateResult(
             passed=True,
-            claims=claims,
-            failed_claims=[],
+            segments=segments,
+            failed_sentences=[],
             reasoning="Gate not yet run (will be verified by claim_gate activity)",
         )
         
@@ -123,13 +159,14 @@ class FakeReplyAgent(ReplyAgentPort):
         input_tokens = (input_text_len + 500) // 4
         
         # Output: new draft text
-        output_tokens = len(base_text) // 4
+        output_tokens = len(draft_text) // 4
         
         evidence.draft = Draft(
-            text=base_text,
+            text=draft_text,
+            segments=segments,
             claim_gate=claim_gate,
             steers_applied=steers,
-            token_count=len(base_text.split()),
+            token_count=len(draft_text.split()),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model_used="fake-model",

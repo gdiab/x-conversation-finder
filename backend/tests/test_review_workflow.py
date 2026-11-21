@@ -443,8 +443,18 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
         
         async def draft(self, evidence, steer=None, idempotency_key=None) -> Evidence:
             """Generate draft with unsupported claim (99.99% uptime guaranteed)."""
+            from backend.models import Segment
+            
             # Draft contains risky words not backed by founder materials
-            draft_text = "We guarantee 99.99% uptime with zero downtime for your critical applications."
+            segments = [
+                Segment(
+                    text="We guarantee 99.99% uptime with zero downtime for your critical applications.",
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    quote="reliability"  # Quote exists but doesn't support the numbers
+                )
+            ]
+            draft_text = ' '.join(s.text for s in segments)
             
             unsupported_claim = Claim(
                 text="We guarantee 99.99% uptime with zero downtime",
@@ -454,11 +464,14 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             
             evidence.draft = Draft(
                 text=draft_text,
+                segments=segments,
                 claim_gate=ClaimGateResult(
                     passed=True,
+                    segments=segments,
+                    failed_sentences=[],
+                    reasoning="Gate not yet run",
                     claims=[unsupported_claim],
                     failed_claims=[],
-                    reasoning="Gate not yet run",
                 ),
                 steers_applied=[steer] if steer else [],
                 token_count=len(draft_text.split()),
@@ -501,7 +514,9 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             # Query the card to verify final status
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
-            assert "claim gate failed" in card["skip_reason"].lower()
+            # New skip reason format per ADR-0006 Amendment: includes per-sentence failures
+            assert "not enough evidence" in card["skip_reason"].lower()
+            assert "insufficient support" in card["skip_reason"].lower()
 
 
 @pytest.mark.asyncio

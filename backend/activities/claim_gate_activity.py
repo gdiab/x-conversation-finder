@@ -1,12 +1,12 @@
 """
 Claim gate activity - deterministic claim verification.
 
-Per ADR-0006 and NB2: Every product claim must match a passage in founder material.
-This is code, not model self-attestation.
-
-The gate checks:
-1. Each quoted span appears in the cited passage
-2. Every number/percent/superlative/guarantee word is backed by a cited passage
+Per ADR-0006 Amendment 2026-11-21: Segments-based claim gate.
+- Model returns structured segments {text, kind, source_passage_id?, quote?}
+- Activity payloads use plain str Literals, not str-Enums
+- Code joins segments into draft, re-splits into sentences, verifies mapping
+- Coverage: source_passage_id exists, quote is substring, cheap support check
+- Pattern backstop overrides non_claim tags
 """
 
 from dataclasses import dataclass
@@ -14,176 +14,150 @@ from typing import List, Dict
 from temporalio import activity
 import re
 
-from backend.models import FounderMaterial, Claim, ClaimGateResult
+from backend.models import FounderMaterial, Segment, ClaimGateResult
 
 
 @dataclass
 class ClaimGateInput:
     """Input for claim_gate activity."""
     
-    draft_text: str
-    claims: List[Claim]
+    segments: List[Segment]
     founder_materials: List[FounderMaterial]
     idempotency_key: str
 
 
-RISKY_PATTERNS = [
-    r'\b\d+\.?\d*%',
-    r'\b\d+\.?\d*\s*(?:percent|pct)',
-    r'\balways\b',
-    r'\bnever\b',
-    r'\bguarantee[sd]?\b',
-    r'\b100%\b',
-    r'\b99\.?\d*%',
-    r'\bbest\b',
-    r'\bfastest\b',
-    r'\bmost\b',
-    r'\bonly\b',
-    r'\ball\b',
-    r'\bevery\b',
-    r'\bunlimited\b',
-    r'\binstant(?:ly)?\b',
-    r'\bzero\b',
+# Pattern backstop: these patterns override a non_claim tag
+# Per ADR-0006 Amendment: widen beyond keywords to capability verbs, digits, compliance terms
+BACKSTOP_PATTERNS = [
+    # First/second person + capability verbs (including "gives")
+    r'\b(?:we|our|my|you|your)\s+(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates)\b',
+    # "it" or "this" + capability verbs
+    r'\b(?:it|this)\s+(?:gets|gives|supports|provides|handles|includes|offers|integrates|delivers|enables|builds|creates|manages|monitors|tracks|analyzes|solves|fixes|improves|optimizes|ensures|automates)\b',
+    # Bare capability verbs at start of sentence (common in product descriptions)
+    r'^(?:Gets|Gives|Supports|Provides|Handles|Includes|Offers|Integrates|Delivers|Enables|Builds|Creates|Manages|Monitors|Tracks|Analyzes|Solves|Fixes|Improves|Optimizes|Ensures|Automates)\b',
+    # "integrates with", "works with" patterns
+    r'\b(?:integrates?|works?)\s+with\b',
+    # Any digit or unit
+    r'\b\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|k|K|M|B)?\b',
+    # Compliance/security terms
+    r'\b(?:SOC2|SSO|RBAC|HIPAA|GDPR|encrypted|encryption|compliance|compliant|certified|certification|audit|auditing|audit logs|role-based access control)\b',
+    # Availability terms
+    r'\b(?:24/7|uptime|availability|downtime|SLA|99\.?\d*%)\b',
+    # Legacy risky patterns  
+    r'\b(?:always|never|guarantee[sd]?|best|fastest|most|only|all|every|unlimited|instant(?:ly)?|zero|exactly-once)\b',
 ]
 
 
-# R4-SF1: Product capability sentence patterns (sentences with we/our + verbs)
-CAPABILITY_VERB_PATTERNS = [
-    r'\b(?:help|helps|support|supports|enable|enables|provide|provides|offer|offers|deliver|delivers|build|builds|create|creates|integrate|integrates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|handle|handles|automate|automates)\b',
-]
-
-
-def find_risky_words(text: str) -> List[str]:
-    """
-    Find numbers, percents, superlatives, and guarantee words.
-    
-    Returns list of risky word spans found.
-    """
-    risky_words = []
-    for pattern in RISKY_PATTERNS:
-        matches = re.finditer(pattern, text, re.IGNORECASE)
-        for match in matches:
-            risky_words.append(match.group())
-    return risky_words
-
-
-def find_product_capability_sentences(text: str) -> List[str]:
-    """
-    R5-S1: Find sentences that make product capability claims.
-    
-    Detects sentences with:
-    - "we"/"our"/"my" + capability verbs (help, provide, enable, etc.)
-    - Pronoun/implicit subjects: "it"/"this"/"the app"/"the tool"/"the product"/product-name + capability verbs
-    - Third-party claims: "they"/"X" + capability verbs (SF-5: catches "They offer a free tier")
-    - Integration claims: "works with"/"integrates with" (SF-5: catches "This works with Kafka")
-    - Inclusion claims: "comes with"/"ships with"/"includes" (S-4: catches "It comes with audit logs")
-    
-    Known limits (acceptable false positives):
-    - "They work hard on reliability" (blocked - contains 'they' + capability verb)
-    - "It works better now" (blocked - contains pronoun + capability verb)
-    - "This helps me understand" (blocked - user statement, not product claim)
-    
-    Returns list of sentences that are likely product capability claims.
-    """
-    capability_sentences = []
-    
-    # Split into sentences (naive split on . ! ?)
-    sentences = re.split(r'[.!?]+', text)
-    
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        
-        # Check if sentence contains first-person, pronoun/implicit subject, or third-party claims
-        has_first_person = bool(re.search(r'\b(?:we|our|my)\b', sentence, re.IGNORECASE))
-        has_pronoun_subject = bool(re.search(
-            r'\b(?:it|this|the (?:app|tool|product|platform|system|service))\b', 
-            sentence, 
-            re.IGNORECASE
-        ))
-        has_third_party = bool(re.search(r'\b(?:they|he|she)\b', sentence, re.IGNORECASE))
-        has_integration_claim = bool(re.search(r'\bworks?\s+with\b', sentence, re.IGNORECASE))
-        has_inclusion_claim = bool(re.search(
-            r'\b(?:comes?\s+with|ships?\s+with|includes?)\b', 
-            sentence, 
-            re.IGNORECASE
-        ))
-        
-        if not (has_first_person or has_pronoun_subject or has_third_party or has_integration_claim or has_inclusion_claim):
-            continue
-        
-        # "works with", "comes with", "ships with", "includes" are capability patterns - no additional verb check needed
-        if has_integration_claim or has_inclusion_claim:
-            capability_sentences.append(sentence.strip())
-            continue
-        
-        # For other subjects, check if sentence contains a capability verb
-        has_capability_verb = False
-        for verb_pattern in CAPABILITY_VERB_PATTERNS:
-            if re.search(verb_pattern, sentence, re.IGNORECASE):
-                has_capability_verb = True
-                break
-        
-        if has_capability_verb:
-            capability_sentences.append(sentence.strip())
-    
-    return capability_sentences
-
-
-def check_span_in_passage(span: str, passage: str) -> bool:
-    """
-    Check if a quoted span appears in the cited passage.
-    
-    Case-insensitive substring match.
-    """
-    return span.lower() in passage.lower()
-
-
-def check_risky_word_backed(risky_word: str, cited_passages: List[str]) -> bool:
-    """
-    Check if a risky word is backed by at least one cited passage.
-    
-    The word must appear in at least one of the cited passages.
-    """
-    risky_lower = risky_word.lower()
-    for passage in cited_passages:
-        if risky_lower in passage.lower():
+def matches_backstop_pattern(text: str) -> bool:
+    """Check if text matches any backstop pattern."""
+    for pattern in BACKSTOP_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
 
 
-def verify_claim(
-    claim: Claim, 
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison: lowercase, collapse whitespace."""
+    return ' '.join(text.lower().split())
+
+
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split text into sentences.
+    
+    Simple split on . ! ? followed by space or end of string.
+    Returns non-empty sentences.
+    """
+    # Split on sentence boundaries
+    sentences = re.split(r'[.!?]+\s*', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def check_quote_in_passage(quote: str, passage: str) -> bool:
+    """Check if quote appears as a normalized substring in passage."""
+    norm_quote = normalize_text(quote)
+    norm_passage = normalize_text(passage)
+    return norm_quote in norm_passage
+
+
+def check_cheap_support(segment_text: str, passage: str) -> bool:
+    """
+    Cheap support check: key numbers, entities, nouns in segment appear in passage.
+    
+    Extracts:
+    - Numbers (e.g., "99", "24/7")
+    - Capitalized terms (e.g., "SSO", "RBAC")
+    - Common nouns (simple heuristic: words longer than 4 chars)
+    
+    Returns True if at least 50% of extracted terms appear in passage.
+    """
+    norm_segment = normalize_text(segment_text)
+    norm_passage = normalize_text(passage)
+    
+    # Extract terms
+    terms = []
+    
+    # Numbers (including decimals and percentages)
+    numbers = re.findall(r'\d+\.?\d*%?', segment_text)
+    terms.extend(numbers)
+    
+    # Capitalized terms (SSO, RBAC, etc.)
+    cap_terms = re.findall(r'\b[A-Z][A-Z0-9]+\b', segment_text)
+    terms.extend([t.lower() for t in cap_terms])
+    
+    # Words longer than 4 chars (rough noun filter)
+    words = re.findall(r'\b[a-z]{5,}\b', norm_segment)
+    terms.extend(words)
+    
+    if not terms:
+        # No terms to check, pass by default
+        return True
+    
+    # Check how many terms appear in passage
+    found = sum(1 for term in terms if term.lower() in norm_passage)
+    support_ratio = found / len(terms)
+    
+    return support_ratio >= 0.5
+
+
+def verify_segment_coverage(
+    segment: Segment,
     materials_by_id: Dict[str, FounderMaterial]
 ) -> tuple[bool, str]:
     """
-    Verify a claim against founder materials.
+    Verify coverage for a claim segment.
+    
+    Per ADR-0006 Amendment:
+    1. source_passage_id must exist in founder material
+    2. quote must be a normalized substring of that passage
+    3. cheap support check (key numbers, entities, nouns appear in passage)
     
     Returns (passed, failure_reason).
     """
-    cited_passages = []
-    for passage_id in claim.cited_passage_ids:
-        if passage_id not in materials_by_id:
-            return False, f"Cited passage {passage_id} not found in founder materials"
-        cited_passages.append(materials_by_id[passage_id].passage)
+    if segment.kind != "claim":
+        # Non-claims don't need coverage
+        return True, ""
     
-    if not cited_passages:
-        return False, "No passages cited"
+    # Check source_passage_id exists
+    if not segment.source_passage_id:
+        return False, "No source_passage_id provided"
     
-    for span in claim.quoted_spans:
-        found = False
-        for passage in cited_passages:
-            if check_span_in_passage(span, passage):
-                found = True
-                break
-        if not found:
-            return False, f"Quoted span '{span}' not found in any cited passage"
+    if segment.source_passage_id not in materials_by_id:
+        return False, f"source_passage_id '{segment.source_passage_id}' not found in founder materials"
     
-    risky_words = find_risky_words(claim.text)
-    for risky_word in risky_words:
-        if not check_risky_word_backed(risky_word, cited_passages):
-            return False, f"Risky word '{risky_word}' not backed by cited passages"
+    passage = materials_by_id[segment.source_passage_id].passage
+    
+    # Check quote is provided
+    if not segment.quote:
+        return False, "No quote provided for claim"
+    
+    # Check quote appears in passage (normalized)
+    if not check_quote_in_passage(segment.quote, passage):
+        return False, f"Quote '{segment.quote}' not found in cited passage"
+    
+    # Cheap support check
+    if not check_cheap_support(segment.text, passage):
+        return False, f"Insufficient support: key terms in segment not found in cited passage"
     
     return True, ""
 
@@ -191,28 +165,20 @@ def verify_claim(
 @activity.defn(name="claim_gate")
 async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     """
-    Deterministic claim gate - verify all product claims.
+    Segment-based claim gate (ADR-0006 Amendment 2026-11-21).
     
-    Per ADR-0006, NB2, and R3-B1: This is code, not model attestation.
-    Scans draft.text itself and checks:
-    1. Every risky word in draft_text is covered by a declared, verified claim
-    2. Each declared claim's text appears in draft_text
-    3. Each quoted span appears in the cited passage
-    4. Every risky word in claim.text is backed by cited passages
+    1. Join segments into draft text
+    2. Re-split into sentences
+    3. Verify each sentence maps to a segment
+    4. Verify coverage for claim segments
+    5. Apply pattern backstop (overrides non_claim tag)
+    6. Return per-sentence failures
     """
     activity.logger.info(
-        f"Running claim gate on draft ({len(input.draft_text)} chars), "
-        f"{len(input.claims)} claim(s), "
+        f"Running segment-based claim gate: "
+        f"{len(input.segments)} segments, "
         f"{len(input.founder_materials)} materials (key: {input.idempotency_key})"
     )
-    
-    # Extract all risky words from the draft text itself
-    draft_risky_words = find_risky_words(input.draft_text)
-    activity.logger.info(f"Found {len(draft_risky_words)} risky words in draft: {draft_risky_words}")
-    
-    # R4-SF1: Extract product capability sentences
-    capability_sentences = find_product_capability_sentences(input.draft_text)
-    activity.logger.info(f"Found {len(capability_sentences)} product capability sentences: {capability_sentences}")
     
     # Build materials lookup
     materials_by_id = {}
@@ -220,119 +186,76 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         passage_id = material.passage_id or f"passage_{i}"
         materials_by_id[passage_id] = material
     
-    # If no claims declared
-    if not input.claims:
-        if draft_risky_words:
-            activity.logger.warning(
-                f"No claims declared but draft contains {len(draft_risky_words)} risky words: {draft_risky_words}"
-            )
-            return ClaimGateResult(
-                passed=False,
-                claims=[],
-                failed_claims=[],
-                reasoning=f"Draft contains risky words but no claims declared: {', '.join(draft_risky_words[:3])}",
-            )
-        elif capability_sentences:
-            activity.logger.warning(
-                f"No claims declared but draft contains {len(capability_sentences)} product capability sentences"
-            )
-            return ClaimGateResult(
-                passed=False,
-                claims=[],
-                failed_claims=[],
-                reasoning=f"Draft contains product capability sentences but no claims declared: {capability_sentences[0][:60]}...",
-            )
-        else:
-            activity.logger.info("No claims, no risky words, and no capability sentences, gate passes")
-            return ClaimGateResult(
-                passed=True,
-                claims=[],
-                failed_claims=[],
-                reasoning="No risky words or capability sentences in draft",
-            )
+    # Step 1: Join segments to construct draft
+    draft_text = ' '.join(seg.text for seg in input.segments)
+    activity.logger.info(f"Constructed draft: {len(draft_text)} chars")
     
-    activity.logger.info(f"Verifying {len(input.claims)} claims against {len(materials_by_id)} passages")
+    # Step 2: Re-split into sentences
+    sentences = split_into_sentences(draft_text)
+    activity.logger.info(f"Split into {len(sentences)} sentences")
     
-    failed_claims = []
-    verified_claim_texts = []
+    # Step 3: Verify each sentence maps to a segment
+    failed_sentences = []
     
-    # Verify each declared claim
-    for claim in input.claims:
-        # Check that claim text appears in draft
-        if claim.text not in input.draft_text:
-            failed_claims.append((claim, f"Claim text not found in draft: '{claim.text}'"))
-            activity.logger.warning(f"Claim text not in draft: '{claim.text[:50]}...'")
+    for sentence in sentences:
+        # Find which segment(s) contain this sentence
+        norm_sentence = normalize_text(sentence)
+        
+        # Find segments that contain this sentence (or vice versa)
+        matching_segments = []
+        for seg in input.segments:
+            norm_seg = normalize_text(seg.text)
+            # Sentence maps to segment if either contains the other (fuzzy match)
+            if norm_sentence in norm_seg or norm_seg in norm_sentence:
+                matching_segments.append(seg)
+        
+        if not matching_segments:
+            failed_sentences.append((sentence, "Sentence does not map to any segment"))
+            activity.logger.warning(f"Unmapped sentence: '{sentence[:50]}...'")
             continue
         
-        # Verify claim against founder materials
-        passed, reason = verify_claim(claim, materials_by_id)
+        # Step 4: Check coverage for claim segments
+        # Take the first matching segment (in practice, should be 1-to-1)
+        segment = matching_segments[0]
         
-        if not passed:
-            failed_claims.append((claim, reason))
-            activity.logger.warning(
-                f"Claim failed verification: '{claim.text[:50]}...' - {reason}"
+        # Step 5: Pattern backstop - override non_claim if pattern matches
+        effective_kind = segment.kind
+        if segment.kind == "non_claim" and matches_backstop_pattern(segment.text):
+            effective_kind = "claim"
+            activity.logger.info(
+                f"Pattern backstop triggered for segment: '{segment.text[:50]}...' "
+                f"(tagged non_claim but matches backstop pattern)"
             )
-        else:
-            verified_claim_texts.append(claim.text)
-            activity.logger.info(f"Claim passed: '{claim.text[:50]}...'")
+        
+        # Verify coverage if it's a claim (or backstop-promoted)
+        if effective_kind == "claim":
+            # Create a segment with effective kind for verification
+            verify_seg = Segment(
+                text=segment.text,
+                kind="claim",
+                source_passage_id=segment.source_passage_id,
+                quote=segment.quote
+            )
+            passed, reason = verify_segment_coverage(verify_seg, materials_by_id)
+            if not passed:
+                failed_sentences.append((sentence, reason))
+                activity.logger.warning(
+                    f"Sentence failed coverage: '{sentence[:50]}...' - {reason}"
+                )
     
-    # Check that every risky word in draft is covered by a verified claim
-    uncovered_risky_words = []
-    for risky_word in draft_risky_words:
-        covered = False
-        for claim_text in verified_claim_texts:
-            if risky_word.lower() in claim_text.lower():
-                covered = True
-                break
-        if not covered:
-            uncovered_risky_words.append(risky_word)
-    
-    if uncovered_risky_words:
-        activity.logger.warning(
-            f"Draft contains {len(uncovered_risky_words)} uncovered risky words: {uncovered_risky_words}"
-        )
-        return ClaimGateResult(
-            passed=False,
-            claims=input.claims,
-            failed_claims=failed_claims,
-            reasoning=f"Draft contains uncovered risky words: {', '.join(uncovered_risky_words[:3])}",
-        )
-    
-    # R4-SF1: Check that every product capability sentence is covered by a verified claim
-    uncovered_capability_sentences = []
-    for capability_sentence in capability_sentences:
-        covered = False
-        for claim_text in verified_claim_texts:
-            # A capability sentence is covered if its text appears in a verified claim
-            if capability_sentence.lower() in claim_text.lower() or claim_text.lower() in capability_sentence.lower():
-                covered = True
-                break
-        if not covered:
-            uncovered_capability_sentences.append(capability_sentence)
-    
-    if uncovered_capability_sentences:
-        activity.logger.warning(
-            f"Draft contains {len(uncovered_capability_sentences)} uncovered product capability sentences"
-        )
-        return ClaimGateResult(
-            passed=False,
-            claims=input.claims,
-            failed_claims=failed_claims,
-            reasoning=f"Draft contains uncovered product capability sentences: {uncovered_capability_sentences[0][:60]}...",
-        )
-    
-    gate_passed = len(failed_claims) == 0
+    # Determine overall pass/fail
+    gate_passed = len(failed_sentences) == 0
     
     if gate_passed:
-        reasoning = f"All {len(input.claims)} claim(s) verified, all {len(draft_risky_words)} risky words covered, and all {len(capability_sentences)} product capability sentences backed"
+        reasoning = f"All {len(sentences)} sentences verified and mapped to segments"
     else:
-        reasoning = f"{len(failed_claims)} of {len(input.claims)} claim(s) failed verification"
+        reasoning = f"{len(failed_sentences)} of {len(sentences)} sentences failed: {failed_sentences[0][1] if failed_sentences else 'unknown'}"
     
     activity.logger.info(f"Claim gate: {'PASS' if gate_passed else 'FAIL'} - {reasoning}")
     
     return ClaimGateResult(
         passed=gate_passed,
-        claims=input.claims,
-        failed_claims=failed_claims,
+        segments=input.segments,
+        failed_sentences=failed_sentences,
         reasoning=reasoning,
     )

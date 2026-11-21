@@ -110,10 +110,11 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
         idempotency_key: Optional[str] = None,
     ) -> Evidence:
         """
-        Draft a reply with structured claims.
+        Draft a reply with structured segments.
         
-        The LLM outputs claims with cited passage IDs and quoted spans.
-        The actual gate verification is done by claim_gate activity.
+        Per ADR-0006 Amendment 2026-11-21:
+        The LLM outputs segments {text, kind, source_passage_id?, quote?}.
+        Activity payloads use plain str Literals, not str-Enums.
         """
         materials_text = "\n\n".join(
             f"[{m.passage_id}] Source: {m.source}\n{m.passage}"
@@ -122,7 +123,7 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
         
         steer_text = f"\n\nAdditional instruction: {steer}" if steer else ""
         
-        prompt = f"""Draft a reply to this post. Every product claim must be supported by the founder materials below.
+        prompt = f"""Draft a reply to this post as structured segments. Every product claim must be supported by the founder materials below.
 
 Why this post fits: {evidence.why_it_fits}
 
@@ -131,20 +132,23 @@ Founder Materials:
 {steer_text}
 
 Return JSON with:
-- text: the draft reply (280 chars max)
-- claims: list of objects with:
-  - text: the product claim being made
-  - cited_passage_ids: list of passage IDs (e.g., ["passage_0", "passage_1"])
-  - quoted_spans: list of exact quoted phrases from those passages that support the claim
+- segments: list of objects with:
+  - text: the segment text (a phrase or sentence)
+  - kind: "claim" or "non_claim" (use these exact string values)
+  - source_passage_id: the passage ID (required for claims, e.g., "passage_0")
+  - quote: exact quote from that passage supporting the claim (required for claims)
 
-Example claim:
-{{
-  "text": "Our platform handles distributed systems",
-  "cited_passage_ids": ["passage_0"],
-  "quoted_spans": ["distributed systems architecture"]
-}}
+Example segments:
+[
+  {{"text": "Thanks for raising this!", "kind": "non_claim"}},
+  {{"text": "Our platform handles distributed systems.", "kind": "claim", "source_passage_id": "passage_0", "quote": "distributed systems support"}},
+  {{"text": "Happy to share more details.", "kind": "non_claim"}}
+]
 
-Be conversational, honest, and never invent features. Every claim must cite specific passages and quote supporting spans."""
+Be conversational, honest, and never invent features. Every claim MUST have source_passage_id and quote.
+The segments will be joined with spaces to form the final draft (max 280 chars total).
+Use "claim" for any statement about product capabilities, features, or characteristics.
+Use "non_claim" for greetings, questions, or generic responses."""
 
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -157,19 +161,25 @@ Be conversational, honest, and never invent features. Every claim must cite spec
         
         result = json.loads(response.choices[0].message.content)
         
-        claims = [
-            Claim(
-                text=c["text"],
-                cited_passage_ids=c.get("cited_passage_ids", []),
-                quoted_spans=c.get("quoted_spans", []),
+        from backend.models import Segment
+        
+        segments = [
+            Segment(
+                text=s["text"],
+                kind=s["kind"],  # str literal "claim" or "non_claim"
+                source_passage_id=s.get("source_passage_id"),
+                quote=s.get("quote"),
             )
-            for c in result.get("claims", [])
+            for s in result.get("segments", [])
         ]
+        
+        # Construct draft text from segments
+        draft_text = ' '.join(seg.text for seg in segments)
         
         claim_gate = ClaimGateResult(
             passed=True,
-            claims=claims,
-            failed_claims=[],
+            segments=segments,
+            failed_sentences=[],
             reasoning="Gate not yet run (will be verified by claim_gate activity)",
         )
         
@@ -183,10 +193,11 @@ Be conversational, honest, and never invent features. Every claim must cite spec
         output_tokens = usage.completion_tokens if usage else 0
         
         evidence.draft = Draft(
-            text=result["text"],
+            text=draft_text,
+            segments=segments,
             claim_gate=claim_gate,
             steers_applied=steers,
-            token_count=len(result["text"].split()),
+            token_count=len(draft_text.split()),
             model_used=self.model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,

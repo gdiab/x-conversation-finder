@@ -61,8 +61,35 @@ class ReviewCard:
                 ],
                 "draft": {
                     "text": self.evidence.draft.text,
+                    "segments": [
+                        {
+                            "text": s.text,
+                            "kind": s.kind,
+                            "source_passage_id": s.source_passage_id,
+                            "quote": s.quote,
+                        }
+                        for s in self.evidence.draft.segments
+                    ],
                     "claim_gate": {
                         "passed": self.evidence.draft.claim_gate.passed,
+                        "segments": [
+                            {
+                                "text": s.text,
+                                "kind": s.kind,
+                                "source_passage_id": s.source_passage_id,
+                                "quote": s.quote,
+                            }
+                            for s in self.evidence.draft.claim_gate.segments
+                        ],
+                        "failed_sentences": [
+                            {
+                                "sentence": sentence,
+                                "reason": reason,
+                            }
+                            for sentence, reason in self.evidence.draft.claim_gate.failed_sentences
+                        ],
+                        "reasoning": self.evidence.draft.claim_gate.reasoning,
+                        # Legacy fields for backwards compatibility
                         "claims": [
                             {
                                 "text": c.text,
@@ -82,7 +109,6 @@ class ReviewCard:
                             }
                             for c, reason in self.evidence.draft.claim_gate.failed_claims
                         ],
-                        "reasoning": self.evidence.draft.claim_gate.reasoning,
                     },
                     "steers_applied": self.evidence.draft.steers_applied,
                     "token_count": self.evidence.draft.token_count,

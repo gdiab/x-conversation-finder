@@ -174,16 +174,31 @@ class ReviewWorkflow:
         return evidence
 
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
-        """Draft reply with claim gate validation retries. Returns None if validation fails."""
+        """
+        Draft reply with claim gate validation retries. Returns None if validation fails.
+        
+        Per ADR-0006 Amendment 2026-11-21:
+        - First draft with no steer
+        - On failure: exactly one redraft with per-sentence reasons as steer
+        - Second failure: end as skipped with reasons recorded
+        """
         input = self.input
         claim_gate_attempts = 0
         max_claim_gate_attempts = input.config.claim_gate_max_attempts
+        last_gate_result = None
         
         while claim_gate_attempts < max_claim_gate_attempts:
             claim_gate_attempts += 1
             
+            # Build steer from last gate result's per-sentence failures
+            steer = None
+            if claim_gate_attempts > 1 and last_gate_result and last_gate_result.failed_sentences:
+                reasons = []
+                for sentence, reason in last_gate_result.failed_sentences[:3]:  # Limit to first 3 for brevity
+                    reasons.append(f"'{sentence[:50]}...': {reason}")
+                steer = f"Previous draft failed claim gate. Fix these issues: {'; '.join(reasons)}"
+            
             # Draft reply
-            steer = "Try again with only supported claims" if claim_gate_attempts > 1 else None
             evidence = await workflow.execute_activity(
                 "draft_reply",
                 DraftReplyInput(
@@ -196,13 +211,12 @@ class ReviewWorkflow:
                 result_type=Evidence,
             )
             
-            # Run deterministic claim gate (R3-B1: scans draft.text itself)
-            if evidence.draft:
+            # Run deterministic claim gate with segments
+            if evidence.draft and evidence.draft.segments:
                 claim_gate_result = await workflow.execute_activity(
                     claim_gate,
                     ClaimGateInput(
-                        draft_text=evidence.draft.text,
-                        claims=evidence.draft.claim_gate.claims,
+                        segments=evidence.draft.segments,
                         founder_materials=evidence.founder_materials,
                         idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
                     ),
@@ -211,6 +225,7 @@ class ReviewWorkflow:
                 
                 # Update evidence with gate result
                 evidence.draft.claim_gate = claim_gate_result
+                last_gate_result = claim_gate_result
                 
                 if claim_gate_result.passed:
                     workflow.logger.info(f"Claim gate passed on attempt {claim_gate_attempts}")
@@ -218,18 +233,27 @@ class ReviewWorkflow:
                 else:
                     workflow.logger.warning(
                         f"Claim gate failed on attempt {claim_gate_attempts}: "
-                        f"{len(claim_gate_result.failed_claims)} failed claims"
+                        f"{len(claim_gate_result.failed_sentences)} failed sentences"
                     )
             else:
-                workflow.logger.error("No draft generated")
+                workflow.logger.error("No draft or segments generated")
                 break
         
-        # Skip if claim gate failed after retries (R4-NN5: set skipped flag)
+        # Skip if claim gate failed after retries
+        # Record the per-sentence reasons from the last attempt
+        skip_reason = "Not enough evidence - claim gate failed after regeneration"
+        if last_gate_result and last_gate_result.failed_sentences:
+            failure_summary = "; ".join(
+                f"{sentence[:30]}... ({reason})"
+                for sentence, reason in last_gate_result.failed_sentences[:3]
+            )
+            skip_reason = f"Not enough evidence: {failure_summary}"
+        
         self.status = "skipped"
         self.skipped = True
-        self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
+        self.skip_reason = skip_reason
         self.evidence = evidence
-        workflow.logger.info(f"Skipped: claim gate failed after {claim_gate_attempts} attempts")
+        workflow.logger.info(f"Skipped: {skip_reason}")
         
         card = self._build_card(workflow_id, input.post, created_at)
         

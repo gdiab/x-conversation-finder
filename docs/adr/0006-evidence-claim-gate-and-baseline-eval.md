@@ -39,3 +39,49 @@ George wants the review UI to show the research alongside the draft.
 - The threshold and feature weights are guesses at first; record them in config with a date and revisit after the first 50 cards.
 - **Caveat:** the confidence weights, threshold and eval design are untested proposals.
 - Deviation from Outpost: Outpost's claims live in Markdown with Anchors; here they live in the database. Keep the vocabulary (Observation, Judgment, Gap) so the two can be compared.
+
+## Amendment 2026-11-21: Claim gate contract redesign
+
+**Context:** The original design had the model output claims with citations, then the gate checked them. This proved insufficient: a model can tag something as "non_claim" yet still make a product assertion, and citation alone doesn't prove coverage. Outpost ADR-0079 forbids trusting model self-attestation.
+
+**Changes:**
+
+1. **Output contract:** `ReplyAgentPort.draft()` now returns structured segments instead of free text:
+   ```python
+   Segment(
+       text: str,
+       kind: Literal["claim", "non_claim"],  # str literal, not enum (Temporal activity boundary)
+       source_passage_id: Optional[str],
+       quote: Optional[str]
+   )
+   ```
+   Activity payloads use plain `str` Literals, not `str`-Enums (str-Enum decodes as a char list at the Temporal activity boundary). Code joins segments into the draft text (no untagged text by construction), then re-splits the joined draft into sentences and rejects if any sentence doesn't map to a segment.
+
+2. **Coverage verified in code:** For claim segments:
+   - `source_passage_id` must exist in this product's founder material
+   - `quote` must be a normalized substring of that passage
+   - Plus a cheap support check: key numbers, entities, and nouns in the segment appear in the quoted passage
+   
+   A model citation alone is not coverage. The gate verifies all three conditions deterministically.
+
+3. **Pattern backstop overrides a `non_claim` tag.** Widened beyond keywords to include:
+   - First/second person or "it" + capability verb (our/we/it/you get, supports, provides, handles, includes, offers, integrates)
+   - Any digit or unit (10k, 99%, 5 GB, 24/7)
+   - Compliance/security terms (SOC2, SSO, RBAC, HIPAA, GDPR, encrypted)
+   - Availability terms (24/7, uptime, SLA, 99.9%)
+   
+   If a segment matches a backstop pattern but lacks `source_passage_id`/`quote`, the gate fails. Model tags are never trusted on their own.
+
+4. **On failure:** Exactly one redraft carrying the gate's per-sentence reasons as the steer, then gate again. A second failure ends the `Review` as `skipped: not enough evidence` with the reasons recorded in the evidence trail. A failed draft never reaches a card. Budget reservation and reconciliation cover the redraft call.
+
+**Regression tests added:**
+- 'Our tool is SOC2 compliant.' (tagged non_claim, no passage) → REJECTED
+- 'You get 24/7 support.' (tagged non_claim, no passage) → REJECTED
+- 'Handles 10k requests per second.' (tagged non_claim, no passage) → REJECTED
+- 'Gives you exactly-once delivery.' (tagged non_claim, no passage) → REJECTED
+- 'Supports SSO.' (tagged non_claim, no passage) → REJECTED
+- 'Provides role-based access control.' (tagged non_claim, no passage) → REJECTED
+- Properly covered claim with correct passage and quote → PASSES
+- Quote not in cited passage → REJECTED
+
+**Why:** This design makes it impossible for the model to circumvent the gate by misclassifying claims, and ensures every assertion is traceable to founder material by code, not trust.
