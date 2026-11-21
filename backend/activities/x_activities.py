@@ -78,7 +78,7 @@ class XActivities:
         # Reserve budget atomically (NB3: reserve-then-commit)
         # This raises BudgetExceeded if cap would be exceeded
         try:
-            cost_usd = reserve_x_budget(input.max_results, settings.x_post_read_cost)
+            reserved_cost, reservation_date = reserve_x_budget(input.max_results, settings.x_post_read_cost)
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
@@ -89,15 +89,22 @@ class XActivities:
             max_results=input.max_results,
         )
         
-        # R4-B2: Reconcile budget to actual usage
+        # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
         actual_reads = len(posts)
-        actual_cost = reconcile_x_reads(input.max_results, actual_reads, settings.x_post_read_cost)
+        actual_cost = reconcile_x_reads(
+            reserved_reads=input.max_results,
+            actual_reads=actual_reads,
+            reservation_date=reservation_date,
+            workflow_id=activity.info().workflow_id,
+            activity_id=activity.info().activity_id,
+            attempt=activity.info().attempt,
+            cost_per_read=settings.x_post_read_cost,
+        )
         
-        if actual_reads < input.max_results:
-            refund = (input.max_results - actual_reads) * settings.x_post_read_cost
+        if actual_reads != input.max_results:
             activity.logger.info(
                 f"Reserved {input.max_results} reads, got {actual_reads} posts, "
-                f"refunded ${refund:.4f}"
+                f"reconciled to ${actual_cost:.4f}"
             )
         
         activity.logger.info(f"Found {len(posts)} posts, cost ${actual_cost:.4f}")
@@ -123,13 +130,14 @@ class XActivities:
         
         # Reserve budget atomically (NB3: raise if over budget, never return None)
         try:
-            cost_usd = reserve_x_budget(1, settings.x_post_read_cost)
+            cost_usd, reservation_date = reserve_x_budget(1, settings.x_post_read_cost)
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
         post = await self._x_client.lookup_post(input.post_id)
         
+        # Note: lookup_post always bills exactly 1 read, so no reconciliation needed
         if post:
             activity.logger.info(f"Found post {input.post_id} by @{post.author.username}, cost ${cost_usd:.4f}")
         else:
@@ -155,7 +163,7 @@ class XActivities:
         
         # Reserve budget atomically (S-2: check_followup must reserve)
         try:
-            cost_usd = reserve_x_budget(max_results, settings.x_post_read_cost)
+            reserved_cost, reservation_date = reserve_x_budget(max_results, settings.x_post_read_cost)
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
@@ -167,13 +175,20 @@ class XActivities:
             max_results=max_results,
         )
         
-        # R4-B2: Reconcile budget to actual usage
+        # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
         actual_reads = len(posts)
-        actual_cost = reconcile_x_reads(max_results, actual_reads, settings.x_post_read_cost)
+        actual_cost = reconcile_x_reads(
+            reserved_reads=max_results,
+            actual_reads=actual_reads,
+            reservation_date=reservation_date,
+            workflow_id=activity.info().workflow_id,
+            activity_id=activity.info().activity_id,
+            attempt=activity.info().attempt,
+            cost_per_read=settings.x_post_read_cost,
+        )
         
-        if actual_reads < max_results:
-            refund = (max_results - actual_reads) * settings.x_post_read_cost
-            activity.logger.info(f"check_followup: refunded ${refund:.4f} ({max_results - actual_reads} unused reads)")
+        if actual_reads != max_results:
+            activity.logger.info(f"check_followup: reconciled to ${actual_cost:.4f} ({actual_reads} reads)")
         
         activity.logger.info(
             f"Found {actual_reads} replies in conversation (cost ${actual_cost:.4f})"

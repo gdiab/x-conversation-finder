@@ -54,7 +54,7 @@ class ReplyActivities:
         # Reserve inference budget with token estimates (NB3: per-token pricing)
         # Estimate: ~500 input tokens, ~200 output tokens for research
         try:
-            cost_usd = reserve_inference_budget(input_tokens=500, output_tokens=200)
+            reserved_cost, reservation_date = reserve_inference_budget(input_tokens=500, output_tokens=200)
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
@@ -66,10 +66,31 @@ class ReplyActivities:
             idempotency_key=input.idempotency_key,
         )
         
-        activity.logger.info(
-            f"Research complete: confidence={evidence.confidence_score:.2f}, "
-            f"materials={len(evidence.founder_materials)}"
-        )
+        # R5-B1: Reconcile inference budget (research_post must reconcile)
+        # If usage is missing from LLM response, keep the full reservation
+        if hasattr(evidence, 'input_tokens') and hasattr(evidence, 'output_tokens'):
+            actual_cost = reconcile_inference_tokens(
+                reserved_input=500,
+                reserved_output=200,
+                actual_input=evidence.input_tokens,
+                actual_output=evidence.output_tokens,
+                reservation_date=reservation_date,
+                workflow_id=activity.info().workflow_id,
+                activity_id=activity.info().activity_id,
+                attempt=activity.info().attempt,
+            )
+            activity.logger.info(
+                f"Research complete: confidence={evidence.confidence_score:.2f}, "
+                f"materials={len(evidence.founder_materials)}, "
+                f"tokens={evidence.input_tokens}/{evidence.output_tokens}, cost=${actual_cost:.4f}"
+            )
+        else:
+            # Missing usage: keep full reservation as spent (R5-B1)
+            activity.logger.info(
+                f"Research complete: confidence={evidence.confidence_score:.2f}, "
+                f"materials={len(evidence.founder_materials)}, "
+                f"usage unavailable, kept reservation ${reserved_cost:.4f}"
+            )
         
         return evidence
     
@@ -93,7 +114,7 @@ class ReplyActivities:
         # Reserve inference budget with token estimates (NB3: per-token pricing)
         # Estimate: ~800 input tokens, ~100 output tokens for draft
         try:
-            cost_usd = reserve_inference_budget(input_tokens=800, output_tokens=100)
+            reserved_cost, reservation_date = reserve_inference_budget(input_tokens=800, output_tokens=100)
         except BudgetExceeded as e:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
@@ -105,19 +126,31 @@ class ReplyActivities:
         )
         
         if evidence.draft:
-            # R4-B2: Reconcile inference budget to actual usage
-            actual_cost = reconcile_inference_tokens(
-                reserved_input=800,
-                reserved_output=100,
-                actual_input=evidence.draft.input_tokens,
-                actual_output=evidence.draft.output_tokens
-            )
-            
-            activity.logger.info(
-                f"Draft complete: {len(evidence.draft.text)} chars, "
-                f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
-                f"tokens={evidence.draft.input_tokens}/{evidence.draft.output_tokens} (actual), "
-                f"reserved=800/100, cost=${actual_cost:.6f}"
-            )
+            # R5-B1: Reconcile inference budget (two-way, idempotent)
+            # If usage is missing (0/0), keep the full reservation
+            if evidence.draft.input_tokens > 0 or evidence.draft.output_tokens > 0:
+                actual_cost = reconcile_inference_tokens(
+                    reserved_input=800,
+                    reserved_output=100,
+                    actual_input=evidence.draft.input_tokens,
+                    actual_output=evidence.draft.output_tokens,
+                    reservation_date=reservation_date,
+                    workflow_id=activity.info().workflow_id,
+                    activity_id=activity.info().activity_id,
+                    attempt=activity.info().attempt,
+                )
+                activity.logger.info(
+                    f"Draft complete: {len(evidence.draft.text)} chars, "
+                    f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
+                    f"tokens={evidence.draft.input_tokens}/{evidence.draft.output_tokens}, "
+                    f"cost=${actual_cost:.6f}"
+                )
+            else:
+                # Missing usage (0/0): keep full reservation as spent (R5-B1)
+                activity.logger.info(
+                    f"Draft complete: {len(evidence.draft.text)} chars, "
+                    f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
+                    f"usage unavailable, kept reservation ${reserved_cost:.4f}"
+                )
         
         return evidence
