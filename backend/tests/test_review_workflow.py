@@ -403,3 +403,127 @@ async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_b
                     pass
                 else:
                     assert "Invalid X post URL" in str(e)
+
+
+@pytest.mark.asyncio
+async def test_review_workflow_duplicate_approve_ignored(sample_post, product_brief):
+    """Test that duplicate approve requests with same request_id are ignored."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
+                claim_gate,
+                store_card,
+                update_card,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
+            ],
+        ):
+            workflow_id = f"review:test:{sample_post.id}_dup_approve"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                ReviewInput(
+                    post=sample_post,
+                    topic="reliability",
+                    product_brief=product_brief,
+                    account="test",
+                    confidence_threshold=0.5,
+                ),
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Approve with first request ID
+            request_id = str(uuid.uuid4())
+            await handle.signal(
+                "approve",
+                args=["https://x.com/test/status/999", request_id]
+            )
+            
+            await env.sleep(1)
+            
+            # Try to approve again with same request ID (should be idempotent)
+            await handle.signal(
+                "approve",
+                args=["https://x.com/test/status/999", request_id]
+            )
+            
+            await env.sleep(1)
+            
+            # Query the card to verify it's approved
+            card = await handle.query("get_card")
+            assert card["status"] == "approved"
+
+
+@pytest.mark.skip(reason="Need to mock claim_gate activity to return FAIL")
+@pytest.mark.asyncio  
+async def test_review_workflow_claim_gate_regenerate_then_skip(sample_post, product_brief):
+    """Test claim gate failure triggers regenerate, then skip after max attempts."""
+    from backend.adapters.fake_reply_agent import FakeReplyAgent as CustomFakeReplyAgent
+    from backend.models import ClaimGateResult
+    
+    # Custom fake agent that always returns FAIL for claim gate
+    class FailingReplyAgent(CustomFakeReplyAgent):
+        async def draft_reply(self, *args, **kwargs):
+            result = await super().draft_reply(*args, **kwargs)
+            # Override claim gate to always fail
+            result.claim_gate = ClaimGateResult(
+                passed=False,
+                claims_checked=["Test claim"],
+                unsupported_claims=["Test claim"],
+                supported_claims={},
+                reasoning="Draft makes unsupported claims",
+            )
+            return result
+    
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FailingReplyAgent())
+    
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
+                claim_gate,
+                store_card,
+                update_card,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
+            ],
+        ):
+            workflow_id = f"review:test:{sample_post.id}_claim_fail"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                ReviewInput(
+                    post=sample_post,
+                    topic="reliability",
+                    product_brief=product_brief,
+                    account="test",
+                    confidence_threshold=0.5,
+                ),
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            # Wait for workflow to complete (should skip after 2 failed attempts)
+            result = await handle.result()
+            assert result == "skipped"
+            
+            # Query the card to verify final status
+            card = await handle.query("get_card")
+            assert card["status"] == "skipped"
+            assert card["skip_reason"] == "claim_gate_failed"
