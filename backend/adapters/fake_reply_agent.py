@@ -54,7 +54,7 @@ class FakeReplyAgent(ReplyAgentPort):
             founder_materials=[
                 FounderMaterial(
                     source="product_brief.md",
-                    passage="Our product helps developers build reliable distributed systems with strong consistency guarantees.",
+                    passage="Our product helps developers build reliable systems with automatic failover and strong consistency guarantees.",
                     relevance="Directly relevant to the post's discussion of reliability",
                     passage_id="passage_0",
                 )
@@ -107,10 +107,10 @@ class FakeReplyAgent(ReplyAgentPort):
                     kind="non_claim"
                 ),
                 Segment(
-                    text="our system uses distributed consensus to handle this.",
+                    text="our system provides strong consistency guarantees.",
                     kind="claim",
                     source_passage_id="passage_0",
-                    quote="distributed systems with strong consistency"
+                    quote="strong consistency guarantees"
                 ),
                 Segment(
                     text="Details in our docs.",
