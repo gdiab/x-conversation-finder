@@ -1,127 +1,103 @@
 """
-Non-claim closed set determination.
+Non-claim closed set - fixed phrase list.
 
-Per Architect decision 2026-11-21:
-Non-claim text is a closed set defined in code, versioned and dated.
-Contains:
-- Exact whole sentences after normalization (greetings, thanks, offers)
-- Question or first-person opinion frames whose remainder contains only allowlisted words
+Per Architect decision 3 (2026-11-21):
+Drafts are assembled, not written. A non_claim segment is {phrase_id} from a fixed,
+versioned phrase list. The model authors no free text in a draft.
 
-Rules:
-- No open-ended tails
-- A frame never makes an assertion a non_claim
-- NUMBERS ARE NEVER ALLOWED (digits or number words)
-- Everything else must be a quoted claim
+Phrases are short and generic. They must not mention any product, capability,
+comparison, evaluation or number.
 
 Version and provenance:
-  VERSION: 1.1.0
+  VERSION: 2.0.0
   DATE: 2026-11-21
-  SOURCE: Architect decision 2 (ADR-0006 Amendment, 2026-11-21)
-  CHANGE (v1.1.0, QA R12): Tightened ALLOWLIST_WORDS to remove all product, 
-    capability, and evaluative words. Removed: works/work, has/have/had, 
-    can/could/would/will/should, setup, we, this/that/these/those, 
-    good/great/easy/well, helpful/nice/hard, really/very/quite, here/there.
-    Frame remainder is now restricted to truly empty conversational words only.
+  SOURCE: Architect decision 3, after QA r11-r13
+  CHANGE (v2.0.0): Removed frames entirely. Fixed phrase list with stable IDs.
+    Model emits phrase_id, code inserts text. Rejected: open-ended frames and
+    frame-plus-remainder allowlists, which admitted assertions in QA r11-r13.
 """
 
-VERSION = "1.1.0"
+VERSION = "2.0.0"
 DATE = "2026-11-21"
 
 import re
 import unicodedata
-from typing import Set
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 
-# Exact non-claim sentences (after normalization: NFKC + casefold + whitespace + trailing punctuation)
-# These are complete, standalone non-claim sentences.
-EXACT_NON_CLAIMS: Set[str] = {
-    # Pure greetings
-    "thanks",
-    "thank you",
-    "hi",
-    "hello",
-    "hey",
-    "hi there",
-    "hello there",
+
+@dataclass
+class NonClaimPhrase:
+    """A fixed non-claim phrase with stable ID and category."""
+    id: str
+    text: str
+    category: str  # opener, thanks, offer, question_to_poster
+
+
+# Fixed phrase list - curated, short, generic phrases
+# Each entry has a stable readable ID
+NON_CLAIM_PHRASES: List[NonClaimPhrase] = [
+    # Openers / greetings
+    NonClaimPhrase(id="opener.thanks", text="Thanks!", category="opener"),
+    NonClaimPhrase(id="opener.thank_you", text="Thank you!", category="opener"),
+    NonClaimPhrase(id="opener.hi", text="Hi!", category="opener"),
+    NonClaimPhrase(id="opener.hello", text="Hello!", category="opener"),
+    NonClaimPhrase(id="opener.hey", text="Hey!", category="opener"),
     
-    # Thanks with common suffixes
-    "thanks for sharing",
-    "thanks for asking",
-    "thanks for the question",
-    "thanks for your help",
-    "thank you for sharing",
-    "thank you for asking",
-    "thank you for the question",
+    # Thanks / appreciation
+    NonClaimPhrase(id="thanks.for_sharing", text="Thanks for sharing.", category="thanks"),
+    NonClaimPhrase(id="thanks.for_asking", text="Thanks for asking.", category="thanks"),
+    NonClaimPhrase(id="thanks.for_question", text="Thanks for the question.", category="thanks"),
+    NonClaimPhrase(id="thanks.great_question", text="Great question.", category="thanks"),
+    NonClaimPhrase(id="thanks.interesting", text="Interesting question.", category="thanks"),
+    NonClaimPhrase(id="thanks.appreciate", text="I appreciate this.", category="thanks"),
+    NonClaimPhrase(id="thanks.love_thread", text="I love this thread.", category="thanks"),
     
     # Offers to help/share
-    "happy to help",
-    "happy to share",
-    "happy to share more",
-    "happy to share more details",
-    "would be happy to help",
-    "would be happy to share",
-    "would be happy to share more",
-    "would be happy to share more details",
-    "glad to help",
-    "glad to share",
-    "pleased to help",
+    NonClaimPhrase(id="offer.happy_to_help", text="Happy to help.", category="offer"),
+    NonClaimPhrase(id="offer.happy_to_share", text="Happy to share more.", category="offer"),
+    NonClaimPhrase(id="offer.share_details", text="Happy to share more details.", category="offer"),
+    NonClaimPhrase(id="offer.glad_to_help", text="Glad to help.", category="offer"),
+    NonClaimPhrase(id="offer.love_to_hear", text="I'd love to hear more.", category="offer"),
+    NonClaimPhrase(id="offer.feel_free", text="Feel free to reach out.", category="offer"),
     
-    # Thread appreciation (genuine non-claims from QA examples)
-    "love this thread",
-    "i love this thread",
-    
-    # Pure acknowledgment
-    "appreciate it",
-    "appreciate this",
-}
-
-# Allowlist of words that can appear in question/opinion frame remainders
-# These are non-claim words that don't make assertions about the product
-# QA R12: Restricted to truly empty conversational words only.
-# Removed all product, capability, and evaluative words.
-ALLOWLIST_WORDS: Set[str] = {
-    # Question words
-    "what", "which", "where", "when", "who", "how", "why",
-    
-    # Linking verbs (non-assertive, purely copular)
-    "is", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did",
-    "try", "tried",
-    
-    # Pronouns (non-product)
-    "you", "your", "yours", "they", "them", "their",
-    "i", "me", "my",
-    
-    # Common nouns (non-product, non-claim, purely conversational)
-    "stack", "thread", "question", "approach", "problem",
-    "discussion", "post", "comment", "idea",
-    "topic", "issue", "context", "case", "situation",
-    
-    # Adjectives (purely descriptive, non-evaluative)
-    "interesting", "different", "similar", "same",
-    
-    # Prepositions and connectors
-    "on", "in", "at", "to", "from", "for", "with", "about",
-    "by", "of", "and", "or", "but", "if",
-    
-    # Articles
-    "a", "an", "the",
-    
-    # Empty conversational words
-    "just", "also", "too",
-}
-
-# Question frames: "What stack are you on?" is OK
-# First-person opinion frames: "I think this is a hard problem." is OK
-OPINION_FRAMES = [
-    r'^i\s+think\b',
-    r'^i\s+believe\b',
-    r'^i\s+feel\b',
-    r'^i\s+love\b',
-    r'^i\s+like\b',
-    r'^i\s+appreciate\b',
-    r'^in\s+my\s+(?:opinion|experience|view)\b',
-    r'^personally\b',
+    # Questions to poster (generic, no product mentions)
+    NonClaimPhrase(id="q.current_tool", text="What are you using today?", category="question_to_poster"),
+    NonClaimPhrase(id="q.stack", text="What stack are you on?", category="question_to_poster"),
+    NonClaimPhrase(id="q.use_case", text="What's your use case?", category="question_to_poster"),
+    NonClaimPhrase(id="q.context", text="Can you share more context?", category="question_to_poster"),
+    NonClaimPhrase(id="q.tried", text="Have you tried anything yet?", category="question_to_poster"),
+    NonClaimPhrase(id="q.looking_for", text="What are you looking for?", category="question_to_poster"),
+    NonClaimPhrase(id="q.problem", text="What problem are you solving?", category="question_to_poster"),
 ]
+
+# Build lookup maps
+_PHRASE_BY_ID: Dict[str, NonClaimPhrase] = {p.id: p for p in NON_CLAIM_PHRASES}
+_PHRASE_BY_TEXT: Dict[str, NonClaimPhrase] = {}  # Populated below
+
+
+def get_phrase_by_id(phrase_id: str) -> Optional[NonClaimPhrase]:
+    """
+    Look up a phrase by its ID.
+    
+    Returns the phrase object, or None if the ID is not found.
+    """
+    return _PHRASE_BY_ID.get(phrase_id)
+
+
+def get_phrase_text(phrase_id: str) -> Optional[str]:
+    """
+    Get the text for a phrase ID.
+    
+    Returns the phrase text, or None if the ID is not found.
+    """
+    phrase = _PHRASE_BY_ID.get(phrase_id)
+    return phrase.text if phrase else None
+
+
+def is_valid_phrase_id(phrase_id: str) -> bool:
+    """Check if a phrase ID is valid."""
+    return phrase_id in _PHRASE_BY_ID
 
 
 def normalize_for_closed_set(text: str) -> str:
@@ -153,6 +129,12 @@ def normalize_for_closed_set(text: str) -> str:
     text = text.rstrip('.!?')
     
     return text
+
+
+# Populate normalized phrase text lookup
+for phrase in NON_CLAIM_PHRASES:
+    normalized = normalize_for_closed_set(phrase.text)
+    _PHRASE_BY_TEXT[normalized] = phrase
 
 
 def _apply_confusables_fold(text: str) -> str:
@@ -250,75 +232,113 @@ def _matches_backstop_pattern(text: str) -> bool:
     return False
 
 
-def _remainder_only_contains_allowlist(remainder: str) -> bool:
-    """
-    Check if the remainder (after stripping opinion frame) contains only allowlisted words.
-    
-    Returns True if all words in the remainder are in the allowlist.
-    """
-    # Tokenize: split on whitespace and punctuation, keep only alphanumeric words
-    words = re.findall(r'\b\w+\b', remainder.lower())
-    
-    if not words:
-        return True  # Empty remainder is OK
-    
-    for word in words:
-        if word not in ALLOWLIST_WORDS:
-            return False
-    
-    return True
-
-
 def is_closed_set_non_claim(text: str) -> bool:
     """
-    Determine if text is a closed-set non_claim.
+    Determine if text matches a fixed phrase (v2.0.0 - no frames).
     
-    Per Architect decision 2026-11-21:
-    A sentence is non_claim ONLY if:
-    1. It matches an exact non-claim sentence (after normalization), OR
-    2. It's a question (ends with ?) whose content contains only allowlisted words, OR
-    3. It's a first-person opinion frame whose remainder contains only allowlisted words
+    Per Architect decision 3 (2026-11-21):
+    A text is a closed-set non_claim ONLY if it exactly matches one of the
+    fixed phrases (after normalization). No frames, no open-ended tails.
     
-    AND it doesn't contain numbers (digits or words) AND doesn't match backstop patterns.
+    This function is used for:
+    - Founder edits in the review UI (edit path)
+    - TEST-ONLY validation that all phrases pass the backstop
     
-    Rules:
-    - No open-ended tails (exact matches only for non-frames)
-    - A frame never makes an assertion a non_claim
-    - NUMBERS ARE NEVER ALLOWED
-    - Everything else must be a quoted claim
+    It is NOT used for model-drafted segments, which emit phrase_id only.
     
-    Returns True if text is a closed-set non_claim, False otherwise.
+    Returns True if text exactly matches a fixed phrase, False otherwise.
     """
     # Normalize for matching
     normalized = normalize_for_closed_set(text)
     
-    # Rule: Numbers are never allowed in non_claim text
-    if _contains_number(normalized):
-        return False
+    # Exact match only
+    return normalized in _PHRASE_BY_TEXT
+
+
+def find_phrase_by_text(text: str) -> Optional[NonClaimPhrase]:
+    """
+    Find a phrase by its text (after normalization).
     
-    # Rule: Backstop patterns override non_claim
-    if _matches_backstop_pattern(normalized):
-        return False
+    Returns the phrase object, or None if no match.
+    """
+    normalized = normalize_for_closed_set(text)
+    return _PHRASE_BY_TEXT.get(normalized)
+
+
+# ==================== TEST-ONLY VALIDATION ====================
+# The keyword and number backstop becomes TEST-ONLY.
+# Every listed phrase must pass the backstop and contain no number.
+# Remove the runtime backstop from the model-draft path (unreachable).
+# Keep it wherever edit paths still use it.
+
+
+def _test_only_contains_number(text: str) -> bool:
+    """
+    TEST-ONLY: Check if text contains any number (digit or number word).
     
-    # Check 1: Exact match to closed set
-    if normalized in EXACT_NON_CLAIMS:
+    This is not used in the model-draft path, only in tests to validate
+    that all phrases are number-free.
+    """
+    # Check for digits (including decimals, percentages, etc.)
+    if re.search(r'\d', text):
         return True
     
-    # Check 2: Question with only allowlisted words
-    if text.rstrip().endswith('?'):
-        # Remove the question mark and check if remainder is allowlisted
-        question_content = normalized.rstrip('?').strip()
-        if _remainder_only_contains_allowlist(question_content):
+    # Check for number words
+    number_words = [
+        r'\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten)\b',
+        r'\b(?:eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\b',
+        r'\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b',
+        r'\b(?:hundred|thousand|million|billion|trillion)\b',
+        r'\b(?:dozens?|hundreds?|thousands?|millions?|billions?)\b',
+    ]
+    
+    for pattern in number_words:
+        if re.search(pattern, text, re.IGNORECASE):
             return True
     
-    # Check 3: Opinion frame with allowlisted remainder
-    for frame_pattern in OPINION_FRAMES:
-        match = re.match(frame_pattern, normalized)
-        if match:
-            # Extract remainder after the frame
-            remainder = normalized[match.end():].strip()
-            if _remainder_only_contains_allowlist(remainder):
-                return True
-    
-    # Not a closed-set non_claim
     return False
+
+
+def _test_only_matches_backstop(text: str) -> bool:
+    """
+    TEST-ONLY: Check if text matches any backstop pattern.
+    
+    This is not used in the model-draft path, only in tests to validate
+    that all phrases pass the backstop.
+    """
+    # Apply NFKC normalization (handles fullwidth, mathematical alphanumerics)
+    text_folded = unicodedata.normalize('NFKC', text)
+    # Apply confusables fold to catch homoglyphs
+    text_folded = _apply_confusables_fold(text_folded)
+    
+    backstop_patterns = [
+        # Compliance/security terms
+        r'\b(?:soc2|sso|rbac|hipaa|gdpr|encrypted?|encryption|compliance|compliant|certified|certification|audit(?:ing|s| logs)?|role-based access control)\b',
+        # Availability terms
+        r'\b(?:24/7|uptime|availability|downtime|sla|99\.?\d*%)\b',
+        # Risky absolutes
+        r'\b(?:always|never|guarantee[sd]?|best|fastest|slowest|most|only|all|every|unlimited|instant(?:ly)?|zero|exactly-once)\b',
+        # Numbers (needs to catch "10k", "20x", etc.)
+        r'\b\d+[kKMBx%]\b',
+    ]
+    
+    for pattern in backstop_patterns:
+        if re.search(pattern, text_folded, re.IGNORECASE):
+            return True
+    
+    return False
+
+
+def validate_all_phrases() -> List[str]:
+    """
+    TEST-ONLY: Validate that all phrases pass the backstop and contain no numbers.
+    
+    Returns a list of validation errors, or empty list if all pass.
+    """
+    errors = []
+    for phrase in NON_CLAIM_PHRASES:
+        if _test_only_contains_number(phrase.text):
+            errors.append(f"Phrase {phrase.id} contains a number: {phrase.text}")
+        if _test_only_matches_backstop(phrase.text):
+            errors.append(f"Phrase {phrase.id} matches backstop: {phrase.text}")
+    return errors

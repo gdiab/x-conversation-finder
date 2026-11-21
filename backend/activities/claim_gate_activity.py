@@ -421,13 +421,14 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
 @activity.defn(name="claim_gate")
 async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     """
-    Segment-based claim gate (Architect decision 2026-11-21).
+    Segment-based claim gate (Architect decision 3, 2026-11-21).
     
-    1. For each claim segment: insert the exact sentence from the passage
-    2. For each non_claim segment: verify it passes closed-set rules (with backstop override)
-    3. Join segments into draft text
-    4. Re-split into sentences and verify mapping
-    5. Return per-sentence failures
+    1. Validate draft shape: 1-3 segments, at most 1 claim, at least 1 segment
+    2. For each claim segment: insert the exact sentence from the passage
+    3. For each non_claim segment: look up phrase_id and insert text
+    4. Join segments into draft text
+    5. Re-split into sentences and verify mapping
+    6. Return per-sentence failures
     """
     activity.logger.info(
         f"Running claim gate: "
@@ -435,13 +436,30 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         f"{len(input.founder_materials)} materials (key: {input.idempotency_key})"
     )
     
-    # Reject empty segment list
-    if not input.segments:
+    # QA R13: Validate draft shape - 1-3 segments, at most 1 claim, at least 1 segment
+    if len(input.segments) < 1:
         return ClaimGateResult(
             passed=False,
             segments=[],
             failed_sentences=[],
-            reasoning="Empty segment list rejected",
+            reasoning="Draft must have at least 1 segment",
+        )
+    
+    if len(input.segments) > 3:
+        return ClaimGateResult(
+            passed=False,
+            segments=[],
+            failed_sentences=[],
+            reasoning=f"Draft must have at most 3 segments (got {len(input.segments)})",
+        )
+    
+    claim_count = sum(1 for seg in input.segments if seg.kind == "claim")
+    if claim_count > 1:
+        return ClaimGateResult(
+            passed=False,
+            segments=[],
+            failed_sentences=[],
+            reasoning=f"Draft must have at most 1 claim segment (got {claim_count})",
         )
     
     # Build materials lookup
@@ -473,21 +491,38 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
             processed_segments.append(processed_seg)
             
         else:  # non_claim
-            # Validate non_claim text exists
-            if not seg.text or not seg.text.strip():
-                failed_sentences.append((f"[non_claim segment]", "Empty non_claim text"))
-                activity.logger.warning("Empty non_claim segment text")
-                continue
-            
-            # Validate it passes closed-set rules (with backstop override)
-            if not is_closed_set_non_claim(seg.text):
+            # QA R13: Non_claim segments are {phrase_id} with NO text
+            # A non_claim segment that carries text should never have that text used
+            if seg.text:
                 failed_sentences.append(
-                    (seg.text, "Does not match closed-set non_claim patterns (or matches backstop)")
+                    (f"[non_claim segment]", "Non_claim segment must not have text (phrase_id only)")
                 )
-                activity.logger.warning(f"Non_claim segment failed closed-set: '{seg.text[:50]}...'")
+                activity.logger.warning("Non_claim segment has text field (should be phrase_id only)")
                 continue
             
-            processed_segments.append(seg)
+            # Validate phrase_id exists
+            if not seg.phrase_id:
+                failed_sentences.append((f"[non_claim segment]", "No phrase_id provided"))
+                activity.logger.warning("Non_claim segment missing phrase_id")
+                continue
+            
+            # Look up phrase and insert text
+            from backend.gate.non_claim_set import get_phrase_text
+            phrase_text = get_phrase_text(seg.phrase_id)
+            if not phrase_text:
+                failed_sentences.append(
+                    (f"[non_claim segment]", f"Unknown phrase_id: {seg.phrase_id}")
+                )
+                activity.logger.warning(f"Unknown phrase_id: {seg.phrase_id}")
+                continue
+            
+            # Create processed segment with inserted text
+            processed_seg = Segment(
+                kind="non_claim",
+                text=phrase_text,
+                phrase_id=seg.phrase_id
+            )
+            processed_segments.append(processed_seg)
     
     # Join processed segments to construct draft
     if not processed_segments:
