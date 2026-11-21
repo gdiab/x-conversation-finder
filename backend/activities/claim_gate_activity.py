@@ -35,8 +35,8 @@ BACKSTOP_PATTERNS = [
     r'\b(?:it|this)\s+(?:gets|gives|supports|provides|handles|includes|offers|integrates|delivers|enables|builds|creates|manages|monitors|tracks|analyzes|solves|fixes|improves|optimizes|ensures|automates)\b',
     # Bare capability verbs at start of sentence (common in product descriptions)
     r'^(?:Gets|Gives|Supports|Provides|Handles|Includes|Offers|Integrates|Delivers|Enables|Builds|Creates|Manages|Monitors|Tracks|Analyzes|Solves|Fixes|Improves|Optimizes|Ensures|Automates)\b',
-    # "integrates with", "works with" patterns
-    r'\b(?:integrates?|works?)\s+with\b',
+    # "integrates with", "works with", "ships with", "comes with", "includes" patterns
+    r'\b(?:integrates?|works?|ships?|comes?)\s+with\b',
     # Any digit or unit
     r'\b\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|k|K|M|B)?\b',
     # Compliance/security terms
@@ -57,7 +57,20 @@ def matches_backstop_pattern(text: str) -> bool:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text for comparison: lowercase, collapse whitespace."""
+    """
+    Normalize text for comparison: NFKC, lowercase, collapse whitespace, normalize quotes.
+    
+    Per QA r9 item 4: NFKC normalization plus whitespace/case/quote-char normalization.
+    """
+    import unicodedata
+    
+    # NFKC normalization (compatibility decomposition + canonical composition)
+    text = unicodedata.normalize('NFKC', text)
+    
+    # Normalize quote characters to standard ASCII quotes
+    text = text.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
+    
+    # Lowercase and collapse whitespace
     return ' '.join(text.lower().split())
 
 
@@ -179,6 +192,25 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         f"{len(input.segments)} segments, "
         f"{len(input.founder_materials)} materials (key: {input.idempotency_key})"
     )
+    
+    # QA r9 item 3b: Reject empty segment list
+    if not input.segments:
+        return ClaimGateResult(
+            passed=False,
+            segments=[],
+            failed_sentences=[],
+            reasoning="Empty segment list rejected",
+        )
+    
+    # QA r9 item 3b: Reject empty segment text
+    for seg in input.segments:
+        if not seg.text or not seg.text.strip():
+            return ClaimGateResult(
+                passed=False,
+                segments=input.segments,
+                failed_sentences=[],
+                reasoning="Empty segment text rejected",
+            )
     
     # Build materials lookup
     materials_by_id = {}

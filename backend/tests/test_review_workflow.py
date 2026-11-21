@@ -533,6 +533,135 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
 
 
 @pytest.mark.asyncio
+async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make_review_input, x_activities):
+    """
+    QA r9 item 3c: Workflow-level test: gate fails, redraft, gate fails again,
+    Review ends skipped with all failed sentences stored and no pending card shown.
+    """
+    from backend.activities.claim_gate_activity import claim_gate
+    from backend.ports import ReplyAgentPort
+    from backend.activities.reply_activities import ReplyActivities
+    from backend.models import Evidence, FounderMaterial, Segment, ClaimGateResult, Draft
+    from typing import Optional
+    
+    class AlwaysFailingClaimAgent(ReplyAgentPort):
+        """Agent that generates drafts that always fail the gate."""
+        
+        async def research(self, post, topic, product_brief, idempotency_key) -> Evidence:
+            """Generate fake evidence."""
+            evidence = Evidence(
+                post_id=post.id,
+                matched_topic=topic,
+                why_it_fits="Post discusses relevant topics.",
+                confidence_score=0.85,
+                confidence_inputs={"topic_match_strength": 0.9},
+                founder_materials=[
+                    FounderMaterial(
+                        source="product_brief",
+                        passage="Our platform is designed for reliability.",
+                        relevance="high",
+                        passage_id="passage_0",
+                    )
+                ],
+            )
+            return evidence
+        
+        async def draft(self, evidence, steer=None, idempotency_key=None) -> Evidence:
+            """Generate draft with multiple unsupported claims that will fail."""
+            from backend.models import Segment
+            
+            # Draft with claims that have no support
+            segments = [
+                Segment(
+                    text="We offer 100x faster performance.",
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    quote="reliability"  # Doesn't support "100x faster"
+                ),
+                Segment(
+                    text="Used by millions of developers.",
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    quote="designed"  # Doesn't support usage claim
+                ),
+                Segment(
+                    text="Beats all competitors.",
+                    kind="claim",
+                    source_passage_id="passage_0",
+                    quote="platform"  # Doesn't support competitive claim
+                ),
+            ]
+            draft_text = ' '.join(s.text for s in segments)
+            
+            evidence.draft = Draft(
+                text=draft_text,
+                segments=segments,
+                claim_gate=ClaimGateResult(
+                    passed=True,
+                    segments=segments,
+                    failed_sentences=[],
+                    reasoning="Gate not yet run",
+                ),
+                steers_applied=[steer] if steer else [],
+                token_count=len(draft_text.split()),
+                model_used="failing-agent",
+            )
+            return evidence
+    
+    failing_agent = AlwaysFailingClaimAgent()
+    failing_activities = ReplyActivities(failing_agent)
+    
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                failing_activities.research_post,
+                failing_activities.draft_reply,
+                claim_gate,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
+        ):
+            review_input = make_review_input()
+            review_input.post.id = "1002"  # Different post
+            workflow_id = f"review:test:1002_multi_fail"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            # Wait for workflow to complete (should skip after 2 failed attempts)
+            result = await handle.result()
+            assert result == "skipped"
+            
+            # Query the card to verify final status
+            card = await handle.query("get_card")
+            assert card["status"] == "skipped"
+            
+            # Verify all failed sentences are recorded (3 in this case)
+            assert card["evidence"]["draft"] is not None
+            failed_sentences = card["evidence"]["draft"]["claim_gate"]["failed_sentences"]
+            assert len(failed_sentences) == 3  # All three claims failed
+            
+            # Verify full evidence is stored
+            for failure in failed_sentences:
+                assert "sentence" in failure
+                assert "reason" in failure
+                assert len(failure["sentence"]) > 0
+            
+            # Verify card status is skipped, not pending
+            assert card["status"] == "skipped"
+            assert "not enough evidence" in card["skip_reason"].lower()
+
+
+@pytest.mark.asyncio
 async def test_review_workflow_confirm_posted_with_post_1005(x_activities, reply_activities, product_brief):
     """Test confirm_posted works with post 1005 (not just 1001)."""
     async with await WorkflowEnvironment.start_time_skipping() as env:

@@ -444,7 +444,9 @@ async def test_claim_gate_quote_not_in_cited_passage_fails():
 @pytest.mark.asyncio
 async def test_claim_gate_sentence_not_mapping_to_segment():
     """
-    Test that if a sentence in the joined draft doesn't map to any segment, it fails.
+    QA r9 item 3a: Test that if a sentence in the joined draft doesn't map to any segment, it fails.
+    
+    This can occur if sentence splitting creates a sentence that doesn't map cleanly to any segment.
     """
     materials = [
         FounderMaterial(
@@ -455,20 +457,24 @@ async def test_claim_gate_sentence_not_mapping_to_segment():
         )
     ]
     
-    # Segments don't cover all the text somehow (edge case)
-    # In practice, this shouldn't happen if the model outputs segments correctly
-    # But we test the gate's sentence-mapping logic
+    # Construct segments where the sentence splitter will create a sentence
+    # that doesn't map to any segment due to punctuation placement
     segments = [
         Segment(
-            text="Thanks.",
+            text="Thanks for",  # Incomplete - will be joined with next
             kind="non_claim"
+        ),
+        Segment(
+            text="the question. We support SSO.",  # Period creates two sentences
+            kind="claim",
+            source_passage_id="passage_0",
+            quote="support"
         ),
     ]
     
-    # Manually construct input where joined text has more content
-    # This simulates a case where draft construction went wrong
-    # In the real system, draft = ' '.join(seg.text for seg in segments)
-    # So this test verifies the gate's robustness
+    # Joined text: "Thanks for the question. We support SSO."
+    # Sentence split: ["Thanks for the question", "We support SSO"]
+    # "Thanks for the question" doesn't match either segment's text
     
     input_data = ClaimGateInput(
         segments=segments,
@@ -478,9 +484,9 @@ async def test_claim_gate_sentence_not_mapping_to_segment():
     
     result = await claim_gate(input_data)
     
-    # Should pass since the joined draft is just "Thanks."
-    # which maps to the segment
-    assert result.passed
+    # Should fail because "Thanks for the question" doesn't map to any single segment
+    assert not result.passed
+    assert len(result.failed_sentences) > 0
 
 
 @pytest.mark.asyncio
@@ -569,7 +575,7 @@ async def test_claim_gate_multiple_segments_mixed_results():
 @pytest.mark.asyncio
 async def test_claim_gate_empty_segments():
     """
-    Test claim gate with empty segments list (edge case).
+    QA r9 item 3b: Empty segment list must be REJECTED.
     """
     materials = [
         FounderMaterial(
@@ -590,9 +596,43 @@ async def test_claim_gate_empty_segments():
     
     result = await claim_gate(input_data)
     
-    # Empty segments means empty draft, which should pass (no claims to verify)
-    assert result.passed
-    assert len(result.failed_sentences) == 0
+    # QA r9 item 3b: Empty segments must be rejected
+    assert not result.passed
+    assert "empty segment list" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_empty_segment_text():
+    """
+    QA r9 item 3b: Empty segment text must be REJECTED.
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform is great.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    segments = [
+        Segment(
+            text="",  # Empty text
+            kind="non_claim"
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_empty_text",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    # QA r9 item 3b: Empty segment text must be rejected
+    assert not result.passed
+    assert "empty segment text" in result.reasoning.lower()
 
 
 @pytest.mark.asyncio
@@ -643,3 +683,78 @@ async def test_claim_gate_no_quote_provided():
     
     assert not result.passed
     assert "no quote" in result.failed_sentences[0][1].lower()
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_ships_with_blocked():
+    """
+    QA r9 item 3c: 'ships with' pattern blocked without evidence.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="This ships with built-in monitoring.",
+            kind="non_claim",  # Wrongly tagged
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_ships_with",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_includes_blocked():
+    """
+    QA r9 item 3c: 'includes' pattern blocked without evidence.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="The platform includes SSO and RBAC.",
+            kind="non_claim",  # Wrongly tagged
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_includes",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_works_with_integration():
+    """
+    QA r9 item 3c: Integration claims like 'works with Kafka' blocked without evidence.
+    """
+    materials = []
+    
+    segments = [
+        Segment(
+            text="This works with Kafka and other streaming platforms.",
+            kind="non_claim",
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_works_with",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed

@@ -167,12 +167,12 @@ async def test_topicwatch_budget_across_multiple_can():
         elapsed = 0
         run_ids_seen = set()
         
-        while elapsed < max_wait_seconds:
-            await asyncio.sleep(poll_interval_seconds)
-            elapsed += poll_interval_seconds
-            
-            # Get workflow history to count distinct run IDs
-            try:
+        try:
+            while elapsed < max_wait_seconds:
+                await asyncio.sleep(poll_interval_seconds)
+                elapsed += poll_interval_seconds
+                
+                # Get workflow history to count distinct run IDs
                 history = await handle.fetch_history()
                 for event in history.events:
                     if event.workflow_execution_started_event_attributes:
@@ -186,13 +186,22 @@ async def test_topicwatch_budget_across_multiple_can():
                 run_ids_seen.add(desc.run_id)
                 
                 if len(run_ids_seen) >= target_run_count:
-                    # Stop workflow via signal (clean shutdown)
-                    await handle.signal("stop")
+                    # QA r9 item 1: Signal the latest run (get handle by workflow ID only)
+                    # Don't swallow errors, and ensure cleanup
+                    latest_handle = client.get_workflow_handle(workflow_id)
+                    await latest_handle.signal("stop")
                     await asyncio.sleep(2)  # Let it finish current iteration
                     break
+        finally:
+            # QA r9 item 1: Cleanup - terminate the latest run if still running
+            try:
+                latest_handle = client.get_workflow_handle(workflow_id)
+                desc = await latest_handle.describe()
+                if desc.status == WorkflowExecutionStatus.RUNNING:
+                    await latest_handle.terminate("Test cleanup")
             except Exception:
-                # Workflow might have completed or been terminated
-                break
+                # Already terminated or completed
+                pass
         
         # Verify we saw at least target_run_count distinct runs
         assert len(run_ids_seen) >= target_run_count, \
