@@ -42,18 +42,18 @@ export interface ReviewCard {
       segments: Array<{
         kind: "claim" | "non_claim";
         text: string;
-        phrase_id?: string;
-        source_passage_id?: string;
-        sentence_index?: number;
+        phrase_id: string | null;
+        source_passage_id: string | null;
+        sentence_index: number | null;
       }>;
       claim_gate: {
         passed: boolean;
         segments: Array<{
           kind: "claim" | "non_claim";
           text: string;
-          phrase_id?: string;
-          source_passage_id?: string;
-          sentence_index?: number;
+          phrase_id: string | null;
+          source_passage_id: string | null;
+          sentence_index: number | null;
         }>;
         failed_sentences: Array<{
           sentence: string;
@@ -104,6 +104,9 @@ export interface ReviewCard {
     kind: "claim" | "non_claim";
     reason: string;
     kept_segment: boolean;
+    phrase_id: string | null;
+    source_passage_id: string | null;
+    sentence_index: number | null;
   }> | null;
   edited_text_gate_state: "passed" | "failed" | "not_checked" | null;
   post_anyway: boolean | null;

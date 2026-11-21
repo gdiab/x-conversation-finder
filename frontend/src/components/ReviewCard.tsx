@@ -281,20 +281,30 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 <div style={{ fontSize: '14px', fontWeight: 'bold', color: 'red' }}>
                   Failed Sentences:
                 </div>
-                {card.evidence.draft.claim_gate.failed_sentences.map((failure, idx) => (
-                  <div key={idx} style={{
-                    backgroundColor: '#ffebee',
-                    padding: '8px',
-                    borderRadius: '4px',
-                    marginTop: '4px',
-                    fontSize: '14px',
-                  }}>
-                    <div style={{ fontWeight: 'bold' }}>"{failure.sentence}"</div>
-                    <div style={{ color: '#c62828', fontSize: '12px', marginTop: '4px' }}>
-                      {failure.reason}
+                {card.evidence.draft.claim_gate.failed_sentences.map((failure, idx) => {
+                  // S7 (QA R14): Dedicated copy for abbreviation-ending reason
+                  let displayReason = failure.reason;
+                  if (failure.reason.toLowerCase().includes('abbreviation')) {
+                    displayReason = 'Sentence ends with an abbreviation and is not selectable. Abbreviations like Inc., Ltd., Dr., etc. at the end of a sentence cannot be used as claims.';
+                  } else if (failure.reason.toLowerCase().includes('unresolved referent')) {
+                    displayReason = 'Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above) and cannot stand alone as a claim.';
+                  }
+                  
+                  return (
+                    <div key={idx} style={{
+                      backgroundColor: '#ffebee',
+                      padding: '8px',
+                      borderRadius: '4px',
+                      marginTop: '4px',
+                      fontSize: '14px',
+                    }}>
+                      <div style={{ fontWeight: 'bold' }}>"{failure.sentence}"</div>
+                      <div style={{ color: '#c62828', fontSize: '12px', marginTop: '4px' }}>
+                        {displayReason}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -339,9 +349,15 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                     <span>{segment.text}</span>
                   </div>
                 </div>
-                {isClaim && segment.sentence_index !== null && (
+                {/* S7 (QA R14): Consistent !== null checks and render references */}
+                {isClaim && segment.source_passage_id !== null && segment.sentence_index !== null && (
                   <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-                    <strong>Source:</strong> sentence {segment.sentence_index}
+                    <strong>Source:</strong> {segment.source_passage_id} sentence {segment.sentence_index}
+                  </div>
+                )}
+                {!isClaim && segment.phrase_id !== null && (
+                  <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
+                    <strong>Phrase:</strong> {segment.phrase_id}
                   </div>
                 )}
                 {matchedPassage && (
@@ -373,7 +389,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         <div style={{ marginBottom: '20px' }}>
           <h4>Segments (Evidence Trail)</h4>
           <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
-            Claims are quoted verbatim from founder materials (sentence_index). Non-claims match closed-set patterns.
+            Claims are quoted verbatim from founder materials (sentence_index). Non-claims come from a fixed phrase list (v2.1.0).
           </div>
           {card.evidence.draft.segments.map((segment, idx) => (
             <div key={idx} style={{
@@ -396,14 +412,20 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 }}>
                   {segment.kind}
                 </span>
-                {segment.kind === 'claim' && segment.source_passage_id && segment.sentence_index !== null && (
+                {/* S7 (QA R14): Render segment references in small muted text */}
+                {segment.kind === 'claim' && segment.source_passage_id !== null && segment.sentence_index !== null && (
                   <span style={{ fontSize: '12px', color: '#666' }}>
                     from {segment.source_passage_id} sentence {segment.sentence_index}
                   </span>
                 )}
+                {segment.kind === 'non_claim' && segment.phrase_id !== null && (
+                  <span style={{ fontSize: '12px', color: '#666' }}>
+                    phrase: {segment.phrase_id}
+                  </span>
+                )}
               </div>
               <div style={{ marginBottom: '8px' }}>"{segment.text}"</div>
-              {segment.kind === 'claim' && segment.source_passage_id && (
+              {segment.kind === 'claim' && segment.source_passage_id !== null && (
                 <div style={{ 
                   fontSize: '12px', 
                   color: '#0d47a1',

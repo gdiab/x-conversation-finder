@@ -63,6 +63,15 @@ async def test_review_workflow_replay(make_review_input, x_activities, reply_act
             # Fetch history with full flow
             history = await handle.fetch_history()
             
+            # S6 (QA R14): Assert that history contains phrase_id segments
+            card = await handle.query("get_card")
+            assert card["evidence"]["draft"]["segments"] is not None
+            segments = card["evidence"]["draft"]["segments"]
+            # At least one non_claim segment should have phrase_id
+            non_claims = [s for s in segments if s["kind"] == "non_claim"]
+            assert len(non_claims) > 0, "Expected at least one non_claim segment"
+            assert all("phrase_id" in s for s in non_claims), "All non_claim segments must have phrase_id"
+            
             # Replay the history against current workflow code
             replayer = Replayer(
                 workflows=[ReviewWorkflow],

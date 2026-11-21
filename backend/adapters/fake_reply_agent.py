@@ -85,6 +85,7 @@ class FakeReplyAgent(ReplyAgentPort):
         
         # QA R13: Claims have {kind:'claim', source_passage_id, sentence_index} with NO text
         # Non-claims have {kind:'non_claim', phrase_id} with NO text
+        # QA R14: Use v2.1.0 phrase_ids only (no offer.happy_to_share, etc.)
         # Build segments based on steer
         if "shorter" in (steer or "").lower():
             segments = [
@@ -95,7 +96,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    phrase_id="offer.happy_to_share"
+                    phrase_id="offer.happy_to_help"  # v2.1.0 phrase
                 ),
             ]
         elif "technical" in (steer or "").lower():
@@ -107,7 +108,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    phrase_id="offer.share_details"
+                    phrase_id="offer.share_details"  # v2.1.0 phrase
                 ),
             ]
         else:
@@ -115,7 +116,7 @@ class FakeReplyAgent(ReplyAgentPort):
             segments = [
                 Segment(
                     kind="non_claim",
-                    phrase_id="opener.thanks"
+                    phrase_id="opener.thanks"  # v2.1.0 phrase
                 ),
                 Segment(
                     kind="claim",
@@ -124,7 +125,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    phrase_id="offer.share_details"
+                    phrase_id="offer.share_details"  # v2.1.0 phrase
                 ),
             ]
         
