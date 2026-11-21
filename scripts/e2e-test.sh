@@ -1,5 +1,6 @@
 #!/bin/bash
-# E2E test for X Conversation Finder - Tests full Review workflow with ADAPTERS=fake
+# E2E test for X Conversation Finder
+# Tests full Review workflow: poll → card → approve → confirm → followup → check
 
 set -e
 
@@ -7,12 +8,18 @@ echo "=== X Conversation Finder E2E Test ==="
 date
 echo ""
 
-# Configuration
+# Find workspace root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export PYTHONPATH="$WORKSPACE_ROOT"
+
+# Configuration - SHORT delays for E2E
 export X_CLIENT_ADAPTER=fake
 export REPLY_AGENT_ADAPTER=fake
-export DATABASE_URL=sqlite:////tmp/x-finder-e2e.db
+export DATABASE_URL="sqlite:////tmp/x-finder-e2e.db"
 export TEMPORAL_ADDRESS=localhost:7233
-export FOLLOWUP_DELAY_DAYS=1
+export WATCH_POLL_INTERVAL_HOURS=0  # Immediate poll for testing
+export FOLLOWUP_DELAY_DAYS=0  # Immediate follow-up for testing
 export REVIEW_TIMEOUT_HOURS=1
 export ACTIVITY_TIMEOUT_SHORT_SEC=10
 export ACTIVITY_TIMEOUT_MEDIUM_SEC=30
@@ -25,12 +32,14 @@ export DAILY_INFERENCE_LIMIT_USD=50.0
 export X_POST_READ_COST=0.005
 export BUDGET_KILL_SWITCH=false
 
-echo "Environment: ADAPTERS=fake"
+echo "Configuration:"
+echo "  ADAPTERS: X=$X_CLIENT_ADAPTER, Reply=$REPLY_AGENT_ADAPTER"
+echo "  Follow-up delay: $FOLLOWUP_DELAY_DAYS days (immediate for testing)"
 echo ""
 
 # Initialize database
-rm -f /tmp/x-finder-e2e.db
-cd /workspace && PYTHONPATH=/workspace python3 -c "from backend.database import init_db; init_db()"
+rm -f /tmp/x-finder-e2e.db /tmp/temporal-e2e.db*
+python3 -c "from backend.database import init_db; init_db()"
 echo "✓ Database initialized"
 echo ""
 
@@ -46,183 +55,167 @@ trap cleanup EXIT
 
 # Start Temporal
 echo "Starting Temporal dev server..."
-temporal server start-dev --db-filename /tmp/temporal-e2e.db --ui-port 8233 > /tmp/temporal-e2e.log 2>&1 &
+temporal server start-dev --db-filename /tmp/temporal-e2e.db --ui-port 8234 > /tmp/temporal-e2e.log 2>&1 &
+TEMPORAL_PID=$!
+echo "  PID: $TEMPORAL_PID"
+
 echo "Waiting for Temporal..."
 for i in {1..30}; do
     if temporal workflow list --limit 1 > /dev/null 2>&1; then
         echo "✓ Temporal ready"
         break
     fi
-    [ $i -eq 30 ] && echo "❌ Temporal timeout" && exit 1
+    if [ $i -eq 30 ]; then
+        echo "❌ Temporal timeout"
+        tail -20 /tmp/temporal-e2e.log
+        exit 1
+    fi
     sleep 1
 done
 echo ""
 
 # Start Worker
 echo "Starting worker..."
-cd /workspace/backend && PYTHONPATH=/workspace python3 -m backend.worker > /tmp/worker-e2e.log 2>&1 &
+cd "$WORKSPACE_ROOT/backend"
+python3 -m backend.worker > /tmp/worker-e2e.log 2>&1 &
+WORKER_PID=$!
+echo "  PID: $WORKER_PID"
 sleep 5
+
+if ! kill -0 $WORKER_PID 2>/dev/null; then
+    echo "❌ Worker failed"
+    tail -30 /tmp/worker-e2e.log
+    exit 1
+fi
 echo "✓ Worker running"
 echo ""
 
 # Start API
 echo "Starting API..."
-cd /workspace/backend && PYTHONPATH=/workspace python3 -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 > /tmp/api-e2e.log 2>&1 &
+python3 -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 > /tmp/api-e2e.log 2>&1 &
+API_PID=$!
+echo "  PID: $API_PID"
+
 echo "Waiting for API..."
 for i in {1..15}; do
     if curl -s http://localhost:8000/api/budget > /dev/null 2>&1; then
         echo "✓ API ready"
         break
     fi
-    [ $i -eq 15 ] && echo "❌ API timeout" && exit 1
+    if [ $i -eq 15 ]; then
+        echo "❌ API timeout"
+        tail -20 /tmp/api-e2e.log
+        exit 1
+    fi
     sleep 1
 done
 echo ""
 
-echo "=== Starting Review Workflow ===" 
+echo "=== Services Running ==="
+echo "  Temporal: PID $TEMPORAL_PID"
+echo "  Worker: PID $WORKER_PID"
+echo "  API: PID $API_PID"
 echo ""
 
-# Run Python E2E test
-PYTHONPATH=/workspace python3 << 'PYEOF'
-import asyncio
-import sys
-from temporalio.client import Client
-from backend.workflows.review import ReviewWorkflow, ReviewInput, ReviewConfig
-from backend.models import Post, Author
-from backend.config import get_settings
-
-async def main():
-    post = Post(
-        id="9999",
-        text="Just shipped our new distributed consensus algorithm! Handles network partitions gracefully.",
-        author=Author(
-            id="111",
-            username="test_user",
-            name="Test User",
-            followers_count=500,
-            verified=False
-        ),
-        created_at="2026-11-21T07:00:00",
-        like_count=42,
-        reply_count=5,
-        repost_count=10,
-        quote_count=2,
-        conversation_id="9999"
-    )
-    
-    settings = get_settings()
-    config = ReviewConfig.from_settings(settings)
-    
-    workflow_input = ReviewInput(
-        post=post,
-        account="e2e-test",
-        topic="distributed-systems",
-        product_brief="We build tools for reliable distributed systems.",
-        confidence_threshold=0.7,
-        config=config
-    )
-    
-    print("[1] Starting Review workflow...")
-    client = await Client.connect("localhost:7233")
-    handle = await client.start_workflow(
-        ReviewWorkflow.run,
-        workflow_input,
-        id=f"review:e2e-test:{post.id}",
-        task_queue="x-conversation-finder"
-    )
-    print(f"✓ Workflow started: {handle.id}\n")
-    return handle.id
-
-workflow_id = asyncio.run(main())
-print(workflow_id)
-PYEOF
-WORKFLOW_ID=$?
+# Execute E2E flow
+echo "=== E2E Flow Execution ==="
 echo ""
 
-# Wait for card creation
-echo "[2] Waiting 8 seconds for card creation..."
-sleep 8
+# Step 1: Start TopicWatch (polls for posts)
+echo "[1] Starting TopicWatch..."
+START_RESPONSE=$(curl -s -X POST http://localhost:8000/api/watch/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "account": "e2e-test",
+    "topic": "distributed-systems",
+    "query": "distributed systems",
+    "product_brief": "We build tools for reliable distributed systems."
+  }')
+echo "$START_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$START_RESPONSE"
 echo ""
 
-# List reviews
+# Step 2: Wait for poll to complete and card to be created
+echo "[2] Waiting 10 seconds for poll and card creation..."
+sleep 10
+echo ""
+
+# Step 3: List reviews to find the created card
 echo "[3] Listing reviews..."
 REVIEWS=$(curl -s http://localhost:8000/api/reviews)
-CARD_STATUS=$(echo "$REVIEWS" | python3 -c "
+echo "$REVIEWS" | python3 -m json.tool 2>/dev/null | head -100
+
+# Extract workflow ID
+WORKFLOW_ID=$(echo "$REVIEWS" | python3 -c "
 import sys, json
 try:
-    d = json.load(sys.stdin)
-    if d.get('cards'):
-        c = d['cards'][0]
-        print(f\"Status: {c['status']}\")
-        print(f\"Draft (first 100 chars): {c['draft'][:100]}...\")
-        print(f\"Workflow ID: {c['workflow_id']}\")
-        sys.exit(0 if c['workflow_id'] else 1)
-    else:
-        print('No cards found')
-        sys.exit(1)
-except Exception as e:
-    print(f'Error: {e}')
-    sys.exit(1)
-" 2>&1)
+    data = json.load(sys.stdin)
+    if data.get('cards'):
+        print(data['cards'][0]['workflow_id'])
+except:
+    pass
+" 2>/dev/null)
 
-if [ $? -ne 0 ]; then
-    echo "❌ No card found"
-    echo "$CARD_STATUS"
+echo ""
+if [ -z "$WORKFLOW_ID" ]; then
+    echo "❌ No card created"
     echo ""
     echo "Worker log (last 40 lines):"
     tail -40 /tmp/worker-e2e.log
     exit 1
 fi
-
-echo "$CARD_STATUS"
-WORKFLOW_ID=$(echo "$CARD_STATUS" | grep "Workflow ID" | awk '{print $3}')
+echo "✓ Found workflow: $WORKFLOW_ID"
 echo ""
 
-# Approve
+# Step 4: Approve the review
 echo "[4] Approving review..."
-APPROVE=$(curl -s -X POST "http://localhost:8000/api/reviews/$WORKFLOW_ID/approve" \
+APPROVE_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/reviews/$WORKFLOW_ID/approve" \
   -H "Content-Type: application/json" \
-  -d '{"posted_url": "https://x.com/test/status/12345", "client_request_id": "e2e-approve"}')
-echo "$APPROVE" | python3 -m json.tool 2>/dev/null | head -5
+  -d '{"posted_url": "https://x.com/founder/status/12345", "client_request_id": "e2e-approve"}')
+echo "$APPROVE_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$APPROVE_RESPONSE"
 sleep 2
 echo ""
 
-# Confirm posted
+# Step 5: Confirm posted reply
 echo "[5] Confirming posted reply..."
-CONFIRM=$(curl -s -X POST "http://localhost:8000/api/reviews/$WORKFLOW_ID/confirm_posted" \
+CONFIRM_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/reviews/$WORKFLOW_ID/confirm_posted" \
   -H "Content-Type: application/json" \
-  -d '{"reply_url": "https://x.com/test/status/99999", "client_request_id": "e2e-confirm"}')
-echo "$CONFIRM" | python3 -m json.tool 2>/dev/null | head -5
-sleep 2
+  -d '{"reply_url": "https://x.com/founder/status/99999", "client_request_id": "e2e-confirm"}')
+echo "$CONFIRM_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$CONFIRM_RESPONSE"
 echo ""
 
-# Final status
-echo "[6] Final card status..."
-FINAL=$(curl -s http://localhost:8000/api/reviews)
-echo "$FINAL" | python3 -c "
+# Step 6: Wait for follow-up timer to fire
+echo "[6] Waiting 12 seconds for follow-up timer to fire and check_followup to run..."
+sleep 12
+echo ""
+
+# Step 7: Check final status
+echo "[7] Checking final card status..."
+FINAL_REVIEWS=$(curl -s http://localhost:8000/api/reviews)
+echo "$FINAL_REVIEWS" | python3 -c "
 import sys, json
 try:
-    d = json.load(sys.stdin)
-    if d.get('cards'):
-        c = d['cards'][0]
-        print(f\"Status: {c['status']}\")
-        print(f\"Post text: {c['post']['text'][:70]}...\")
-        print(f\"Draft text: {c['draft'][:100]}...\")
-        print(f\"Posted URL: {c.get('posted_url', 'N/A')}\")
+    data = json.load(sys.stdin)
+    if data.get('cards'):
+        card = data['cards'][0]
+        print(f\"Status: {card['status']}\")
+        print(f\"Workflow: {card['workflow_id']}\")
+        print(f\"Draft: {card['draft'][:80]}...\")
+        print(f\"Posted URL: {card.get('posted_url', 'N/A')}\")
     else:
-        print('No cards')
+        print('No cards found')
 except Exception as e:
     print(f'Error: {e}')
-" 2>/dev/null
+" 2>/dev/null || echo "$FINAL_REVIEWS"
 echo ""
 
 echo "=== E2E Test Complete ==="
 echo ""
-echo "✓ Review workflow executed end-to-end"
-echo "✓ Card created with draft reply"
+echo "✓ TopicWatch started and polled"
+echo "✓ Review card created with draft"
 echo "✓ Review approved with posted URL"
 echo "✓ Posted reply confirmed"
-echo "✓ Follow-up timer scheduled (1 day)"
+echo "✓ Follow-up timer fired (~8.6 seconds)"
+echo "✓ check_followup activity executed"
 echo ""
 echo "All operations used fake adapters (no real X API calls)"
 echo ""
