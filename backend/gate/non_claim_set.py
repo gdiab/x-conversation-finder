@@ -9,15 +9,18 @@ Phrases are short and generic. They must not mention any product, capability,
 comparison, evaluation or number.
 
 Version and provenance:
-  VERSION: 2.0.0
+  VERSION: 2.1.0
   DATE: 2026-11-21
-  SOURCE: Architect decision 3, after QA r11-r13
+  SOURCE: QA r14
+  CHANGE (v2.1.0): Removed presumptive phrases (great_question, for_asking, etc.),
+    streamlined offers, added composition rules (order, no repeats, one per category,
+    no opener-only drafts). 15 phrases: 4 openers, 1 thanks, 4 offers, 6 questions.
   CHANGE (v2.0.0): Removed frames entirely. Fixed phrase list with stable IDs.
     Model emits phrase_id, code inserts text. Rejected: open-ended frames and
     frame-plus-remainder allowlists, which admitted assertions in QA r11-r13.
 """
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 DATE = "2026-11-21"
 
 import re
@@ -36,35 +39,28 @@ class NonClaimPhrase:
 
 # Fixed phrase list - curated, short, generic phrases
 # Each entry has a stable readable ID
-# 22 phrases total: 5 openers, 4 thanks, 6 offers, 7 questions
+# 15 phrases total (v2.1.0): 4 openers, 1 thanks, 4 offers, 6 questions
 NON_CLAIM_PHRASES: List[NonClaimPhrase] = [
-    # Openers / greetings (5)
+    # Openers / greetings (4)
     NonClaimPhrase(id="opener.hi", text="Hi!", category="opener"),
     NonClaimPhrase(id="opener.hello", text="Hello!", category="opener"),
     NonClaimPhrase(id="opener.hey", text="Hey!", category="opener"),
     NonClaimPhrase(id="opener.thanks", text="Thanks!", category="opener"),
-    NonClaimPhrase(id="opener.great_question", text="Great question.", category="opener"),
     
-    # Thanks / appreciation (4)
+    # Thanks / appreciation (1)
     NonClaimPhrase(id="thanks.for_sharing", text="Thanks for sharing.", category="thanks"),
-    NonClaimPhrase(id="thanks.for_asking", text="Thanks for asking.", category="thanks"),
-    NonClaimPhrase(id="thanks.for_question", text="Thanks for the question.", category="thanks"),
-    NonClaimPhrase(id="thanks.interesting", text="Interesting question.", category="thanks"),
     
-    # Offers to help/share (6)
+    # Offers to help/share (4)
     NonClaimPhrase(id="offer.happy_to_help", text="Happy to help.", category="offer"),
-    NonClaimPhrase(id="offer.happy_to_share", text="Happy to share more.", category="offer"),
-    NonClaimPhrase(id="offer.share_details", text="Happy to share more details.", category="offer"),
-    NonClaimPhrase(id="offer.glad_to_help", text="Glad to help.", category="offer"),
+    NonClaimPhrase(id="offer.share_details", text="Happy to share details.", category="offer"),
     NonClaimPhrase(id="offer.love_to_hear", text="I'd love to hear more.", category="offer"),
     NonClaimPhrase(id="offer.feel_free", text="Feel free to reach out.", category="offer"),
     
-    # Questions to poster (generic, no product mentions) (7)
+    # Questions to poster (generic, no product mentions) (6)
     NonClaimPhrase(id="q.current_tool", text="What are you using today?", category="question_to_poster"),
     NonClaimPhrase(id="q.stack", text="What stack are you on?", category="question_to_poster"),
     NonClaimPhrase(id="q.use_case", text="What's your use case?", category="question_to_poster"),
     NonClaimPhrase(id="q.context", text="Can you share more context?", category="question_to_poster"),
-    NonClaimPhrase(id="q.tried", text="Have you tried anything yet?", category="question_to_poster"),
     NonClaimPhrase(id="q.looking_for", text="What are you looking for?", category="question_to_poster"),
     NonClaimPhrase(id="q.problem", text="What problem are you solving?", category="question_to_poster"),
 ]
@@ -278,3 +274,98 @@ def validate_all_phrases() -> List[str]:
         if _test_only_matches_backstop(phrase.text):
             errors.append(f"Phrase {phrase.id} matches backstop: {phrase.text}")
     return errors
+
+
+# ==================== COMPOSITION RULES (v2.1.0, QA r14) ====================
+
+@dataclass
+class CompositionViolation:
+    """A violation of draft composition rules."""
+    reason: str
+
+
+def validate_draft_composition(segments: List[dict]) -> Optional[CompositionViolation]:
+    """
+    Validate draft composition rules (v2.1.0, QA r14).
+    
+    Rules:
+    1. Segment order by category: opener, then thanks, then claim, then offer or question_to_poster.
+       Openers come first, and offers and questions come last.
+    2. No phrase_id may repeat.
+    3. At most one segment per category, where claim counts as a category and offer and 
+       question_to_poster are each their own category.
+    4. A draft with no claim is allowed, but needs at least one non-opener segment, 
+       so "Hi!" alone or "Hi! Hello!" fails.
+    
+    Args:
+        segments: List of segment dicts with 'kind' and either 'phrase_id' or 'source_passage_id'
+    
+    Returns:
+        CompositionViolation if any rule is violated, None if all pass.
+    """
+    if not segments:
+        return CompositionViolation("Draft must have at least one segment")
+    
+    # Track categories and phrase_ids
+    categories_seen = []
+    phrase_ids_seen = set()
+    has_non_opener = False
+    
+    # Define category order (lower index = earlier)
+    category_order = {
+        "opener": 0,
+        "thanks": 1,
+        "claim": 2,
+        "offer": 3,
+        "question_to_poster": 4,
+    }
+    
+    for segment in segments:
+        kind = segment.get("kind")
+        
+        # Determine category
+        if kind == "claim":
+            category = "claim"
+            has_non_opener = True
+        elif kind == "non_claim":
+            phrase_id = segment.get("phrase_id")
+            if not phrase_id:
+                return CompositionViolation("Non-claim segment missing phrase_id")
+            
+            # Check for repeats
+            if phrase_id in phrase_ids_seen:
+                return CompositionViolation(f"Phrase {phrase_id} repeats in draft")
+            phrase_ids_seen.add(phrase_id)
+            
+            # Look up category
+            phrase = get_phrase_by_id(phrase_id)
+            if not phrase:
+                return CompositionViolation(f"Unknown phrase_id: {phrase_id}")
+            
+            category = phrase.category
+            if category != "opener":
+                has_non_opener = True
+        else:
+            return CompositionViolation(f"Invalid segment kind: {kind}")
+        
+        # Check order
+        if categories_seen:
+            last_category = categories_seen[-1]
+            last_order = category_order.get(last_category, 999)
+            current_order = category_order.get(category, 999)
+            if current_order < last_order:
+                return CompositionViolation(
+                    f"Segment order violation: {category} cannot follow {last_category}"
+                )
+        
+        # Check at most one per category
+        if category in categories_seen:
+            return CompositionViolation(f"Multiple segments with category {category}")
+        
+        categories_seen.append(category)
+    
+    # Check opener-only rule
+    if not has_non_opener:
+        return CompositionViolation("Draft has only opener(s), needs at least one non-opener segment")
+    
+    return None

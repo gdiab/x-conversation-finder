@@ -1023,3 +1023,454 @@ async def test_r13_statement_punctuation_changes_keep_verdict():
     
     assert len(results) == 1
     assert results[0].kept_segment  # DID reuse (both are statements)
+
+
+# ==================== QA R14: VERSION 2.1.0 TESTS ====================
+
+@pytest.mark.asyncio
+async def test_r14_version_pinned():
+    """QA R14 B1: Pin VERSION and exact phrase set."""
+    from backend.gate.non_claim_set import VERSION, NON_CLAIM_PHRASES
+    
+    # Version must be 2.1.0
+    assert VERSION == "2.1.0"
+    
+    # Exact 15 phrases
+    assert len(NON_CLAIM_PHRASES) == 15
+    
+    # Expected phrase IDs
+    expected_ids = {
+        # 4 openers
+        "opener.hi", "opener.hello", "opener.hey", "opener.thanks",
+        # 1 thanks
+        "thanks.for_sharing",
+        # 4 offers
+        "offer.happy_to_help", "offer.share_details", "offer.love_to_hear", "offer.feel_free",
+        # 6 questions
+        "q.current_tool", "q.stack", "q.use_case", "q.context", "q.looking_for", "q.problem",
+    }
+    
+    actual_ids = {p.id for p in NON_CLAIM_PHRASES}
+    assert actual_ids == expected_ids
+    
+    # Verify specific text changes
+    phrase_texts = {p.id: p.text for p in NON_CLAIM_PHRASES}
+    assert phrase_texts["offer.share_details"] == "Happy to share details."
+    assert phrase_texts["opener.thanks"] == "Thanks!"
+    
+    # Verify removed IDs are NOT present
+    removed_ids = {
+        "opener.great_question", "thanks.interesting", "offer.happy_to_share",
+        "offer.glad_to_help", "q.tried", "thanks.for_question", "thanks.for_asking"
+    }
+    assert actual_ids.isdisjoint(removed_ids)
+
+
+@pytest.mark.asyncio
+async def test_r14_composition_unknown_phrase_in_draft():
+    """QA R14 B1: Composition rule - unknown phrase_id fails."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    segments = [
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
+        Segment(kind="non_claim", phrase_id="opener.great_question"),  # Removed in v2.1.0
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_unknown_phrase_composition"
+    ))
+    
+    assert not result.passed
+    assert "great_question" in result.reasoning or "Unknown" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_r14_composition_claim_then_opener_violates_order():
+    """QA R14 B1: Composition rule - opener must come before claim."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    segments = [
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
+        Segment(kind="non_claim", phrase_id="opener.hi"),  # Opener after claim - wrong order
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_order_violation"
+    ))
+    
+    assert not result.passed
+    assert "order" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_r14_composition_repeated_phrase():
+    """QA R14 B1: Composition rule - no phrase_id may repeat."""
+    materials = []
+    
+    segments = [
+        Segment(kind="non_claim", phrase_id="opener.hi"),
+        Segment(kind="non_claim", phrase_id="opener.hi"),  # Repeat
+        Segment(kind="non_claim", phrase_id="offer.happy_to_help"),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_repeat_violation"
+    ))
+    
+    assert not result.passed
+    assert "repeat" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_r14_composition_multiple_openers():
+    """QA R14 B1: Composition rule - at most one segment per category."""
+    materials = []
+    
+    segments = [
+        Segment(kind="non_claim", phrase_id="opener.hi"),
+        Segment(kind="non_claim", phrase_id="opener.hello"),  # Multiple openers
+        Segment(kind="non_claim", phrase_id="opener.hey"),  # Third opener
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_multiple_category"
+    ))
+    
+    assert not result.passed
+    assert "opener" in result.reasoning.lower() or "category" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_r14_composition_opener_only_fails():
+    """QA R14 B1: Composition rule - opener-only draft fails."""
+    materials = []
+    
+    segments = [
+        Segment(kind="non_claim", phrase_id="opener.hi"),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_opener_only"
+    ))
+    
+    assert not result.passed
+    assert "opener" in result.reasoning.lower() or "non-opener" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_r14_composition_valid_draft_passes():
+    """QA R14 B1: Valid composition passes all rules."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    segments = [
+        Segment(kind="non_claim", phrase_id="opener.hi"),
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
+        Segment(kind="non_claim", phrase_id="offer.share_details"),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_valid_composition"
+    ))
+    
+    assert result.passed
+    assert len(result.segments) == 3
+    assert result.segments[0].text == "Hi!"
+    assert "SSO" in result.segments[1].text
+    assert result.segments[2].text == "Happy to share details."
+
+
+# ==================== QA R14: S1-S5 FIXES ====================
+
+@pytest.mark.asyncio
+async def test_r14_s1_question_punctuation_preserved():
+    """S1 (QA R14): Questions keep their '?' when inserted."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Is it fast? Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    segments = [
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_s1_question"
+    ))
+    
+    assert result.passed
+    assert result.segments[0].text == "Is it fast?"
+
+
+@pytest.mark.asyncio
+async def test_r14_s2_edit_path_applies_referent_rule():
+    """S2 (QA R14): Edit path applies referent rule to passage-match."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="It supports retries. Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # User edits to type a sentence that matches a passage sentence but has a referent
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="It supports retries.",
+        gated_segments=[],
+        founder_materials=materials,
+        idempotency_key="test_s2_referent"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+    assert "referent" in results[0].reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_r14_s2_edit_path_applies_abbreviation_rule():
+    """S2 (QA R14): Edit path applies abbreviation-ending rule to passage-match."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="We are Acme Inc.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # User edits to type a sentence that matches a passage sentence but ends in abbreviation
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="We are Acme Inc.",
+        gated_segments=[],
+        founder_materials=materials,
+        idempotency_key="test_s2_abbreviation"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+    assert "abbreviation" in results[0].reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_r14_s2_edit_path_question_vs_statement():
+    """S2 (QA R14): Edit path compares terminal punctuation type."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product helps developers build reliable systems.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Passage has statement, user edits to question form
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="Our product helps developers build reliable systems?",
+        gated_segments=[],
+        founder_materials=materials,
+        idempotency_key="test_s2_question_vs_statement"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r14_s2_edit_path_phrase_question_vs_statement():
+    """S2 (QA R14): Phrase questions vs statements."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    
+    # "What stack are you on?" is a question phrase
+    # "What stack are you on." would not match
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="What stack are you on.",
+        gated_segments=[],
+        founder_materials=materials,
+        idempotency_key="test_s2_phrase_question_statement"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r14_s2_edit_path_phrase_exclamation():
+    """S2 (QA R14): Phrase with wrong punctuation."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    
+    # "What stack are you on?" is the phrase, "!" is wrong
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="What stack are you on!",
+        gated_segments=[],
+        founder_materials=materials,
+        idempotency_key="test_s2_phrase_exclamation"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r14_s2_edit_path_composition_rules():
+    """S2 (QA R14): Edit path applies composition rules."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Previously gated claim
+    gated_segments = [
+        Segment(kind="claim", text="Our product supports SSO", source_passage_id="passage_0", sentence_index=0)
+    ]
+    
+    # User edits to add "Thanks. Our product supports SSO. Hi!" which violates order (opener after claim)
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="Thanks for sharing. Our product supports SSO. Hi!",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_s2_composition"
+    ))
+    
+    # All results should fail due to composition violation
+    assert len(results) == 3
+    assert not any(r.passed for r in results)
+    assert all("composition" in r.reason.lower() for r in results)
+
+
+@pytest.mark.asyncio
+async def test_r14_s3_invalid_kind_rejected():
+    """S3 (QA R14): Invalid segment kind is rejected."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Create segment with invalid kind
+    segments = [
+        Segment(kind="bogus", phrase_id="opener.hi"),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_s3_invalid_kind"
+    ))
+    
+    assert not result.passed
+    assert "invalid" in result.reasoning.lower() or "kind" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_r14_s4_company_suffix_splits_when_capitalized():
+    """S4 (QA R14): Split after company suffix when next token is capitalized."""
+    text = "We are Acme Inc. It supports SSO."
+    sentences = split_into_sentences(text)
+    
+    # Should split into 2 sentences
+    assert len(sentences) == 2
+    assert "Acme Inc." in sentences[0]
+    assert "It supports SSO." in sentences[1]
+
+
+@pytest.mark.asyncio
+async def test_r14_s4_company_suffix_no_split_lowercase():
+    """S4 (QA R14): Don't split after company suffix when next token is lowercase."""
+    text = "We are Acme Inc. and others."
+    sentences = split_into_sentences(text)
+    
+    # Should NOT split (next token "and" is lowercase)
+    assert len(sentences) == 1
+
+
+@pytest.mark.asyncio
+async def test_r14_s4_all_company_suffixes():
+    """S4 (QA R14): Test all company suffixes (Inc, Ltd, Co, Corp)."""
+    texts = [
+        "Founded by Acme Inc. Our product is great.",
+        "Founded by Acme Ltd. Our product is great.",
+        "Founded by Acme Co. Our product is great.",
+        "Founded by Acme Corp. Our product is great.",
+    ]
+    
+    for text in texts:
+        sentences = split_into_sentences(text)
+        assert len(sentences) == 2, f"Failed for: {text}"
+
+
+@pytest.mark.asyncio
+async def test_r14_s4_abbreviation_ending_case_insensitive():
+    """S4 (QA R14): ends_with_abbreviation is case-insensitive."""
+    assert ends_with_abbreviation("We are Acme Inc.")
+    assert ends_with_abbreviation("We are Acme inc.")
+    assert ends_with_abbreviation("We are Acme INC.")
+
+
+@pytest.mark.asyncio
+async def test_r14_s4_title_abbreviations_never_split():
+    """S4 (QA R14): Title abbreviations never split, even with capitalized next word."""
+    text = "Ask Dr. Smith about it."
+    sentences = split_into_sentences(text)
+    assert len(sentences) == 1
+    
+    text2 = "Use e.g. Postgres or MySQL."
+    sentences2 = split_into_sentences(text2)
+    assert len(sentences2) == 1

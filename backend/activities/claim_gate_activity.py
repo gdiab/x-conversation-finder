@@ -38,20 +38,26 @@ def split_into_sentences(text: str) -> List[str]:
     QA R13: NEVER split after a known abbreviation. A sentence ending in 
     a known abbreviation is NOT selectable as a claim.
     
+    S4 (QA R14): Split after company suffixes (Inc, Ltd, Co, Corp) when next
+    token is a capitalized word. Titles precede names, but company suffixes end sentences.
+    
     Simple deterministic rule:
     - Never split after a period between digits (decimals like 99.9)
-    - Never split after a known abbreviation (Dr. Mr. Mrs. Ms. Prof. Inc. Ltd. Co. Corp. vs. e.g. i.e. etc. approx. St.)
+    - Split after company suffixes (Inc, Ltd, Co, Corp) when next token is capitalized
+    - Never split after other abbreviations (Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e. etc. approx. St.)
     - Split on [.!?]+ followed by whitespace otherwise
     
     Returns non-empty sentences.
     """
-    # QA R13: Known abbreviations - NEVER split after these
-    abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'Inc.', 'Ltd.', 'Co.', 
-               'Corp.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
+    # S4 (QA R14): Company suffixes - split after these when next token is capitalized
+    company_suffixes = ['Inc.', 'Ltd.', 'Co.', 'Corp.']
     
-    # Build case-insensitive pattern for abbreviations with word boundaries
-    # Use \b before each abbreviation to ensure whole-word match only
-    abbrev_pattern = '|'.join(r'\b' + re.escape(a) for a in abbrevs)
+    # Other abbreviations - NEVER split after these
+    non_split_abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
+    
+    # Build case-insensitive patterns
+    company_pattern = '|'.join(r'\b' + re.escape(a) for a in company_suffixes)
+    abbrev_pattern = '|'.join(r'\b' + re.escape(a) for a in non_split_abbrevs)
     
     result = []
     current = []
@@ -72,7 +78,26 @@ def split_into_sentences(text: str) -> List[str]:
                 i += 1
                 continue
             
-            # QA R13: Check if it's an abbreviation - NEVER split
+            # S4 (QA R14): Check if it's a company suffix
+            is_company_suffix = re.search(r'(' + company_pattern + r')$', token, re.IGNORECASE)
+            if is_company_suffix:
+                # Split if next token is capitalized
+                if i + 1 < len(tokens) and tokens[i + 1].strip() == '' and i + 2 < len(tokens):
+                    next_content = tokens[i + 2]
+                    # Check if next token starts with a capital letter (after stripping whitespace)
+                    if next_content and next_content[0].isupper():
+                        # Split here - company suffix ends sentence
+                        sentence = ''.join(current).strip()
+                        if sentence:
+                            result.append(sentence)
+                        current = []
+                        i += 1
+                        continue
+                # Otherwise, don't split (no content after, or not capitalized)
+                i += 1
+                continue
+            
+            # Check if it's a non-split abbreviation - NEVER split
             if re.search(r'(' + abbrev_pattern + r')$', token, re.IGNORECASE):
                 # It's an abbreviation, continue without splitting
                 i += 1
@@ -212,15 +237,19 @@ def ends_with_abbreviation(text: str) -> bool:
     Check if a sentence ends with a known abbreviation.
     
     QA R13: A sentence ending in a known abbreviation is NOT selectable.
+    S4 (QA R14): Case-insensitive matching.
     
     Returns True if the sentence ends with an abbreviation.
     """
+    # S4: Include company suffixes in the abbreviation list (they're not selectable if they end the sentence)
     abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'Inc.', 'Ltd.', 'Co.', 
                'Corp.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
     
     text_stripped = text.rstrip()
+    text_lower = text_stripped.lower()
     for abbr in abbrevs:
-        if text_stripped.endswith(abbr):
+        # S4 (QA R14): Case-insensitive matching
+        if text_lower.endswith(abbr.lower()):
             return True
     return False
 
@@ -265,8 +294,14 @@ def insert_claim_sentence(
     if ends_with_abbreviation(sentence):
         return False, "", "Sentence ends with an abbreviation (not selectable)"
     
-    # Only normalization: trim trailing punctuation for flow
-    sentence = sentence.rstrip('.!?')
+    # S1 (QA R14): Trim trailing punctuation for flow, but preserve '?' for questions
+    # A question "Is it fast?" should be inserted as "Is it fast?", not "Is it fast."
+    if sentence.rstrip().endswith('?'):
+        # Keep the question mark
+        sentence = sentence.rstrip()
+    else:
+        # Trim trailing '.!' for flow
+        sentence = sentence.rstrip('.!')
     
     return True, sentence, ""
 
@@ -376,8 +411,35 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
             continue
         
         # Check if it's a verbatim passage sentence
+        # S2 (QA R14): Apply same checks as model path on passage-match branch
         if norm_sentence in passage_sentences:
             passage_id, sent_idx, sent_text = passage_sentences[norm_sentence]
+            
+            # S2: Apply referent rule
+            if has_unresolved_referent(sent_text):
+                results.append(SentenceGateResult(
+                    sentence=sentence,
+                    passed=False,
+                    kind="claim",
+                    reason="Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above)",
+                    kept_segment=False
+                ))
+                activity.logger.warning(f"Sentence '{sentence[:50]}...' has unresolved referent")
+                continue
+            
+            # S2: Apply abbreviation-ending rule
+            if ends_with_abbreviation(sent_text):
+                results.append(SentenceGateResult(
+                    sentence=sentence,
+                    passed=False,
+                    kind="claim",
+                    reason="Sentence ends with an abbreviation (not selectable)",
+                    kept_segment=False
+                ))
+                activity.logger.warning(f"Sentence '{sentence[:50]}...' ends with abbreviation")
+                continue
+            
+            # S2: Passed all checks
             results.append(SentenceGateResult(
                 sentence=sentence,
                 passed=True,
@@ -419,6 +481,27 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     activity.logger.info(
         f"Edited text gate: {passed_count}/{len(results)} sentences passed"
     )
+    
+    # S2 (QA R14): Apply composition rules to edited text
+    # Build segments from results to check composition
+    if all(r.passed for r in results):
+        segments_dict = []
+        for r in results:
+            seg_dict = {"kind": r.kind}
+            if r.kind == "non_claim":
+                seg_dict["phrase_id"] = r.phrase_id
+            elif r.kind == "claim":
+                seg_dict["source_passage_id"] = r.source_passage_id
+            segments_dict.append(seg_dict)
+        
+        from backend.gate.non_claim_set import validate_draft_composition
+        composition_violation = validate_draft_composition(segments_dict)
+        if composition_violation:
+            # Mark all results as failed due to composition violation
+            for r in results:
+                r.passed = False
+                r.reason = f"Composition rule violation: {composition_violation.reason}"
+            activity.logger.warning(f"Edited text composition violation: {composition_violation.reason}")
     
     return results
 
@@ -467,6 +550,27 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
             reasoning=f"Draft must have at most 1 claim segment (got {claim_count})",
         )
     
+    # B1 (QA R14): Validate composition rules (v2.1.0)
+    from backend.gate.non_claim_set import validate_draft_composition
+    
+    segments_dict = []
+    for seg in input.segments:
+        seg_dict = {"kind": seg.kind}
+        if seg.kind == "non_claim":
+            seg_dict["phrase_id"] = seg.phrase_id
+        elif seg.kind == "claim":
+            seg_dict["source_passage_id"] = seg.source_passage_id
+        segments_dict.append(seg_dict)
+    
+    composition_violation = validate_draft_composition(segments_dict)
+    if composition_violation:
+        return ClaimGateResult(
+            passed=False,
+            segments=[],
+            failed_sentences=[],
+            reasoning=f"Composition rule violation: {composition_violation.reason}",
+        )
+    
     # Build materials lookup
     materials_by_id = {}
     for i, material in enumerate(input.founder_materials):
@@ -478,6 +582,14 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     failed_sentences = []
     
     for seg in input.segments:
+        # S3 (QA R14): Validate kind - only 'claim' and 'non_claim' are allowed
+        if seg.kind not in ("claim", "non_claim"):
+            failed_sentences.append(
+                (f"[segment]", f"Invalid segment kind: '{seg.kind}' (must be 'claim' or 'non_claim')")
+            )
+            activity.logger.warning(f"Invalid segment kind: {seg.kind}")
+            continue
+        
         if seg.kind == "claim":
             # Insert sentence from passage
             success, inserted_text, error = insert_claim_sentence(seg, materials_by_id)

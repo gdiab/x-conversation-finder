@@ -881,3 +881,198 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
                 assert "FIRST" in final_text, f"Expected FIRST to win (finished last), got: {final_text}"
             finally:
                 db.close()
+
+
+# ==================== QA R14: S5 EDIT_SEQ TESTS ====================
+
+@pytest.mark.asyncio
+async def test_r14_s5_store_ignores_lower_edit_seq():
+    """S5 (QA R14): Store activity ignores writes with lower edit_seq than stored."""
+    from backend.activities.store_activities import UpdateCardInput
+    from backend.database import ReviewCardDB, get_db
+    
+    # First, create a card with edit_seq=2
+    db = get_db()
+    try:
+        card_db = ReviewCardDB(
+            id=uuid.uuid4(),
+            workflow_id="test_s5_store",
+            post_id="12345",
+            status="pending",
+            evidence_data={"draft": {"text": "Version 2"}},
+            edit_seq=2  # Current seq is 2
+        )
+        db.add(card_db)
+        db.commit()
+        db.refresh(card_db)
+        
+        card_id = card_db.id
+        
+        # Try to update with edit_seq=1 (lower than stored 2)
+        input_stale = UpdateCardInput(
+            workflow_id="test_s5_store",
+            post_id="12345",
+            evidence_data={"draft": {"text": "Stale version 1"}},
+            edit_seq=1  # Lower than stored seq
+        )
+        
+        await update_card(input_stale)
+        
+        # Verify card still has version 2 (stale write was ignored)
+        db.refresh(card_db)
+        assert card_db.evidence_data["draft"]["text"] == "Version 2"
+        assert card_db.edit_seq == 2
+        
+        # Now update with edit_seq=3 (higher than stored 2)
+        input_new = UpdateCardInput(
+            workflow_id="test_s5_store",
+            post_id="12345",
+            evidence_data={"draft": {"text": "Version 3"}},
+            edit_seq=3
+        )
+        
+        await update_card(input_new)
+        
+        # Verify card now has version 3
+        db.refresh(card_db)
+        assert card_db.evidence_data["draft"]["text"] == "Version 3"
+        assert card_db.edit_seq == 3
+        
+    finally:
+        # Clean up
+        if card_db:
+            db.delete(card_db)
+            db.commit()
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_r14_s5_workflow_race_edit_seq():
+    """
+    S5 (QA R14): Workflow-level race with edit_seq.
+    
+    Scenario:
+    - Edit A finishes and gets seq 1
+    - Edit B finishes and gets seq 2
+    - A late retried write carrying seq 1 arrives
+    
+    Assert that the card ends at B's text and seq 2.
+    """
+    import asyncio
+    from temporalio import activity as activity_module
+    from backend.activities.store_activities import UpdateCardInput
+    
+    # State to control timing
+    edit_a_gate_event = asyncio.Event()
+    edit_b_gate_event = asyncio.Event()
+    edit_a_release_event = asyncio.Event()
+    edit_b_release_event = asyncio.Event()
+    
+    @activity_module.defn(name="verify_edited_text")
+    async def verify_edited_text_controlled(input):
+        """Gate activity that blocks per-edit to control finish order."""
+        from temporalio import activity
+        text = input["edited_text"]
+        activity.logger.info(f"Gate for: {text[:20]}")
+        
+        if "EDIT_A" in text:
+            activity.logger.info("EDIT_A gate, signaling and blocking")
+            edit_a_gate_event.set()
+            await edit_a_release_event.wait()
+            activity.logger.info("EDIT_A gate released")
+        elif "EDIT_B" in text:
+            activity.logger.info("EDIT_B gate, signaling and blocking")
+            edit_b_gate_event.set()
+            await edit_b_release_event.wait()
+            activity.logger.info("EDIT_B gate released")
+        
+        # Both pass
+        return []
+    
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                verify_edited_text_controlled,
+                store_card,
+                update_card,
+            ],
+        ):
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_s5_race"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Start EDIT_A (will block in gate)
+            edit_a_task = asyncio.create_task(
+                handle.execute_update(
+                    "edit",
+                    args=["EDIT_A text. Thanks!", str(uuid.uuid4())]
+                )
+            )
+            
+            # Wait for edit A gate to be called
+            await asyncio.wait_for(edit_a_gate_event.wait(), timeout=5)
+            
+            # Start EDIT_B (will block in gate)
+            edit_b_task = asyncio.create_task(
+                handle.execute_update(
+                    "edit",
+                    args=["EDIT_B text. Thanks!", str(uuid.uuid4())]
+                )
+            )
+            
+            # Wait for edit B gate to be called
+            await asyncio.wait_for(edit_b_gate_event.wait(), timeout=5)
+            
+            # Release EDIT_A first (finishes first, gets seq 1)
+            edit_a_release_event.set()
+            await edit_a_task
+            
+            await env.sleep(0.5)
+            
+            # Release EDIT_B second (finishes second, gets seq 2)
+            edit_b_release_event.set()
+            await edit_b_task
+            
+            await env.sleep(1)
+            
+            # Simulate a late retried write carrying seq 1 (from EDIT_A)
+            # This would happen if the update_card activity was retried after EDIT_B already completed
+            input_stale = UpdateCardInput(
+                workflow_id=workflow_id,
+                post_id=review_input.post.id,
+                evidence_data={"draft": {"text": "EDIT_A (late retry)"}},
+                edit_seq=1  # Lower seq from EDIT_A
+            )
+            
+            await update_card(input_stale)
+            
+            await env.sleep(0.5)
+            
+            # Check the card - should still have EDIT_B's text and seq 2
+            db = get_db()
+            try:
+                card_db = db.query(ReviewCardDB).filter(
+                    ReviewCardDB.workflow_id == workflow_id
+                ).first()
+                assert card_db is not None
+                
+                final_text = card_db.evidence_data["draft"]["text"]
+                assert "EDIT_B" in final_text, f"Expected EDIT_B to win (higher seq), got: {final_text}"
+                assert card_db.edit_seq == 2, f"Expected edit_seq=2, got: {card_db.edit_seq}"
+                
+            finally:
+                db.close()
