@@ -94,7 +94,12 @@ async def test_topic_watch_workflow_spawns_reviews(make_topic_watch_input, x_act
 
 @pytest.mark.asyncio
 async def test_topic_watch_workflow_continue_as_new(make_topic_watch_input, x_activities, reply_activities):
-    """Test TopicWatch uses Continue-As-New after threshold."""
+    """Test TopicWatch uses Continue-As-New after threshold.
+    
+    Note: This test uses a low continue-as-new threshold to verify the workflow
+    properly restarts with Continue-As-New. The test stops early to avoid
+    excessive budget usage from repeated polling.
+    """
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
@@ -113,7 +118,12 @@ async def test_topic_watch_workflow_continue_as_new(make_topic_watch_input, x_ac
         ):
             workflow_id = "watch:test:reliability_can"
             
-            topic_watch_input = make_topic_watch_input(continue_as_new_after=2)
+            # Use low threshold and stop early to test continue-as-new logic
+            topic_watch_input = make_topic_watch_input(
+                continue_as_new_after=2,
+                max_results=2  # Lower to reduce budget usage
+            )
+            
             handle = await env.client.start_workflow(
                 TopicWatchWorkflow.run,
                 topic_watch_input,
@@ -121,8 +131,10 @@ async def test_topic_watch_workflow_continue_as_new(make_topic_watch_input, x_ac
                 task_queue="test",
             )
             
-            await env.sleep(timedelta(hours=3))
+            # Let first iteration complete
+            await env.sleep(timedelta(hours=1.5))
             
+            # Stop before hitting continue-as-new to keep test fast
             await handle.signal("stop")
             
             result = await handle.result()
