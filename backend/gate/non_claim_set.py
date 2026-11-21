@@ -100,43 +100,6 @@ def is_valid_phrase_id(phrase_id: str) -> bool:
     return phrase_id in _PHRASE_BY_ID
 
 
-def normalize_for_closed_set(text: str) -> str:
-    """
-    Normalize text for closed-set matching.
-    
-    Steps:
-    1. NFKC normalization
-    2. Confusables fold (Cyrillic, Greek, fullwidth, mathematical alphanumerics)
-    3. Casefold
-    4. Collapse whitespace
-    5. Strip trailing punctuation
-    
-    Returns normalized text for exact matching.
-    """
-    # NFKC normalization (handles fullwidth, mathematical alphanumerics, etc.)
-    text = unicodedata.normalize('NFKC', text)
-    
-    # Confusables fold (expanded beyond Cyrillic to include Greek and others)
-    text = _apply_confusables_fold(text)
-    
-    # Casefold
-    text = text.casefold()
-    
-    # Collapse whitespace
-    text = ' '.join(text.split())
-    
-    # Strip trailing punctuation
-    text = text.rstrip('.!?')
-    
-    return text
-
-
-# Populate normalized phrase text lookup
-for phrase in NON_CLAIM_PHRASES:
-    normalized = normalize_for_closed_set(phrase.text)
-    _PHRASE_BY_TEXT[normalized] = phrase
-
-
 def _apply_confusables_fold(text: str) -> str:
     """
     Apply confusables skeleton fold to detect homoglyphs.
@@ -170,66 +133,41 @@ def _apply_confusables_fold(text: str) -> str:
     return ''.join(result)
 
 
-def _contains_number(text: str) -> bool:
+def normalize_for_closed_set(text: str) -> str:
     """
-    Check if text contains any number (digit or number word).
+    Normalize text for closed-set matching.
     
-    Numbers are NEVER allowed in non_claim text.
+    Steps:
+    1. NFKC normalization
+    2. Confusables fold (Cyrillic, Greek, fullwidth, mathematical alphanumerics)
+    3. Casefold
+    4. Collapse whitespace
+    5. Strip trailing punctuation
+    
+    Returns normalized text for exact matching.
     """
-    # Check for digits (including decimals, percentages, etc.)
-    if re.search(r'\d', text):
-        return True
+    # NFKC normalization (handles fullwidth, mathematical alphanumerics, etc.)
+    text = unicodedata.normalize('NFKC', text)
     
-    # Check for number words
-    number_words = [
-        r'\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten)\b',
-        r'\b(?:eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\b',
-        r'\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b',
-        r'\b(?:hundred|thousand|million|billion|trillion)\b',
-        r'\b(?:dozens?|hundreds?|thousands?|millions?|billions?)\b',
-    ]
+    # Confusables fold (expanded beyond Cyrillic to include Greek and others)
+    text = _apply_confusables_fold(text)
     
-    for pattern in number_words:
-        if re.search(pattern, text, re.IGNORECASE):
-            return True
+    # Casefold
+    text = text.casefold()
     
-    return False
+    # Collapse whitespace
+    text = ' '.join(text.split())
+    
+    # Strip trailing punctuation
+    text = text.rstrip('.!?')
+    
+    return text
 
 
-def _matches_backstop_pattern(text: str) -> bool:
-    """
-    Check if text matches any backstop pattern.
-    
-    Backstop patterns always indicate a claim, overriding any non_claim determination.
-    These patterns include:
-    - Numbers (already checked by _contains_number, but kept for completeness)
-    - Compliance/security terms
-    - Availability terms
-    - Risky absolutes
-    
-    Applies NFKC (for fullwidth/mathematical) and confusables fold before matching.
-    """
-    # Apply NFKC normalization (handles fullwidth, mathematical alphanumerics)
-    text_folded = unicodedata.normalize('NFKC', text)
-    # Apply confusables fold to catch homoglyphs
-    text_folded = _apply_confusables_fold(text_folded)
-    
-    backstop_patterns = [
-        # Compliance/security terms
-        r'\b(?:soc2|sso|rbac|hipaa|gdpr|encrypted?|encryption|compliance|compliant|certified|certification|audit(?:ing|s| logs)?|role-based access control)\b',
-        # Availability terms
-        r'\b(?:24/7|uptime|availability|downtime|sla|99\.?\d*%)\b',
-        # Risky absolutes
-        r'\b(?:always|never|guarantee[sd]?|best|fastest|slowest|most|only|all|every|unlimited|instant(?:ly)?|zero|exactly-once)\b',
-        # Numbers (needs to catch "10k", "20x", etc.)
-        r'\b\d+[kKMBx%]\b',
-    ]
-    
-    for pattern in backstop_patterns:
-        if re.search(pattern, text_folded, re.IGNORECASE):
-            return True
-    
-    return False
+# Populate normalized phrase text lookup (must be after normalize_for_closed_set is defined)
+for phrase in NON_CLAIM_PHRASES:
+    normalized = normalize_for_closed_set(phrase.text)
+    _PHRASE_BY_TEXT[normalized] = phrase
 
 
 def is_closed_set_non_claim(text: str) -> bool:
