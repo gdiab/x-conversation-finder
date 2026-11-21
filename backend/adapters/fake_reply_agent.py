@@ -12,6 +12,7 @@ from backend.models import (
     Evidence,
     Post,
     FounderMaterial,
+    Claim,
     ClaimGateResult,
     Draft,
 )
@@ -55,6 +56,7 @@ class FakeReplyAgent(ReplyAgentPort):
                     source="product_brief.md",
                     passage="Our product helps developers build reliable systems.",
                     relevance="Directly relevant to the post's discussion of reliability",
+                    passage_id="passage_0",
                 )
             ],
         )
@@ -89,16 +91,19 @@ class FakeReplyAgent(ReplyAgentPort):
                 "consensus and eventual consistency to handle this. Details in our docs."
             )
         
-        claims = ["Our product helps with this kind of challenge"]
+        claims = [
+            Claim(
+                text="Our product helps with this kind of challenge",
+                cited_passage_ids=["passage_0"],
+                quoted_spans=["helps developers build reliable systems"],
+            )
+        ]
         
         claim_gate = ClaimGateResult(
             passed=True,
-            claims_checked=claims,
-            unsupported_claims=[],
-            supported_claims={
-                claims[0]: "product_brief.md: 'Our product helps developers build reliable systems.'"
-            },
-            reasoning="All claims are supported by founder material",
+            claims=claims,
+            failed_claims=[],
+            reasoning="Gate not yet run (will be verified by claim_gate activity)",
         )
         
         evidence.draft = Draft(

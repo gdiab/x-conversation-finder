@@ -160,7 +160,7 @@ class ReviewWorkflow:
                     claim_gate_result = await workflow.execute_activity(
                         claim_gate,
                         ClaimGateInput(
-                            draft_text=evidence.draft.text,
+                            claims=evidence.draft.claim_gate.claims,
                             founder_materials=evidence.founder_materials,
                             idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
                         ),
@@ -176,7 +176,7 @@ class ReviewWorkflow:
                     else:
                         workflow.logger.warning(
                             f"Claim gate failed on attempt {claim_gate_attempts}: "
-                            f"{len(claim_gate_result.unsupported_claims)} unsupported claims"
+                            f"{len(claim_gate_result.failed_claims)} failed claims"
                         )
                 else:
                     workflow.logger.error("No draft generated")
@@ -581,9 +581,25 @@ class ReviewWorkflow:
                     "text": self.evidence.draft.text,
                     "claim_gate": {
                         "passed": self.evidence.draft.claim_gate.passed,
-                        "claims_checked": self.evidence.draft.claim_gate.claims_checked,
-                        "unsupported_claims": self.evidence.draft.claim_gate.unsupported_claims,
-                        "supported_claims": self.evidence.draft.claim_gate.supported_claims,
+                        "claims": [
+                            {
+                                "text": c.text,
+                                "cited_passage_ids": c.cited_passage_ids,
+                                "quoted_spans": c.quoted_spans,
+                            }
+                            for c in self.evidence.draft.claim_gate.claims
+                        ],
+                        "failed_claims": [
+                            {
+                                "claim": {
+                                    "text": c.text,
+                                    "cited_passage_ids": c.cited_passage_ids,
+                                    "quoted_spans": c.quoted_spans,
+                                },
+                                "reason": reason,
+                            }
+                            for c, reason in self.evidence.draft.claim_gate.failed_claims
+                        ],
                         "reasoning": self.evidence.draft.claim_gate.reasoning,
                     },
                     "steers_applied": self.evidence.draft.steers_applied,

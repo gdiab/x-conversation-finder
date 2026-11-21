@@ -16,6 +16,7 @@ from backend.models import (
     Evidence,
     Post,
     FounderMaterial,
+    Claim,
     ClaimGateResult,
     Draft,
 )
@@ -79,15 +80,23 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
             "has_founder_material": 1.0 if result.get("founder_materials") else 0.0,
         }
         
+        founder_materials = []
+        for i, m in enumerate(result.get("founder_materials", [])):
+            material = FounderMaterial(
+                source=m["source"],
+                passage=m["passage"],
+                relevance=m["relevance"],
+                passage_id=f"passage_{i}",
+            )
+            founder_materials.append(material)
+        
         evidence = Evidence(
             post_id=post.id,
             matched_topic=result["matched_topic"],
             why_it_fits=result["why_it_fits"],
             confidence_score=0.0,
             confidence_inputs=confidence_inputs,
-            founder_materials=[
-                FounderMaterial(**m) for m in result.get("founder_materials", [])
-            ],
+            founder_materials=founder_materials,
         )
         
         evidence.confidence_score = evidence.compute_confidence()
@@ -100,10 +109,14 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
         steer: Optional[str] = None,
         idempotency_key: Optional[str] = None,
     ) -> Evidence:
-        """Draft a reply with claim gate."""
+        """
+        Draft a reply with structured claims.
         
+        The LLM outputs claims with cited passage IDs and quoted spans.
+        The actual gate verification is done by claim_gate activity.
+        """
         materials_text = "\n\n".join(
-            f"Source: {m.source}\n{m.passage}"
+            f"[{m.passage_id}] Source: {m.source}\n{m.passage}"
             for m in evidence.founder_materials
         )
         
@@ -119,10 +132,19 @@ Founder Materials:
 
 Return JSON with:
 - text: the draft reply (280 chars max)
-- claims: list of product claims made
-- claim_support: dict mapping each claim to its supporting passage
+- claims: list of objects with:
+  - text: the product claim being made
+  - cited_passage_ids: list of passage IDs (e.g., ["passage_0", "passage_1"])
+  - quoted_spans: list of exact quoted phrases from those passages that support the claim
 
-Be conversational, honest, and never invent features."""
+Example claim:
+{{
+  "text": "Our platform handles distributed systems",
+  "cited_passage_ids": ["passage_0"],
+  "quoted_spans": ["distributed systems architecture"]
+}}
+
+Be conversational, honest, and never invent features. Every claim must cite specific passages and quote supporting spans."""
 
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -135,17 +157,20 @@ Be conversational, honest, and never invent features."""
         
         result = json.loads(response.choices[0].message.content)
         
-        claims = result.get("claims", [])
-        claim_support = result.get("claim_support", {})
-        
-        unsupported = [c for c in claims if c not in claim_support]
+        claims = [
+            Claim(
+                text=c["text"],
+                cited_passage_ids=c.get("cited_passage_ids", []),
+                quoted_spans=c.get("quoted_spans", []),
+            )
+            for c in result.get("claims", [])
+        ]
         
         claim_gate = ClaimGateResult(
-            passed=len(unsupported) == 0,
-            claims_checked=claims,
-            unsupported_claims=unsupported,
-            supported_claims=claim_support,
-            reasoning="All claims supported" if not unsupported else f"Unsupported: {unsupported}",
+            passed=True,
+            claims=claims,
+            failed_claims=[],
+            reasoning="Gate not yet run (will be verified by claim_gate activity)",
         )
         
         steers = evidence.draft.steers_applied if evidence.draft else []

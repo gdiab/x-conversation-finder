@@ -1,8 +1,12 @@
 """
 Claim gate activity - deterministic claim verification.
 
-Per ADR-0006 and B7: Every product claim must match a passage in founder material.
-This must be code, not model self-attestation.
+Per ADR-0006 and NB2: Every product claim must match a passage in founder material.
+This is code, not model self-attestation.
+
+The gate checks:
+1. Each quoted span appears in the cited passage
+2. Every number/percent/superlative/guarantee word is backed by a cited passage
 """
 
 from dataclasses import dataclass
@@ -10,79 +14,107 @@ from typing import List, Dict
 from temporalio import activity
 import re
 
-from backend.models import FounderMaterial, ClaimGateResult
+from backend.models import FounderMaterial, Claim, ClaimGateResult
 
 
 @dataclass
 class ClaimGateInput:
     """Input for claim_gate activity."""
     
-    draft_text: str
+    claims: List[Claim]
     founder_materials: List[FounderMaterial]
     idempotency_key: str
 
 
-def extract_claims(text: str) -> List[str]:
-    """
-    Extract product claims from draft text.
-    
-    Simple heuristic: sentences that mention "our", "we", "product", etc.
-    """
-    claims = []
-    
-    # Split into sentences
-    sentences = re.split(r'[.!?]+', text)
-    
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        
-        # Check if it's a product claim
-        lower = sentence.lower()
-        if any(keyword in lower for keyword in ['our', 'we', 'product', 'system', 'tool', 'service', 'platform']):
-            claims.append(sentence)
-    
-    return claims
+RISKY_PATTERNS = [
+    r'\b\d+\.?\d*%',
+    r'\b\d+\.?\d*\s*(?:percent|pct)',
+    r'\balways\b',
+    r'\bnever\b',
+    r'\bguarantee[sd]?\b',
+    r'\b100%\b',
+    r'\b99\.?\d*%',
+    r'\bbest\b',
+    r'\bfastest\b',
+    r'\bmost\b',
+    r'\bonly\b',
+    r'\ball\b',
+    r'\bevery\b',
+    r'\bunlimited\b',
+    r'\binstant(?:ly)?\b',
+    r'\bzero\b',
+]
 
 
-def check_claim_support(claim: str, materials: List[FounderMaterial]) -> tuple[bool, str]:
+def find_risky_words(text: str) -> List[str]:
     """
-    Check if a claim is supported by founder materials.
+    Find numbers, percents, superlatives, and guarantee words.
     
-    Returns (supported, supporting_passage).
+    Returns list of risky word spans found.
     """
-    claim_lower = claim.lower()
+    risky_words = []
+    for pattern in RISKY_PATTERNS:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            risky_words.append(match.group())
+    return risky_words
+
+
+def check_span_in_passage(span: str, passage: str) -> bool:
+    """
+    Check if a quoted span appears in the cited passage.
     
-    # Extract key terms from claim
-    claim_terms = set(re.findall(r'\b\w+\b', claim_lower))
+    Case-insensitive substring match.
+    """
+    return span.lower() in passage.lower()
+
+
+def check_risky_word_backed(risky_word: str, cited_passages: List[str]) -> bool:
+    """
+    Check if a risky word is backed by at least one cited passage.
     
-    # Remove common words
-    stop_words = {'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-                  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-                  'should', 'may', 'might', 'can', 'our', 'we', 'us', 'this', 'that',
-                  'it', 'its', 'for', 'with', 'from', 'to', 'of', 'in', 'on', 'at'}
-    claim_terms = claim_terms - stop_words
+    The word must appear in at least one of the cited passages.
+    """
+    risky_lower = risky_word.lower()
+    for passage in cited_passages:
+        if risky_lower in passage.lower():
+            return True
+    return False
+
+
+def verify_claim(
+    claim: Claim, 
+    materials_by_id: Dict[str, FounderMaterial]
+) -> tuple[bool, str]:
+    """
+    Verify a claim against founder materials.
     
-    best_match = None
-    best_score = 0
+    Returns (passed, failure_reason).
+    """
+    cited_passages = []
+    for passage_id in claim.cited_passage_ids:
+        if passage_id not in materials_by_id:
+            return False, f"Cited passage {passage_id} not found in founder materials"
+        cited_passages.append(materials_by_id[passage_id].passage)
     
-    for material in materials:
-        passage_lower = material.passage.lower()
-        passage_terms = set(re.findall(r'\b\w+\b', passage_lower))
-        
-        # Calculate overlap
-        overlap = len(claim_terms & passage_terms)
-        
-        if overlap > best_score:
-            best_score = overlap
-            best_match = f"{material.source}: {material.passage}"
+    if not cited_passages:
+        return False, "No passages cited"
     
-    # Require at least 2 matching terms for support
-    if best_score >= 2:
-        return True, best_match
+    for span in claim.quoted_spans:
+        found = False
+        for passage in cited_passages:
+            if check_span_in_passage(span, passage):
+                found = True
+                break
+        if not found:
+            return False, f"Quoted span '{span}' not found in any cited passage"
     
-    return False, ""
+    risky_words = find_risky_words(claim.text)
+    for risky_word in risky_words:
+        if not check_risky_word_backed(risky_word, cited_passages):
+            return False, f"Risky word '{risky_word}' not backed by cited passages"
+    
+    return True, ""
 
 
 @activity.defn(name="claim_gate")
@@ -90,57 +122,57 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     """
     Deterministic claim gate - verify all product claims.
     
-    Per ADR-0006: This is code, not model attestation.
-    Checks each claim against founder materials.
+    Per ADR-0006 and NB2: This is code, not model attestation.
+    Checks:
+    1. Each quoted span appears in the cited passage
+    2. Every number/percent/superlative/guarantee word is backed
     """
     activity.logger.info(
-        f"Running claim gate on draft ({len(input.draft_text)} chars, "
-        f"{len(input.founder_materials)} materials) (key: {input.idempotency_key})"
+        f"Running claim gate on {len(input.claims)} claim(s), "
+        f"{len(input.founder_materials)} materials (key: {input.idempotency_key})"
     )
     
-    # Extract claims
-    claims = extract_claims(input.draft_text)
-    
-    if not claims:
-        # No product claims, gate passes
-        activity.logger.info("No product claims found, gate passes")
+    if not input.claims:
+        activity.logger.info("No claims to check, gate passes")
         return ClaimGateResult(
             passed=True,
-            claims_checked=[],
-            unsupported_claims=[],
-            supported_claims={},
-            reasoning="No product claims detected in draft",
+            claims=[],
+            failed_claims=[],
+            reasoning="No product claims in draft",
         )
     
-    activity.logger.info(f"Found {len(claims)} potential claims to check")
+    materials_by_id = {}
+    for i, material in enumerate(input.founder_materials):
+        passage_id = material.passage_id or f"passage_{i}"
+        materials_by_id[passage_id] = material
     
-    # Check each claim
-    supported_claims = {}
-    unsupported_claims = []
+    activity.logger.info(f"Checking {len(input.claims)} claims against {len(materials_by_id)} passages")
     
-    for claim in claims:
-        supported, passage = check_claim_support(claim, input.founder_materials)
+    failed_claims = []
+    
+    for claim in input.claims:
+        passed, reason = verify_claim(claim, materials_by_id)
         
-        if supported:
-            supported_claims[claim] = passage
-            activity.logger.info(f"Claim supported: {claim[:50]}...")
+        if not passed:
+            failed_claims.append((claim, reason))
+            activity.logger.warning(
+                f"Claim failed: '{claim.text[:50]}...' - {reason}"
+            )
         else:
-            unsupported_claims.append(claim)
-            activity.logger.warning(f"Claim unsupported: {claim[:50]}...")
+            activity.logger.info(f"Claim passed: '{claim.text[:50]}...'")
     
-    passed = len(unsupported_claims) == 0
+    gate_passed = len(failed_claims) == 0
     
-    reasoning = (
-        "All claims supported by founder materials" if passed
-        else f"{len(unsupported_claims)} unsupported claim(s)"
-    )
+    if gate_passed:
+        reasoning = f"All {len(input.claims)} claim(s) verified against founder materials"
+    else:
+        reasoning = f"{len(failed_claims)} of {len(input.claims)} claim(s) failed verification"
     
-    activity.logger.info(f"Claim gate: {'PASS' if passed else 'FAIL'} - {reasoning}")
+    activity.logger.info(f"Claim gate: {'PASS' if gate_passed else 'FAIL'} - {reasoning}")
     
     return ClaimGateResult(
-        passed=passed,
-        claims_checked=claims,
-        unsupported_claims=unsupported_claims,
-        supported_claims=supported_claims,
+        passed=gate_passed,
+        claims=input.claims,
+        failed_claims=failed_claims,
         reasoning=reasoning,
     )

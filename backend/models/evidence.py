@@ -11,6 +11,16 @@ class FounderMaterial:
     source: str
     passage: str
     relevance: str
+    passage_id: Optional[str] = None  # Unique ID for this passage
+
+
+@dataclass
+class Claim:
+    """A product claim with cited evidence."""
+    
+    text: str
+    cited_passage_ids: List[str]
+    quoted_spans: List[str]
 
 
 @dataclass
@@ -18,9 +28,8 @@ class ClaimGateResult:
     """Result of claim gate validation."""
     
     passed: bool
-    claims_checked: List[str]
-    unsupported_claims: List[str]
-    supported_claims: Dict[str, str]
+    claims: List[Claim]
+    failed_claims: List[tuple[Claim, str]]
     reasoning: str
 
 
