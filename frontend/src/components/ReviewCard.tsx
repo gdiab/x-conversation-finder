@@ -344,6 +344,61 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         </div>
       )}
 
+      {/* Segments Detail (ADR-0006 Amendment: claims quoted with source_passage_id + sentence_index) */}
+      {card.evidence.draft && card.evidence.draft.segments && card.evidence.draft.segments.length > 0 && (
+        <div style={{ marginBottom: '20px' }}>
+          <h4>Segments (Evidence Trail)</h4>
+          <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
+            Claims are quoted verbatim from founder materials (sentence_index). Non-claims match closed-set patterns.
+          </div>
+          {card.evidence.draft.segments.map((segment, idx) => (
+            <div key={idx} style={{
+              backgroundColor: segment.kind === 'claim' ? '#e3f2fd' : '#f5f5f5',
+              padding: '12px',
+              borderRadius: '4px',
+              marginBottom: '8px',
+              border: `1px solid ${segment.kind === 'claim' ? '#2196f3' : '#9e9e9e'}`,
+            }}>
+              <div style={{ marginBottom: '8px' }}>
+                <span style={{
+                  display: 'inline-block',
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  fontSize: '12px',
+                  fontWeight: 'bold',
+                  backgroundColor: segment.kind === 'claim' ? '#1976d2' : '#757575',
+                  color: '#fff',
+                  marginRight: '8px',
+                }}>
+                  {segment.kind}
+                </span>
+                {segment.kind === 'claim' && segment.source_passage_id && segment.sentence_index !== null && (
+                  <span style={{ fontSize: '12px', color: '#666' }}>
+                    from {segment.source_passage_id} sentence {segment.sentence_index}
+                  </span>
+                )}
+              </div>
+              <div style={{ marginBottom: '8px' }}>"{segment.text}"</div>
+              {segment.kind === 'claim' && segment.source_passage_id && (
+                <div style={{ 
+                  fontSize: '12px', 
+                  color: '#0d47a1',
+                  padding: '8px',
+                  backgroundColor: '#fff',
+                  borderRadius: '4px',
+                  marginTop: '8px',
+                }}>
+                  <strong>Source:</strong> {
+                    card.evidence.founder_materials
+                      .find(m => m.passage_id === segment.source_passage_id)?.passage || 'N/A'
+                  }
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Draft Reply */}
       {card.evidence.draft && (
         <div style={{ marginBottom: '20px' }}>

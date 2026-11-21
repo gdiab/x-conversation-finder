@@ -43,7 +43,7 @@ export interface ReviewCard {
         text: string;
         kind: "claim" | "non_claim";
         source_passage_id: string | null;
-        quote: string | null;
+        sentence_index: number | null;
       }>;
       claim_gate: {
         passed: boolean;
@@ -51,13 +51,14 @@ export interface ReviewCard {
           text: string;
           kind: "claim" | "non_claim";
           source_passage_id: string | null;
-          quote: string | null;
+          sentence_index: number | null;
         }>;
         failed_sentences: Array<{
           sentence: string;
           reason: string;
         }>;
         reasoning: string;
+        draft_text: string;
         // Legacy fields for backwards compatibility
         claims: Array<{
           text: string;
