@@ -69,11 +69,11 @@ async def test_review_workflow_approve(sample_post, product_brief):
             
             await env.sleep(1)
             
-            # Confirm posted with reply URL
+            # Confirm posted with reply URL (different post ID, same conversation)
             client_request_id = str(uuid.uuid4())
             reply_msg = await handle.execute_update(
                 "confirm_posted",
-                args=["https://x.com/test/status/1001", client_request_id]
+                args=["https://x.com/founder/status/9999", client_request_id]
             )
             assert "Confirmed" in reply_msg
             

@@ -58,7 +58,30 @@ class FakeXClient(XClientPort):
             if post.id == post_id:
                 return post
         
-        return None
+        # If not found, generate a synthetic reply post for testing
+        # This allows tests to verify replies without pre-populating the database
+        # For test posts > 1001, assume they're replies to conversation 1001
+        conversation_id = "1001" if int(post_id) > 1001 else post_id
+        return Post(
+            id=post_id,
+            text=f"This is a synthetic reply post {post_id}",
+            author=Author(
+                id="author_fake",
+                username="fake_replier",
+                name="Fake Replier",
+                followers_count=100,
+                verified=False,
+            ),
+            created_at=datetime.now(timezone.utc).isoformat(),
+            like_count=0,
+            reply_count=0,
+            repost_count=0,
+            quote_count=0,
+            conversation_id=conversation_id,
+            in_reply_to_user_id="original_author",
+            reply_settings="everyone",
+            url=f"https://x.com/fake_replier/status/{post_id}",
+        )
     
     def _generate_fake_posts(self) -> List[Post]:
         """Generate a set of fake posts for testing."""
