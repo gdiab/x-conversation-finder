@@ -60,14 +60,28 @@ class FakeXClient(XClientPort):
         
         # If not found, generate a synthetic reply post for testing
         # This allows tests to verify replies without pre-populating the database
-        # For test posts > 1001, assume they're replies to conversation 1001
-        # For e2e test (99999), reply to e2e_9999
+        # Map reply IDs to their conversation IDs intelligently:
+        # - 99999: special e2e test case
+        # - 9999: maps to 1001 (original e2e pattern)
+        # - 10001-19999: replies to 1001
+        # - 20001-29999: replies to 1002
+        # - 30001-39999: replies to 1003
+        # - etc.
         if post_id == "99999":
             conversation_id = "e2e_9999"
-        elif int(post_id) > 1001:
-            conversation_id = "1001"
+        elif post_id == "9999":
+            conversation_id = "1001"  # Maintain backward compatibility
         else:
-            conversation_id = post_id
+            post_id_int = int(post_id)
+            if post_id_int >= 10000:
+                # Derive parent from ten-thousands digit
+                # 10005 -> 1000, 20003 -> 2000, etc.
+                parent_base = (post_id_int // 10000) * 1000
+                # Add the last digit to get actual parent ID
+                # 10005 -> 1005, 20003 -> 2003
+                conversation_id = str(parent_base + (post_id_int % 10))
+            else:
+                conversation_id = post_id
         
         return Post(
             id=post_id,

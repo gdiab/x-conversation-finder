@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from backend.workflows.review import ReviewWorkflow, ReviewInput
+from backend.workflows.review import ReviewWorkflow, ReviewInput, ReviewConfig
 from backend.activities.x_activities import XActivities
 from backend.activities.reply_activities import ReplyActivities
 from backend.activities.store_activities import store_card, update_card
@@ -502,3 +502,91 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
             assert "claim gate failed" in card["skip_reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_review_workflow_confirm_posted_with_post_1005(x_activities, reply_activities, product_brief):
+    """Test confirm_posted works with post 1005 (not just 1001)."""
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                store_card,
+                update_card,
+            ],
+        ):
+            # Use post 1005 specifically
+            from backend.models import Post, Author
+            post = Post(
+                id="1005",
+                text="Enterprise reliability challenges and solutions.",
+                author=Author(
+                    id="author_1005",
+                    username="enterprise_dev",
+                    name="Enterprise Dev",
+                    followers_count=30000,
+                    verified=True,
+                ),
+                created_at="2026-11-21T00:00:00Z",
+                like_count=100,
+                reply_count=20,
+                repost_count=50,
+                quote_count=10,
+                conversation_id="1005",
+                in_reply_to_user_id=None,
+                reply_settings="everyone",
+                url="https://x.com/enterprise_dev/status/1005",
+            )
+            
+            review_input = ReviewInput(
+                post=post,
+                account="test",
+                topic="reliability",
+                product_brief=product_brief,
+                config=ReviewConfig(
+                    review_timeout_hours=1,
+                    followup_delay_days=3,
+                    followup_delay_seconds=8,
+                    activity_timeout_medium_sec=30,
+                    activity_timeout_long_sec=60,
+                    activity_max_attempts=2,
+                    claim_gate_max_attempts=2,
+                ),
+            )
+            
+            workflow_id = "review:test:1005_confirm"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Approve
+            client_request_id = str(uuid.uuid4())
+            await handle.signal(
+                "approve",
+                args=["https://x.com/test/status/999", client_request_id]
+            )
+            
+            await env.sleep(1)
+            
+            # Confirm posted with a reply ID > 1001 (fake client maps to conversation 1005)
+            client_request_id = str(uuid.uuid4())
+            await handle.execute_update(
+                "confirm_posted",
+                args=["https://x.com/founder/status/10005", client_request_id]
+            )
+            
+            # Should work without error - fake client maps post 10005 to conversation 1005
