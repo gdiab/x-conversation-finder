@@ -116,8 +116,6 @@ class ReviewWorkflow:
         self._edit_requests: set[str] = set()
         self._confirm_requests: set[str] = set()
         self._nudge_requests: set[str] = set()
-        # Determinism: interruptible follow-up wait
-        self._cancel_followup = False
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state."""
@@ -355,17 +353,9 @@ class ReviewWorkflow:
         followup_seconds = followup_delay * SECONDS_PER_DAY
         workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
         
-        # Determinism: Use wait_condition for interruptible timer
-        try:
-            await workflow.wait_condition(
-                lambda: self._cancel_followup,
-                timeout=timedelta(seconds=followup_seconds)
-            )
-            workflow.logger.info("Follow-up timer cancelled")
-            return "followup_cancelled"
-        except asyncio.TimeoutError:
-            # Timer expired normally
-            workflow.logger.info("Follow-up timer completed")
+        # Wait for follow-up delay
+        await asyncio.sleep(followup_seconds)
+        workflow.logger.info("Follow-up timer completed")
         
         # Step 6: Check for follow-up replies (capped)
         workflow.logger.info("Follow-up timer fired, checking for replies")
