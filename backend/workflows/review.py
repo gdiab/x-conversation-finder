@@ -544,19 +544,56 @@ class ReviewWorkflow:
     
     @workflow.query
     def get_card(self) -> dict:
-        """Query to get the current card state."""
+        """
+        Query to get the current card state.
+        
+        Returns a dict matching ReviewCard schema (see models/review.py).
+        """
         if not self.evidence:
-            return {"status": self.status.value, "evidence": None}
+            return {
+                "status": self.status.value,
+                "evidence": None,
+                "approved": self.approved,
+                "confirmed": self.confirmed,
+                "posted_url": self.posted_url,
+                "reply_post_id": self.reply_post_id,
+                "skip_reason": self.skip_reason,
+            }
         
         return {
             "status": self.status.value,
+            "approved": self.approved,
+            "confirmed": self.confirmed,
+            "posted_url": self.posted_url,
+            "reply_post_id": self.reply_post_id,
+            "skip_reason": self.skip_reason,
             "evidence": {
                 "post_id": self.evidence.post_id,
                 "matched_topic": self.evidence.matched_topic,
+                "why_it_fits": self.evidence.why_it_fits,
                 "confidence_score": self.evidence.confidence_score,
+                "confidence_inputs": self.evidence.confidence_inputs,
+                "founder_materials": [
+                    {
+                        "source": m.source,
+                        "passage": m.passage,
+                        "relevance": m.relevance,
+                    }
+                    for m in self.evidence.founder_materials
+                ],
                 "draft": {
                     "text": self.evidence.draft.text,
-                    "claim_gate_passed": self.evidence.draft.claim_gate.passed,
+                    "claim_gate": {
+                        "passed": self.evidence.draft.claim_gate.passed,
+                        "claims_checked": self.evidence.draft.claim_gate.claims_checked,
+                        "unsupported_claims": self.evidence.draft.claim_gate.unsupported_claims,
+                        "supported_claims": self.evidence.draft.claim_gate.supported_claims,
+                        "reasoning": self.evidence.draft.claim_gate.reasoning,
+                    },
+                    "steers_applied": self.evidence.draft.steers_applied,
+                    "token_count": self.evidence.draft.token_count,
+                    "model_used": self.evidence.draft.model_used,
                 } if self.evidence.draft else None,
+                "skip_reason": self.evidence.skip_reason,
             },
         }

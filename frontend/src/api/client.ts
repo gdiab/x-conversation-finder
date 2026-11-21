@@ -45,7 +45,14 @@ export interface ReviewCard {
   updated_at: string;
   approved_by: string | null;
   posted_url: string | null;
+  reply_post_id: string | null;
   skip_reason: string | null;
+  followup_replies: Array<{
+    id: string;
+    text: string;
+    author: string;
+    url: string;
+  }> | null;
 }
 
 export interface StartWatchRequest {
