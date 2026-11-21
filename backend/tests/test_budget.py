@@ -253,10 +253,11 @@ def test_reserve_inference_budget_per_token_pricing(temp_db):
         from backend.database import init_db
         init_db()
         
-        cost = reserve_inference_budget(input_tokens=100, output_tokens=50)
+        cost, reservation_date = reserve_inference_budget(input_tokens=100, output_tokens=50)
         
         expected_cost = (100 * 0.001) + (50 * 0.002)
         assert abs(cost - expected_cost) < 0.0001
+        assert reservation_date is not None  # R5-B1: returns date
 
 
 def test_reserve_inference_budget_enforces_cap_first_call(temp_db):

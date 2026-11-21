@@ -25,7 +25,6 @@ QUICK_ACTIVITY_TIMEOUT_SEC = 10
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
         ReviewCard,
-        ReviewStatus,
         Post,
         Evidence,
     )
