@@ -114,6 +114,42 @@ def make_review_input(sample_post, product_brief):
 
 
 @pytest.fixture
+def make_topic_watch_input(product_brief):
+    """Factory fixture for creating TopicWatchInput with test config."""
+    from backend.workflows.topic_watch import TopicWatchInput, TopicWatchConfig
+    from backend.workflows.review import ReviewConfig
+    
+    def _make(**overrides):
+        defaults = {
+            'account': 'test',
+            'topic': 'reliability',
+            'query': 'reliability',
+            'product_brief': product_brief,
+            'max_results': 5,
+            'confidence_threshold': 0.5,
+            'continue_as_new_after': 100,
+            'config': TopicWatchConfig(
+                poll_interval_hours=1,  # Short for tests
+                activity_timeout_medium_sec=30,
+                activity_max_attempts=3,
+            ),
+            'review_config': ReviewConfig(
+                activity_timeout_short_sec=10,
+                activity_timeout_medium_sec=30,
+                activity_timeout_long_sec=60,
+                claim_gate_max_attempts=2,
+                followup_delay_days=1,
+                activity_max_attempts=3,
+                review_timeout_hours=1,
+            )
+        }
+        defaults.update(overrides)
+        return TopicWatchInput(**defaults)
+    
+    return _make
+
+
+@pytest.fixture
 def product_brief():
     """Sample product brief."""
     return """

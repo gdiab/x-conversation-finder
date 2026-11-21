@@ -19,7 +19,7 @@ from backend.adapters import FakeXClient, FakeReplyAgent
 
 
 @pytest.mark.asyncio
-async def test_topic_watch_workflow_single_iteration(product_brief, x_activities, reply_activities):
+async def test_topic_watch_workflow_single_iteration(make_topic_watch_input, x_activities, reply_activities):
     """Test TopicWatch completes one iteration."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -39,18 +39,10 @@ async def test_topic_watch_workflow_single_iteration(product_brief, x_activities
         ):
             workflow_id = "watch:test:reliability_single"
             
+            topic_watch_input = make_topic_watch_input(query="reliability distributed systems")
             handle = await env.client.start_workflow(
                 TopicWatchWorkflow.run,
-                TopicWatchInput(
-                    account="test",
-                    topic="reliability",
-                    query="reliability distributed systems",
-                    product_brief=product_brief,
-                    poll_interval_hours=1,
-                    max_results=5,
-                    confidence_threshold=0.5,
-                    continue_as_new_after=100,
-                ),
+                topic_watch_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -64,7 +56,7 @@ async def test_topic_watch_workflow_single_iteration(product_brief, x_activities
 
 
 @pytest.mark.asyncio
-async def test_topic_watch_workflow_spawns_reviews(product_brief, x_activities, reply_activities):
+async def test_topic_watch_workflow_spawns_reviews(make_topic_watch_input, x_activities, reply_activities):
     """Test TopicWatch spawns Review child workflows."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -84,18 +76,10 @@ async def test_topic_watch_workflow_spawns_reviews(product_brief, x_activities, 
         ):
             workflow_id = "watch:test:reliability_reviews"
             
+            topic_watch_input = make_topic_watch_input()
             handle = await env.client.start_workflow(
                 TopicWatchWorkflow.run,
-                TopicWatchInput(
-                    account="test",
-                    topic="reliability",
-                    query="reliability",
-                    product_brief=product_brief,
-                    poll_interval_hours=1,
-                    max_results=5,
-                    confidence_threshold=0.5,
-                    continue_as_new_after=100,
-                ),
+                topic_watch_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -109,7 +93,7 @@ async def test_topic_watch_workflow_spawns_reviews(product_brief, x_activities, 
 
 
 @pytest.mark.asyncio
-async def test_topic_watch_workflow_continue_as_new(product_brief, x_activities, reply_activities):
+async def test_topic_watch_workflow_continue_as_new(make_topic_watch_input, x_activities, reply_activities):
     """Test TopicWatch uses Continue-As-New after threshold."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -129,18 +113,10 @@ async def test_topic_watch_workflow_continue_as_new(product_brief, x_activities,
         ):
             workflow_id = "watch:test:reliability_can"
             
+            topic_watch_input = make_topic_watch_input(continue_as_new_after=2)
             handle = await env.client.start_workflow(
                 TopicWatchWorkflow.run,
-                TopicWatchInput(
-                    account="test",
-                    topic="reliability",
-                    query="reliability",
-                    product_brief=product_brief,
-                    poll_interval_hours=1,
-                    max_results=5,
-                    confidence_threshold=0.5,
-                    continue_as_new_after=2,
-                ),
+                topic_watch_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -154,7 +130,7 @@ async def test_topic_watch_workflow_continue_as_new(product_brief, x_activities,
 
 
 @pytest.mark.asyncio
-async def test_topic_watch_duplicate_post_skipped(product_brief, x_activities, reply_activities):
+async def test_topic_watch_duplicate_post_skipped(make_topic_watch_input, x_activities, reply_activities):
     """Test that TopicWatch doesn't start duplicate Review for same post ID."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -175,19 +151,13 @@ async def test_topic_watch_duplicate_post_skipped(product_brief, x_activities, r
             workflow_id = "watch:test:reliability_dup"
             
             # Start with seen_post_ids already containing post 1001
+            topic_watch_input = make_topic_watch_input(
+                continue_as_new_after=10,
+                seen_post_ids=["1001"]  # Pre-populate with post 1001
+            )
             handle = await env.client.start_workflow(
                 TopicWatchWorkflow.run,
-                TopicWatchInput(
-                    account="test",
-                    topic="reliability",
-                    query="reliability",
-                    product_brief=product_brief,
-                    poll_interval_hours=1,
-                    max_results=5,
-                    confidence_threshold=0.5,
-                    continue_as_new_after=10,
-                    seen_post_ids=["1001"],  # Pre-populate with post 1001
-                ),
+                topic_watch_input,
                 id=workflow_id,
                 task_queue="test",
             )

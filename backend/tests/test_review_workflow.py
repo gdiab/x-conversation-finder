@@ -21,7 +21,7 @@ from backend.adapters import FakeXClient, FakeReplyAgent
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_approve(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_approve(make_review_input, x_activities, reply_activities):
     """Test Review workflow with approval."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -39,17 +39,12 @@ async def test_review_workflow_approve(sample_post, product_brief, x_activities,
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -58,7 +53,7 @@ async def test_review_workflow_approve(sample_post, product_brief, x_activities,
             
             card = await handle.query("get_card")
             assert card["status"] == "pending"
-            assert card["evidence"]["post_id"] == sample_post.id
+            assert card["evidence"]["post_id"] == review_input.post.id
             
             # Approve
             client_request_id = str(uuid.uuid4())
@@ -85,7 +80,7 @@ async def test_review_workflow_approve(sample_post, product_brief, x_activities,
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_skip(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_skip(make_review_input, x_activities, reply_activities):
     """Test Review workflow with skip."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -103,17 +98,12 @@ async def test_review_workflow_skip(sample_post, product_brief, x_activities, re
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_skip"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_skip"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -131,7 +121,7 @@ async def test_review_workflow_skip(sample_post, product_brief, x_activities, re
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_nudge(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_nudge(make_review_input, x_activities, reply_activities):
     """Test Review workflow with nudge (redraft)."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -149,17 +139,12 @@ async def test_review_workflow_nudge(sample_post, product_brief, x_activities, r
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_nudge"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_nudge"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -198,7 +183,7 @@ async def test_review_workflow_nudge(sample_post, product_brief, x_activities, r
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_timeout(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_timeout(make_review_input, x_activities, reply_activities):
     """Test Review workflow expires after 48h."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -216,17 +201,12 @@ async def test_review_workflow_timeout(sample_post, product_brief, x_activities,
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_timeout"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_timeout"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -238,7 +218,7 @@ async def test_review_workflow_timeout(sample_post, product_brief, x_activities,
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_low_confidence(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_low_confidence(make_review_input, x_activities, reply_activities):
     """Test Review workflow skips on low confidence."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -256,17 +236,12 @@ async def test_review_workflow_low_confidence(sample_post, product_brief, x_acti
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_low_conf"
+            review_input = make_review_input(confidence_threshold=0.95)
+            workflow_id = f"review:test:{review_input.post.id}_low_conf"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.95,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -276,7 +251,7 @@ async def test_review_workflow_low_confidence(sample_post, product_brief, x_acti
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_approved_not_confirmed(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_approved_not_confirmed(make_review_input, x_activities, reply_activities):
     """Test Review workflow expires to approved_not_confirmed if no confirmation."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -294,17 +269,12 @@ async def test_review_workflow_approved_not_confirmed(sample_post, product_brief
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_not_confirmed"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_not_confirmed"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -326,7 +296,7 @@ async def test_review_workflow_approved_not_confirmed(sample_post, product_brief
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_confirm_posted_invalid_url(make_review_input, x_activities, reply_activities):
     """Test confirm_posted rejects invalid URL."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -344,17 +314,12 @@ async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_b
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_invalid_url"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_invalid_url"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -388,7 +353,7 @@ async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_b
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_duplicate_approve_ignored(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_activities, reply_activities):
     """Test that duplicate approve requests with same request_id are ignored."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -406,17 +371,12 @@ async def test_review_workflow_duplicate_approve_ignored(sample_post, product_br
                 update_card,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_dup_approve"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_dup_approve"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -445,8 +405,8 @@ async def test_review_workflow_duplicate_approve_ignored(sample_post, product_br
             assert card["status"] == "approved"
 
 
-@pytest.mark.asyncio  
-async def test_review_workflow_claim_gate_regenerate_then_skip(sample_post, product_brief, x_activities, reply_activities):
+@pytest.mark.asyncio
+async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input, x_activities, reply_activities):
     """Test claim gate failure triggers regenerate, then skip after max attempts."""
     from backend.activities.claim_gate_activity import ClaimGateInput, ClaimGateResult
     from temporalio import activity
@@ -482,17 +442,12 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(sample_post, prod
                 x_activities.check_followup,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_claim_fail"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_claim_fail"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
