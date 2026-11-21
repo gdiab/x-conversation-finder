@@ -30,7 +30,7 @@ jobs:
     - name: Run tests
       run: |
         cd backend
-        pytest -v -m "not integration" --tb=short
+        pytest -v --tb=short
     
     - name: Check for secrets in code
       run: |
@@ -59,13 +59,27 @@ jobs:
     
     - name: Install Temporal CLI
       run: |
-        curl -sSf https://temporal.download/cli.sh | sh
-        echo "$HOME/.temporalio/bin" >> $GITHUB_PATH
+        VERSION="1.1.1"
+        curl -L "https://temporal.download/cli/archive/v${VERSION}/temporal_cli_${VERSION}_linux_amd64.tar.gz" -o temporal.tar.gz
+        tar -xzf temporal.tar.gz -C /tmp
+        sudo mv /tmp/temporal /usr/local/bin/
+        temporal --version
     
     - name: Start Temporal dev server
       run: |
         temporal server start-dev &
-        sleep 10
+        # Wait for server to be ready (poll port 7233)
+        for i in {1..30}; do
+          if timeout 1 bash -c "echo > /dev/tcp/localhost/7233" 2>/dev/null; then
+            echo "Temporal server is ready"
+            break
+          fi
+          if [ $i -eq 30 ]; then
+            echo "Temporal server failed to start within 30s"
+            exit 1
+          fi
+          sleep 1
+        done
     
     - name: Run integration tests
       run: |

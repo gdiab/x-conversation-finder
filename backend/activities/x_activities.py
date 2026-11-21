@@ -8,6 +8,7 @@ from backend.models import Post
 from backend.ports import XClientPort
 from backend.budget import reserve_x_budget, reconcile_x_reads, BudgetExceeded
 from backend.config import get_settings
+from temporalio.exceptions import ApplicationError
 
 
 @dataclass
@@ -18,6 +19,7 @@ class SearchRecentInput:
     since_id: Optional[str] = None
     max_results: int = 10
     idempotency_key: str = ""
+    poll_interval_hours: Optional[int] = None  # For adapter validation (item 3)
 
 
 @dataclass
@@ -67,11 +69,31 @@ class XActivities:
         Idempotent: same query + since_id returns cached results within 24h UTC.
         Cost tracking: updates the daily spend ledger.
         Budget enforcement: checks daily cap before calling.
+        Poll interval validation: HTTP adapter rejects sub-1h and negative intervals (item 3).
         """
         activity.logger.info(
             f"Searching X for '{input.query}' since_id={input.since_id} "
             f"(key: {input.idempotency_key})"
         )
+        
+        # Item 3: Validate poll interval with HTTP adapter
+        # Negative intervals are rejected regardless of adapter
+        if input.poll_interval_hours is not None:
+            if input.poll_interval_hours < 0:
+                raise ApplicationError(
+                    f"Poll interval cannot be negative: {input.poll_interval_hours}h",
+                    non_retryable=True,
+                    type="InvalidPollInterval"
+                )
+            
+            # HTTP adapter rejects sub-1h (only fake adapter allows it for testing)
+            from backend.adapters.http_x_client import HttpXClient
+            if isinstance(self._x_client, HttpXClient) and input.poll_interval_hours < 1:
+                raise ApplicationError(
+                    f"HTTP X adapter requires poll interval >= 1h, got {input.poll_interval_hours}h",
+                    non_retryable=True,
+                    type="InvalidPollInterval"
+                )
         
         settings = get_settings()
         

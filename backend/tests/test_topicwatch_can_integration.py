@@ -28,16 +28,55 @@ from backend.database import get_db, BudgetReconciliationDB
 
 
 class CountingFakeXClient(FakeXClient):
-    """FakeXClient that counts how many posts it actually served."""
+    """FakeXClient that counts how many posts it actually served.
+    
+    Returns posts on every poll (simulates new posts arriving) to test budget
+    reconciliation across Continue-As-New boundaries.
+    """
     
     def __init__(self):
         super().__init__()
         self.total_posts_served = 0
+        self.poll_count = 0
     
     async def search_recent(self, query, since_id=None, max_results=10):
-        results, newest_id = await super().search_recent(query, since_id, max_results)
-        self.total_posts_served += len(results)
-        return results, newest_id
+        self.poll_count += 1
+        
+        # Return 3 posts on each poll (simulates new posts arriving)
+        # This ensures budget reconciliation is tested across multiple iterations
+        from backend.models import Post, Author
+        from datetime import datetime, timezone
+        
+        # Generate synthetic posts for each poll
+        base_id = 10000 + (self.poll_count * 100)
+        posts = []
+        for i in range(3):
+            post_id = str(base_id + i)
+            post = Post(
+                id=post_id,
+                text=f"Test post {post_id} about reliability",
+                author=Author(
+                    id=f"author_{post_id}",
+                    username=f"user_{post_id}",
+                    name=f"User {post_id}",
+                    followers_count=1000,
+                    verified=False,
+                ),
+                created_at=datetime.now(timezone.utc).isoformat(),
+                like_count=10,
+                reply_count=5,
+                repost_count=2,
+                quote_count=1,
+                conversation_id=post_id,
+                in_reply_to_user_id=None,
+                reply_settings="everyone",
+                url=f"https://x.com/user_{post_id}/status/{post_id}",
+            )
+            posts.append(post)
+        
+        self.total_posts_served += len(posts)
+        newest_id = posts[0].id if posts else since_id
+        return posts, newest_id
 
 
 @pytest.mark.integration
@@ -147,8 +186,9 @@ async def test_topicwatch_budget_across_multiple_can():
                 run_ids_seen.add(desc.run_id)
                 
                 if len(run_ids_seen) >= target_run_count:
-                    # Terminate workflow to stop polling
-                    await handle.terminate()
+                    # Stop workflow via signal (clean shutdown)
+                    await handle.signal("stop")
+                    await asyncio.sleep(2)  # Let it finish current iteration
                     break
             except Exception:
                 # Workflow might have completed or been terminated

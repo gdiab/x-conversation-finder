@@ -128,6 +128,7 @@ class TopicWatchWorkflow:
                         since_id=since_id,
                         max_results=input.max_results,
                         idempotency_key=f"{input.account}:{input.topic}:{iteration}",
+                        poll_interval_hours=poll_interval_hours,  # Item 3: pass for adapter validation
                     ),
                     start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
                     retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
