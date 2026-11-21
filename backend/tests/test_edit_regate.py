@@ -58,8 +58,8 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             assert card["status"] == "pending"
             original_text = card["evidence"]["draft"]["text"]
             
-            # Edit to valid text (just rearrange but keep valid sentences)
-            edited_text = "Thanks for raising this point. Our product helps developers build reliable systems. Happy to share more."
+            # Edit to valid text (using closed-set non_claims from the allowlist)
+            edited_text = "Thanks! Our product helps developers build reliable systems. Happy to share more details."
             client_request_id = str(uuid.uuid4())
             result_text = await handle.execute_update(
                 "edit",
@@ -576,7 +576,8 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
     Also tests that pytest.raises uses WorkflowUpdateFailedError (not generic Exception).
     """
     import asyncio
-    from temporalio.exceptions import WorkflowUpdateFailedError
+    from temporalio.client import WorkflowUpdateFailedError
+    from temporalio.exceptions import ApplicationError
     
     # Setup blocking gate activity
     gate_called_event = asyncio.Event()
@@ -584,7 +585,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
     
     from temporalio import activity as activity_module
     
-    @activity_module.defn
+    @activity_module.defn(name="verify_edited_text")
     async def verify_edited_text_blocking(input):
         """Blocking version of verify_edited_text for concurrency test."""
         from temporalio import activity
@@ -678,7 +679,7 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
     
     from temporalio import activity as activity_module
     
-    @activity_module.defn
+    @activity_module.defn(name="verify_edited_text")
     async def verify_edited_text_failing(input):
         """Failing version of verify_edited_text that exhausts retries."""
         from temporalio import activity
