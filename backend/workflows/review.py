@@ -75,6 +75,7 @@ class ReviewWorkflow:
         self.reply_post_id: Optional[str] = None
         self.skip_reason: Optional[str] = None
         self.client_request_id: Optional[str] = None
+        self._processed_requests: set[str] = set()
     
     @workflow.run
     async def run(self, input: ReviewInput) -> str:
@@ -358,33 +359,45 @@ class ReviewWorkflow:
             raise
     
     @workflow.signal
-    def approve(self, posted_url: str, client_request_id: str):
+    async def approve(self, posted_url: str, client_request_id: str):
         """
         Approve signal - founder will post this.
         
         Per ADR-0004: approve just yields the copy text.
         The founder posts manually and then calls confirm_posted.
         """
-        if self.client_request_id == client_request_id:
-            workflow.logger.info(f"Duplicate approve signal: {client_request_id}")
+        # Deduplicate
+        if client_request_id in self._processed_requests:
+            workflow.logger.info(f"Ignoring duplicate approve signal: {client_request_id}")
             return
         
-        workflow.logger.info(f"Received approve signal: {posted_url}")
+        workflow.logger.info(f"Received approve signal")
+        self._processed_requests.add(client_request_id)
+        
         self.approved = True
         self.posted_url = posted_url
-        self.client_request_id = client_request_id
+        self.status = ReviewStatus.APPROVED
+        
+        # Signal completion
+        await workflow.wait_condition(lambda: True)
     
     @workflow.signal
-    def skip(self, reason: str, client_request_id: str):
+    async def skip(self, reason: str, client_request_id: str):
         """Skip signal - founder declines to post."""
-        if self.client_request_id == client_request_id:
-            workflow.logger.info(f"Duplicate skip signal: {client_request_id}")
+        # Deduplicate
+        if client_request_id in self._processed_requests:
+            workflow.logger.info(f"Ignoring duplicate skip signal: {client_request_id}")
             return
         
-        workflow.logger.info(f"Received skip signal: {reason}")
+        workflow.logger.info(f"Received skip signal")
+        self._processed_requests.add(client_request_id)
+        
         self.skipped = True
         self.skip_reason = reason
-        self.client_request_id = client_request_id
+        self.status = ReviewStatus.SKIPPED
+        
+        # Signal completion
+        await workflow.wait_condition(lambda: True)
     
     @workflow.update
     async def confirm_posted(self, reply_url: str, client_request_id: str) -> str:
@@ -394,7 +407,20 @@ class ReviewWorkflow:
         Parses reply post ID from URL, verifies it's a reply to our target post.
         Returns success message or raises error if invalid.
         """
+        # Deduplicate
+        if client_request_id in self._processed_requests:
+            workflow.logger.info(f"Ignoring duplicate confirm_posted: {client_request_id}")
+            return f"Already confirmed reply {self.reply_post_id}"
+        
+        # Validate
+        if not self.approved:
+            raise ValueError("Cannot confirm: draft not approved yet")
+        
+        if self.status != ReviewStatus.APPROVED:
+            raise ValueError(f"Cannot confirm in status {self.status.value}")
+        
         workflow.logger.info(f"Received confirm_posted: {reply_url}")
+        self._processed_requests.add(client_request_id)
         
         # Parse reply post ID from URL
         # Expected format: https://x.com/username/status/1234567890
@@ -448,10 +474,20 @@ class ReviewWorkflow:
     @workflow.update
     async def edit(self, new_text: str, client_request_id: str) -> str:
         """Edit update - founder edits the draft."""
-        workflow.logger.info(f"Received edit update: {len(new_text)} chars")
+        # Deduplicate
+        if client_request_id in self._processed_requests:
+            workflow.logger.info(f"Ignoring duplicate edit: {client_request_id}")
+            return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
+        
+        # Validate
+        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
+            raise ValueError(f"Cannot edit in status {self.status.value}")
         
         if not self.evidence or not self.evidence.draft:
             raise ValueError("No draft to edit")
+        
+        workflow.logger.info(f"Received edit update: {len(new_text)} chars")
+        self._processed_requests.add(client_request_id)
         
         self.evidence.draft.text = new_text
         self.evidence.draft.steers_applied.append("manual_edit")
@@ -473,10 +509,20 @@ class ReviewWorkflow:
     @workflow.update
     async def nudge(self, instruction: str, client_request_id: str) -> str:
         """Nudge update - steer a redraft."""
-        workflow.logger.info(f"Received nudge update: {instruction}")
+        # Deduplicate
+        if client_request_id in self._processed_requests:
+            workflow.logger.info(f"Ignoring duplicate nudge: {client_request_id}")
+            return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
+        
+        # Validate
+        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
+            raise ValueError(f"Cannot nudge in status {self.status.value}")
         
         if not self.evidence:
             raise ValueError("No evidence to nudge")
+        
+        workflow.logger.info(f"Received nudge update: {instruction}")
+        self._processed_requests.add(client_request_id)
         
         self.evidence = await workflow.execute_activity(
             "draft_reply",
