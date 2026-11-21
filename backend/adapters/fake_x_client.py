@@ -61,7 +61,14 @@ class FakeXClient(XClientPort):
         # If not found, generate a synthetic reply post for testing
         # This allows tests to verify replies without pre-populating the database
         # For test posts > 1001, assume they're replies to conversation 1001
-        conversation_id = "1001" if int(post_id) > 1001 else post_id
+        # For e2e test (99999), reply to e2e_9999
+        if post_id == "99999":
+            conversation_id = "e2e_9999"
+        elif int(post_id) > 1001:
+            conversation_id = "1001"
+        else:
+            conversation_id = post_id
+        
         return Post(
             id=post_id,
             text=f"This is a synthetic reply post {post_id}",

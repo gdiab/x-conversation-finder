@@ -2,7 +2,7 @@
 # E2E test - Direct Review workflow start
 # Tests: card → approve → confirm → followup timer → check_followup
 
-set -e
+set -euo pipefail
 
 echo "=== X Conversation Finder E2E Test (Direct Review) ==="
 date
@@ -147,7 +147,7 @@ async def main():
         config=config
     )
     
-    print("[1] Starting Review workflow...")
+    print("[1] Starting Review workflow...", file=sys.stderr)
     client = await Client.connect("localhost:7233")
     handle = await client.start_workflow(
         ReviewWorkflow.run,
@@ -155,11 +155,11 @@ async def main():
         id=f"review:e2e-test:{post.id}",
         task_queue="x-conversation-finder"
     )
-    print(f"✓ Workflow started: {handle.id}")
-    return handle.id
+    print(f"✓ Workflow started: {handle.id}", file=sys.stderr)
+    # Only print workflow ID to stdout
+    print(handle.id)
 
-workflow_id = asyncio.run(main())
-print(workflow_id)
+asyncio.run(main())
 PYEOF
 )
 
@@ -196,28 +196,61 @@ echo ""
 
 # Approve
 echo "[4] Approving review..."
-HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/approve-response.txt -X POST "http://localhost:8001/api/reviews/$WORKFLOW_ID/approve" \
+set +e  # Don't exit on curl failure
+APPROVE_OUTPUT=$(curl -sS -w "\n%{http_code}" -X POST "http://localhost:8001/api/reviews/$WORKFLOW_ID/approve" \
   -H "Content-Type: application/json" \
-  -d '{"posted_url": "https://x.com/founder/status/12345", "client_request_id": "e2e-approve"}')
+  -d "{\"posted_url\": \"https://x.com/founder/status/12345\", \"client_request_id\": \"e2e-approve\"}" 2>&1)
+CURL_EXIT=$?
+set -e
 
-if [ "$HTTP_CODE" != "200" ]; then
-    echo "❌ Approve failed with HTTP $HTTP_CODE"
-    cat /tmp/approve-response.txt
+if [ $CURL_EXIT -ne 0 ]; then
+    echo "❌ Approve curl failed with exit code $CURL_EXIT"
+    echo "Output: $APPROVE_OUTPUT"
     exit 1
 fi
 
-APPROVE=$(cat /tmp/approve-response.txt)
-(echo "$APPROVE" | python3 -m json.tool 2>/dev/null | head -5) || echo "$APPROVE"
+HTTP_CODE=$(echo "$APPROVE_OUTPUT" | tail -n 1)
+APPROVE_BODY=$(echo "$APPROVE_OUTPUT" | head -n -1)
+
+if [ "$HTTP_CODE" != "200" ]; then
+    echo "❌ Approve failed with HTTP $HTTP_CODE"
+    echo "Body: $APPROVE_BODY"
+    exit 1
+fi
+
+echo "$APPROVE_BODY" | python3 -m json.tool 2>/dev/null || echo "$APPROVE_BODY"
 echo "✓ Review approved"
 sleep 2
 echo ""
 
 # Confirm posted
 echo "[5] Confirming posted reply..."
-CONFIRM=$(curl -s -X POST "http://localhost:8001/api/reviews/$WORKFLOW_ID/confirm_posted" \
+set +e
+CONFIRM_OUTPUT=$(timeout 30 curl -sS -w "\n%{http_code}" -X POST "http://localhost:8001/api/reviews/$WORKFLOW_ID/confirm_posted" \
   -H "Content-Type: application/json" \
-  -d '{"reply_url": "https://x.com/founder/status/99999", "client_request_id": "e2e-confirm"}') || { echo "❌ Confirm failed"; exit 1; }
-(echo "$CONFIRM" | python3 -m json.tool 2>/dev/null | head -5) || echo "$CONFIRM"
+  -d "{\"reply_url\": \"https://x.com/founder/status/99999\", \"client_request_id\": \"e2e-confirm\"}" 2>&1)
+CURL_EXIT=$?
+set -e
+
+if [ $CURL_EXIT -eq 124 ]; then
+    echo "❌ Confirm timed out after 30s"
+    exit 1
+elif [ $CURL_EXIT -ne 0 ]; then
+    echo "❌ Confirm curl failed with exit code $CURL_EXIT"
+    echo "Output: $CONFIRM_OUTPUT"
+    exit 1
+fi
+
+HTTP_CODE=$(echo "$CONFIRM_OUTPUT" | tail -n 1)
+CONFIRM_BODY=$(echo "$CONFIRM_OUTPUT" | head -n -1)
+
+if [ "$HTTP_CODE" != "200" ]; then
+    echo "❌ Confirm failed with HTTP $HTTP_CODE"
+    echo "Body: $CONFIRM_BODY"
+    exit 1
+fi
+
+echo "$CONFIRM_BODY" | python3 -m json.tool 2>/dev/null || echo "$CONFIRM_BODY"
 echo "✓ Reply confirmed, follow-up timer starting"
 echo ""
 
@@ -237,11 +270,14 @@ try:
         card = data['cards'][0]
         print(f\"✓ Final status: {card['status']}\")
         print(f\"  Posted URL: {card.get('posted_url', 'N/A')}\")
-        print(f\"  Follow-up replies checked: {len(card.get('followup_replies', []))} found\")
+        followup_replies = card.get('followup_replies') or []
+        print(f\"  Follow-up replies checked: {len(followup_replies)} found\")
     else:
         print('❌ No card found')
 except Exception as e:
     print(f'❌ Error: {e}')
+    import traceback
+    traceback.print_exc()
 " || echo "$FINAL"
 echo ""
 
