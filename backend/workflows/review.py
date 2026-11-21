@@ -38,6 +38,31 @@ with workflow.unsafe.imports_passed_through():
     from backend.config import get_settings
 
 
+@dataclass(frozen=True)
+class ReviewConfig:
+    """Workflow config passed through input for determinism."""
+    activity_timeout_short_sec: int = 10
+    activity_timeout_medium_sec: int = 30
+    activity_timeout_long_sec: int = 60
+    claim_gate_max_attempts: int = 2
+    followup_delay_days: int = 3
+    activity_max_attempts: int = 3
+    review_timeout_hours: int = 48
+    
+    @staticmethod
+    def from_settings(settings):
+        """Create ReviewConfig from Settings."""
+        return ReviewConfig(
+            activity_timeout_short_sec=settings.activity_timeout_short_sec,
+            activity_timeout_medium_sec=settings.activity_timeout_medium_sec,
+            activity_timeout_long_sec=settings.activity_timeout_long_sec,
+            claim_gate_max_attempts=settings.claim_gate_max_attempts,
+            followup_delay_days=settings.followup_delay_days,
+            activity_max_attempts=settings.activity_max_attempts,
+            review_timeout_hours=settings.review_timeout_hours,
+        )
+
+
 @dataclass
 class ReviewInput:
     """Input for Review workflow."""
@@ -47,14 +72,12 @@ class ReviewInput:
     product_brief: str
     account: str
     confidence_threshold: float = 0.6
-    # Determinism: Config durations passed through input
-    activity_timeout_short_sec: int = 10
-    activity_timeout_medium_sec: int = 30
-    activity_timeout_long_sec: int = 60
-    claim_gate_max_attempts: int = 2
-    followup_delay_days: int = 3
-    activity_max_attempts: int = 3
-    review_timeout_hours: int = 48
+    config: ReviewConfig = None
+    
+    def __post_init__(self):
+        """Default config if not provided."""
+        if self.config is None:
+            object.__setattr__(self, 'config', ReviewConfig())
 
 
 @workflow.defn(name="Review")
@@ -128,8 +151,8 @@ class ReviewWorkflow:
                     product_brief=input.product_brief,
                     idempotency_key=f"{input.post.id}:research",
                 ),
-                start_to_close_timeout=timedelta(seconds=input.activity_timeout_medium_sec),
-                retry_policy=RetryPolicy(maximum_attempts=input.activity_max_attempts),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
                 result_type=Evidence,
             )
             
@@ -147,14 +170,14 @@ class ReviewWorkflow:
                 await workflow.execute_activity(
                     store_card,
                     StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:skip"),
-                    start_to_close_timeout=timedelta(seconds=input.activity_timeout_short_sec),
+                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
                 )
                 
                 return "skipped"
             
             # Step 2: Draft (with claim gate retry logic)
             claim_gate_attempts = 0
-            max_claim_gate_attempts = input.claim_gate_max_attempts
+            max_claim_gate_attempts = input.config.claim_gate_max_attempts
             
             while claim_gate_attempts < max_claim_gate_attempts:
                 claim_gate_attempts += 1
@@ -168,8 +191,8 @@ class ReviewWorkflow:
                         steer=steer,
                         idempotency_key=f"{input.post.id}:draft:attempt{claim_gate_attempts}",
                     ),
-                    start_to_close_timeout=timedelta(seconds=input.activity_timeout_long_sec),
-                    retry_policy=RetryPolicy(maximum_attempts=input.activity_max_attempts),
+                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+                    retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
                     result_type=Evidence,
                 )
                 
@@ -182,7 +205,7 @@ class ReviewWorkflow:
                             founder_materials=evidence.founder_materials,
                             idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
                         ),
-                        start_to_close_timeout=timedelta(seconds=input.activity_timeout_short_sec),
+                        start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
                     )
                     
                     # Update evidence with gate result
@@ -212,7 +235,7 @@ class ReviewWorkflow:
                 await workflow.execute_activity(
                     store_card,
                     StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:gate_fail"),
-                    start_to_close_timeout=timedelta(seconds=input.activity_timeout_short_sec),
+                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
                 )
                 
                 return "skipped"
@@ -226,11 +249,11 @@ class ReviewWorkflow:
             await workflow.execute_activity(
                 store_card,
                 StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:pending"),
-                start_to_close_timeout=timedelta(seconds=input.activity_timeout_short_sec),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
             )
             
             # Step 3: Wait for human decision and signal completion
-            timeout_hours = input.review_timeout_hours
+            timeout_hours = input.config.review_timeout_hours
             workflow.logger.info(f"Waiting for human decision ({timeout_hours}h timeout)")
             
             try:
@@ -315,7 +338,7 @@ class ReviewWorkflow:
                 return "approved_not_confirmed"
             
             # Step 5: Start follow-up timer (from config) - interruptible
-            followup_delay = input.followup_delay_days
+            followup_delay = input.config.followup_delay_days
             followup_seconds = followup_delay * 86400  # days to seconds
             workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
             
@@ -340,8 +363,8 @@ class ReviewWorkflow:
                     reply_post_id=self.reply_post_id,
                     idempotency_key=f"{workflow_id}:followup",
                 ),
-                start_to_close_timeout=timedelta(seconds=input.activity_timeout_medium_sec),
-                retry_policy=RetryPolicy(maximum_attempts=input.activity_max_attempts),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
                 result_type=List[Post],
             )
             
@@ -440,13 +463,13 @@ class ReviewWorkflow:
                 post_id=reply_post_id,
                 idempotency_key=f"{workflow.info().workflow_id}:confirm:{reply_post_id}",
             ),
-            start_to_close_timeout=timedelta(seconds=self.input.activity_timeout_short_sec),
-            retry_policy=RetryPolicy(maximum_attempts=self.input.activity_max_attempts),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+            retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
             result_type=Optional[Post],
         )
         
         if not reply_post:
-            # B8: 404 handling per ADR-0086 - delete post text
+            # B8: 404 handling - delete post text per X API compliance
             workflow.logger.warning(f"Reply post {reply_post_id} not found (404), deleting post text")
             
             from backend.activities import DeletePostTextInput, delete_post_text
@@ -457,7 +480,7 @@ class ReviewWorkflow:
                     workflow_id=workflow.info().workflow_id,
                     idempotency_key=f"{workflow.info().workflow_id}:delete_text:{reply_post_id}",
                 ),
-                start_to_close_timeout=timedelta(seconds=self.input.activity_timeout_short_sec),
+                start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
             )
             
             raise ValueError(f"Reply post {reply_post_id} not found (deleted or 404)")
@@ -562,8 +585,8 @@ class ReviewWorkflow:
                 steer=instruction,
                 idempotency_key=f"{self.evidence.post_id}:nudge:{client_request_id}",
             ),
-            start_to_close_timeout=timedelta(seconds=self.input.activity_timeout_long_sec),
-            retry_policy=RetryPolicy(maximum_attempts=self.input.activity_max_attempts),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_long_sec),
+            retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
             result_type=Evidence,
         )
         

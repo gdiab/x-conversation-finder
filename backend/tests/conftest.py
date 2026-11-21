@@ -1,12 +1,53 @@
 """Pytest configuration and fixtures."""
 
+import os
 import pytest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from backend.models import Post, Author
 from backend.activities.x_activities import XActivities
 from backend.activities.reply_activities import ReplyActivities
 from backend.adapters import FakeXClient, FakeReplyAgent
+from backend.database import init_db, get_db
+from backend.config import get_settings
+
+
+@pytest.fixture(scope="function", autouse=True)
+def test_db_isolation(tmp_path, monkeypatch, request):
+    """Test isolation: each test gets a fresh tmp DB with kill switch off.
+    
+    Skips tests that manage their own DB (like test_budget.py).
+    """
+    # Skip if test has its own temp_db fixture
+    if 'temp_db' in request.fixturenames:
+        yield
+        return
+    
+    db_path = tmp_path / "test.db"
+    db_url = f"sqlite:///{db_path}"
+    
+    # Point config at tmp DB
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    
+    # Clear engine cache so get_engine() uses new DATABASE_URL
+    import backend.database
+    backend.database._engine = None
+    backend.database._SessionLocal = None
+    
+    # Initialize fresh DB
+    init_db()
+    
+    # Ensure kill switch is off
+    from sqlalchemy import text
+    db = get_db()
+    try:
+        db.execute(text("UPDATE budget_ledger SET kill_switch = 0"))
+        db.commit()
+    finally:
+        db.close()
+    
+    yield db_path
 
 
 @pytest.fixture
@@ -42,6 +83,34 @@ def sample_post():
         conversation_id="1001",
         reply_settings="everyone",
     )
+
+
+@pytest.fixture
+def make_review_input(sample_post, product_brief):
+    """Factory fixture for creating ReviewInput with test config."""
+    from backend.workflows.review import ReviewInput, ReviewConfig
+    
+    def _make(**overrides):
+        defaults = {
+            'post': sample_post,
+            'topic': 'reliability',
+            'product_brief': product_brief,
+            'account': 'test',
+            'confidence_threshold': 0.5,
+            'config': ReviewConfig(
+                activity_timeout_short_sec=10,
+                activity_timeout_medium_sec=30,
+                activity_timeout_long_sec=60,
+                claim_gate_max_attempts=2,
+                followup_delay_days=1,  # Short for tests
+                activity_max_attempts=3,
+                review_timeout_hours=1,  # Short for tests
+            )
+        }
+        defaults.update(overrides)
+        return ReviewInput(**defaults)
+    
+    return _make
 
 
 @pytest.fixture

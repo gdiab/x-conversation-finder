@@ -329,7 +329,7 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
         if not card_db:
             return False
         
-        # Per ADR-0086: delete post text on 404, keep structure
+        # Delete post text on 404 per X API compliance, keep structure
         post_data = json.loads(card_db.post_data)
         post_data["text"] = "[removed - post deleted]"
         card_db.post_data = json.dumps(post_data)
@@ -343,7 +343,7 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
 @activity.defn(name="delete_post_text")
 async def delete_post_text(input: DeletePostTextInput) -> bool:
     """
-    Delete post text from card after 404 (B8 - ADR-0086 removal duty).
+    Delete post text from card after 404 (B8 - X API compliance).
     
     Keeps the card structure but removes the post text.
     """

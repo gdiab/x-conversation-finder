@@ -34,6 +34,40 @@ def temp_db():
         pass
 
 
+@pytest.fixture(scope="function")
+def budget_test_db(temp_db):
+    """Setup budget test with proper DB initialization and patching."""
+    from contextlib import contextmanager
+    
+    @contextmanager
+    def _setup(**settings_kwargs):
+        defaults = {
+            "database_url": f"sqlite:///{temp_db}",
+            "daily_spend_limit_usd": 100.0,
+            "daily_post_read_cap": 1000,
+            "x_post_read_cost": 0.005,
+            "budget_kill_switch": False,
+        }
+        defaults.update(settings_kwargs)
+        settings = Settings(**defaults)
+        
+        with patch("backend.config.get_settings", return_value=settings), \
+             patch("backend.budget.get_settings", return_value=settings), \
+             patch("backend.database.get_settings", return_value=settings):
+            
+            # Clear engine cache
+            import backend.database
+            backend.database._engine = None
+            backend.database._SessionLocal = None
+            
+            from backend.database import init_db
+            init_db()
+            
+            yield settings
+    
+    return _setup
+
+
 def with_test_settings(temp_db, **kwargs):
     """Helper to create test settings and patch them."""
     settings = Settings(
@@ -75,15 +109,25 @@ def test_reserve_x_budget_first_call_enforces_cap(temp_db):
 
 def test_reserve_x_budget_read_cap_enforced(temp_db):
     """Test that read cap is enforced."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
-            database_url=f"sqlite:///{temp_db}",
-            daily_spend_limit_usd=100.0,
-            daily_post_read_cap=10,
-            x_post_read_cost=0.005,
-            budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+    settings = Settings(
+        database_url=f"sqlite:///{temp_db}",
+        daily_spend_limit_usd=100.0,
+        daily_post_read_cap=10,
+        x_post_read_cost=0.005,
+        budget_kill_switch=False,
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         reserve_x_budget(5)
         

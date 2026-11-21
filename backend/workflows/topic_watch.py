@@ -19,9 +19,26 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from backend.activities import SearchRecentInput, SearchRecentOutput
-    from backend.workflows.review import ReviewWorkflow, ReviewInput
+    from backend.workflows.review import ReviewWorkflow, ReviewInput, ReviewConfig
     from temporalio.workflow import ParentClosePolicy
     from backend.config import get_settings
+
+
+@dataclass(frozen=True)
+class TopicWatchConfig:
+    """Workflow config passed through input for determinism."""
+    poll_interval_hours: int = 3
+    activity_timeout_medium_sec: int = 30
+    activity_max_attempts: int = 3
+    
+    @staticmethod
+    def from_settings(settings):
+        """Create TopicWatchConfig from Settings."""
+        return TopicWatchConfig(
+            poll_interval_hours=settings.poll_interval_hours,
+            activity_timeout_medium_sec=settings.activity_timeout_medium_sec,
+            activity_max_attempts=settings.activity_max_attempts,
+        )
 
 
 @dataclass
@@ -32,13 +49,21 @@ class TopicWatchInput:
     topic: str
     query: str
     product_brief: str
-    poll_interval_hours: int = 3
     max_results: int = 10
     confidence_threshold: float = 0.6
     continue_as_new_after: int = 100
     since_id: Optional[str] = None
     iteration: int = 0
     seen_post_ids: Optional[list[str]] = None
+    config: TopicWatchConfig = None
+    review_config: ReviewConfig = None
+    
+    def __post_init__(self):
+        """Default configs if not provided."""
+        if self.config is None:
+            object.__setattr__(self, 'config', TopicWatchConfig())
+        if self.review_config is None:
+            object.__setattr__(self, 'review_config', ReviewConfig())
 
 
 @workflow.defn(name="TopicWatch")
@@ -75,12 +100,12 @@ class TopicWatchWorkflow:
                 workflow.logger.info("Stop requested, ending watch")
                 return "stopped"
             
-            workflow.logger.info(f"Iteration {iteration}: sleeping {input.poll_interval_hours}h")
+            workflow.logger.info(f"Iteration {iteration}: sleeping {input.config.poll_interval_hours}h")
             
             try:
                 await workflow.wait_condition(
                     lambda: self.stop_requested,
-                    timeout=timedelta(hours=input.poll_interval_hours),
+                    timeout=timedelta(hours=input.config.poll_interval_hours),
                 )
             except asyncio.TimeoutError:
                 pass
@@ -91,7 +116,6 @@ class TopicWatchWorkflow:
             
             workflow.logger.info(f"Searching for '{input.query}' since_id={since_id}")
             
-            settings = get_settings()
             try:
                 search_result = await workflow.execute_activity(
                     "search_recent",
@@ -101,8 +125,8 @@ class TopicWatchWorkflow:
                         max_results=input.max_results,
                         idempotency_key=f"{input.account}:{input.topic}:{iteration}",
                     ),
-                    start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
-                    retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
+                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
+                    retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
                     result_type=SearchRecentOutput,
                 )
                 
@@ -134,6 +158,7 @@ class TopicWatchWorkflow:
                                 product_brief=input.product_brief,
                                 account=input.account,
                                 confidence_threshold=input.confidence_threshold,
+                                config=input.review_config,
                             ),
                             id=review_id,
                             parent_close_policy=ParentClosePolicy.ABANDON,
@@ -169,13 +194,14 @@ class TopicWatchWorkflow:
                 topic=input.topic,
                 query=input.query,
                 product_brief=input.product_brief,
-                poll_interval_hours=input.poll_interval_hours,
                 max_results=input.max_results,
                 confidence_threshold=input.confidence_threshold,
                 continue_as_new_after=input.continue_as_new_after,
                 since_id=since_id,
                 iteration=0,
                 seen_post_ids=seen_post_ids,
+                config=input.config,
+                review_config=input.review_config,
             )
         )
     
