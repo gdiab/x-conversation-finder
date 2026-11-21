@@ -1,5 +1,5 @@
 === X Conversation Finder Full E2E Test ===
-Sat Nov 21 11:20:15 AM UTC 2026
+Sat Nov 21 12:06:35 PM UTC 2026
 
 Configuration:
   ADAPTERS: X=fake, Reply=fake
@@ -9,23 +9,23 @@ Configuration:
 ✓ Database initialized
 
 Starting Temporal dev server...
-  PID: 10240
+  PID: 4959
 Waiting for Temporal...
 ✓ Temporal ready
 
 Starting worker...
-  PID: 10258
+  PID: 4978
 ✓ Worker running
 
 Starting API...
-  PID: 10266
+  PID: 4987
 Waiting for API...
 ✓ API ready
 
 === Services Running ===
-  Temporal: PID 10240
-  Worker: PID 10258
-  API: PID 10266
+  Temporal: PID 4959
+  Worker: PID 4978
+  API: PID 4987
 
 === E2E Flow Execution ===
 
@@ -52,7 +52,7 @@ Waiting for API...
                     "followers_count": 5000,
                     "verified": false
                 },
-                "created_at": "2026-11-21T09:20:16.850001+00:00",
+                "created_at": "2026-11-21T10:06:35.999650+00:00",
                 "like_count": 3,
                 "reply_count": 2,
                 "repost_count": 11,
@@ -78,7 +78,7 @@ Waiting for API...
                 "founder_materials": [
                     {
                         "source": "product_brief.md",
-                        "passage": "Our product helps developers build reliable systems.",
+                        "passage": "Our product helps developers build reliable systems with automatic failover and strong consistency guarantees.",
                         "relevance": "Directly relevant to the post's discussion of reliability",
                         "passage_id": "passage_0"
                     }
@@ -96,7 +96,7 @@ Waiting for API...
                             "text": "Our product helps developers build reliable systems.",
                             "kind": "claim",
                             "source_passage_id": "passage_0",
-                            "quote": "helps developers build reliable systems"
+                            "quote": "product helps developers build reliable systems"
                         },
                         {
                             "text": "Would be happy to share more details if useful.",
@@ -118,7 +118,7 @@ Waiting for API...
                                 "text": "Our product helps developers build reliable systems.",
                                 "kind": "claim",
                                 "source_passage_id": "passage_0",
-                                "quote": "helps developers build reliable systems"
+                                "quote": "product helps developers build reliable systems"
                             },
                             {
                                 "text": "Would be happy to share more details if useful.",
@@ -135,7 +135,7 @@ Waiting for API...
                     "steers_applied": [],
                     "token_count": 23,
                     "model_used": "fake-model",
-                    "input_tokens": 138,
+                    "input_tokens": 152,
                     "output_tokens": 39
                 },
 
@@ -182,7 +182,7 @@ All assertions passed:
 
 All operations used fake adapters (no real X API calls)
 
-Sat Nov 21 11:20:53 AM UTC 2026
+Sat Nov 21 12:07:12 PM UTC 2026
 
 === Cleanup ===
 ✓ Services stopped
