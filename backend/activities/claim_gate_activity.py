@@ -47,6 +47,12 @@ RISKY_PATTERNS = [
 ]
 
 
+# R4-SF1: Product capability sentence patterns (sentences with we/our + verbs)
+CAPABILITY_VERB_PATTERNS = [
+    r'\b(?:help|helps|support|supports|enable|enables|provide|provides|offer|offers|deliver|delivers|build|builds|create|creates|integrate|integrates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|handle|handles|automate|automates)\b',
+]
+
+
 def find_risky_words(text: str) -> List[str]:
     """
     Find numbers, percents, superlatives, and guarantee words.
@@ -59,6 +65,44 @@ def find_risky_words(text: str) -> List[str]:
         for match in matches:
             risky_words.append(match.group())
     return risky_words
+
+
+def find_product_capability_sentences(text: str) -> List[str]:
+    """
+    R4-SF1: Find sentences that make product capability claims.
+    
+    Detects sentences with:
+    - "we"/"our" + capability verbs (help, provide, enable, etc.)
+    
+    Returns list of sentences that are likely product capability claims.
+    """
+    capability_sentences = []
+    
+    # Split into sentences (naive split on . ! ?)
+    sentences = re.split(r'[.!?]+', text)
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        
+        # Check if sentence contains "we" or "our"
+        has_first_person = bool(re.search(r'\b(?:we|our)\b', sentence, re.IGNORECASE))
+        
+        if not has_first_person:
+            continue
+        
+        # Check if sentence contains a capability verb
+        has_capability_verb = False
+        for verb_pattern in CAPABILITY_VERB_PATTERNS:
+            if re.search(verb_pattern, sentence, re.IGNORECASE):
+                has_capability_verb = True
+                break
+        
+        if has_capability_verb:
+            capability_sentences.append(sentence.strip())
+    
+    return capability_sentences
 
 
 def check_span_in_passage(span: str, passage: str) -> bool:
@@ -140,6 +184,10 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     draft_risky_words = find_risky_words(input.draft_text)
     activity.logger.info(f"Found {len(draft_risky_words)} risky words in draft: {draft_risky_words}")
     
+    # R4-SF1: Extract product capability sentences
+    capability_sentences = find_product_capability_sentences(input.draft_text)
+    activity.logger.info(f"Found {len(capability_sentences)} product capability sentences: {capability_sentences}")
+    
     # Build materials lookup
     materials_by_id = {}
     for i, material in enumerate(input.founder_materials):
@@ -214,10 +262,33 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
             reasoning=f"Draft contains uncovered risky words: {', '.join(uncovered_risky_words[:3])}",
         )
     
+    # R4-SF1: Check that every product capability sentence is covered by a verified claim
+    uncovered_capability_sentences = []
+    for capability_sentence in capability_sentences:
+        covered = False
+        for claim_text in verified_claim_texts:
+            # A capability sentence is covered if its text appears in a verified claim
+            if capability_sentence.lower() in claim_text.lower() or claim_text.lower() in capability_sentence.lower():
+                covered = True
+                break
+        if not covered:
+            uncovered_capability_sentences.append(capability_sentence)
+    
+    if uncovered_capability_sentences:
+        activity.logger.warning(
+            f"Draft contains {len(uncovered_capability_sentences)} uncovered product capability sentences"
+        )
+        return ClaimGateResult(
+            passed=False,
+            claims=input.claims,
+            failed_claims=failed_claims,
+            reasoning=f"Draft contains uncovered product capability sentences: {uncovered_capability_sentences[0][:60]}...",
+        )
+    
     gate_passed = len(failed_claims) == 0
     
     if gate_passed:
-        reasoning = f"All {len(input.claims)} claim(s) verified and all {len(draft_risky_words)} risky words covered"
+        reasoning = f"All {len(input.claims)} claim(s) verified, all {len(draft_risky_words)} risky words covered, and all {len(capability_sentences)} product capability sentences backed"
     else:
         reasoning = f"{len(failed_claims)} of {len(input.claims)} claim(s) failed verification"
     
