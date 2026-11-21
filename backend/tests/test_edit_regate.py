@@ -947,7 +947,7 @@ async def test_r14_s5_store_ignores_lower_edit_seq():
 
 
 @pytest.mark.asyncio
-async def test_r14_s5_workflow_race_edit_seq():
+async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, reply_activities):
     """
     S5 (QA R14): Workflow-level race with edit_seq.
     
@@ -960,7 +960,7 @@ async def test_r14_s5_workflow_race_edit_seq():
     """
     import asyncio
     from temporalio import activity as activity_module
-    from backend.activities.store_activities import UpdateCardInput
+    from backend.activities.store_activities import UpdateCardInput, update_card
     
     # State to control timing
     edit_a_gate_event = asyncio.Event()

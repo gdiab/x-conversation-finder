@@ -575,10 +575,11 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     
     composition_violation = validate_draft_composition(segments_dict)
     if composition_violation:
+        # QA R14 fix: Report in failed_sentences so evidence and redraft logic keep working
         return ClaimGateResult(
             passed=False,
             segments=[],
-            failed_sentences=[],
+            failed_sentences=[("[draft composition]", composition_violation.reason)],
             reasoning=f"Composition rule violation: {composition_violation.reason}",
         )
     

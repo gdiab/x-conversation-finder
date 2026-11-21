@@ -83,13 +83,13 @@ async def test_qa_r13_splitter_never_split_after_abbreviation():
     sentences4 = split_into_sentences(text4)
     assert len(sentences4) == 1
     
-    # But if there's a sentence after (with no abbreviation), that splits normally
+    # S4 (QA R14): Company suffixes split when next token is capitalized
     text5 = "We are Acme Inc. Our product supports SSO."
     sentences5 = split_into_sentences(text5)
-    # Should be 2 sentences: first ends with "Inc.", second starts with "Our"
-    # Actually no - because we NEVER split after abbreviation
-    # So this becomes one long sentence
-    assert len(sentences5) == 1
+    # Should be 2 sentences: Inc. is a company suffix, "Our" is capitalized
+    assert len(sentences5) == 2
+    assert "Inc." in sentences5[0]
+    assert "Our product" in sentences5[1]
 
 
 @pytest.mark.asyncio
