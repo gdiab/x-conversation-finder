@@ -129,7 +129,7 @@ class ReviewWorkflow:
         # Edit re-gate fields (ADR-0006 Amendment E)
         self.edited_text_gate_results: Optional[List[SentenceGateResult]] = None
         self.edited_text_gate_state: Optional[str] = None  # "passed", "failed", or "not_checked"
-        self.edited_text_hash: Optional[str] = None  # Hash of gated text for validation
+        # QA R12: edited_text_hash removed (dead code, see validate_approve)
         self.post_anyway: Optional[bool] = None
         self.post_anyway_failing_sentences: Optional[List[str]] = None
         # S-3: Concurrency guard for edit-in-flight (B3: counter instead of bool)
@@ -507,14 +507,14 @@ class ReviewWorkflow:
         if self._edit_in_flight_count > 0:
             raise ValueError("Cannot approve while edit gate is in progress. Retry after edit completes.")
         
-        # B2: Check if edited text exists and validate gate corresponds to current text
+        # QA R12: Hash check removed (dead code).
+        # The edit Update atomically sets both draft.text and edited_text_hash from the same
+        # new_text. There is no path to tamper with draft.text after gating without calling
+        # edit again (which would recompute the hash). Temporal's deterministic replay protects
+        # workflow state. No honest tamper path exists, so the check could never fail.
+        
+        # B2 + C: Check if edited text exists and require post_anyway for failed/not_checked states
         if self.edited_text_gate_state:
-            # Validate hash matches (gate results correspond to current text)
-            import hashlib
-            current_text_hash = hashlib.sha256(self.evidence.draft.text.encode()).hexdigest()
-            if self.edited_text_hash != current_text_hash:
-                raise ValueError("Gate results do not correspond to current text. Re-run edit first.")
-            
             # C: Require post_anyway=True for both failed and not_checked states
             if self.edited_text_gate_state in ["failed", "not_checked"] and not post_anyway:
                 if self.edited_text_gate_state == "failed":
@@ -711,9 +711,7 @@ class ReviewWorkflow:
             self.edited_text_gate_results = gate_results if gate_results else []
             self.edited_text_gate_state = gate_state
             
-            # Store hash of gated text for approve validator
-            import hashlib
-            self.edited_text_hash = hashlib.sha256(new_text.encode()).hexdigest()
+            # QA R12: Hash removed (dead code, see validate_approve)
             
             # Update card with edited text and gate results
             await workflow.execute_activity(
