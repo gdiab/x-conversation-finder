@@ -297,8 +297,8 @@ class ReviewWorkflow:
                 update_card,
                 UpdateCardInput(
                     workflow_id=workflow_id,
-                    updates={"status": "expired"},
                     idempotency_key=f"{workflow_id}:update:expire",
+                    status="expired",
                 ),
                 start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
             )
@@ -356,21 +356,15 @@ class ReviewWorkflow:
         workflow.logger.info(f"Approved by founder")
         
         # Update to approved status (including post_anyway if used)
-        updates = {
-            "status": "approved",
-            "posted_url": self.posted_url,
-        }
-        if self.post_anyway is not None:
-            updates["post_anyway"] = self.post_anyway
-            if self.post_anyway_failing_sentences:
-                updates["post_anyway_failing_sentences"] = self.post_anyway_failing_sentences
-        
         await workflow.execute_activity(
             update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
-                updates=updates,
                 idempotency_key=f"{workflow_id}:update:approve",
+                status="approved",
+                posted_url=self.posted_url,
+                post_anyway=self.post_anyway,
+                post_anyway_failing_sentences=self.post_anyway_failing_sentences,
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
@@ -392,8 +386,8 @@ class ReviewWorkflow:
                 update_card,
                 UpdateCardInput(
                     workflow_id=workflow_id,
-                    updates={"status": "approved_not_confirmed"},
                     idempotency_key=f"{workflow_id}:update:not_confirmed",
+                    status="approved_not_confirmed",
                 ),
                 start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
             )
@@ -444,11 +438,9 @@ class ReviewWorkflow:
             update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
-                updates={
-                    "status": "followup_due",
-                    "followup_replies": followup_replies,
-                },
                 idempotency_key=f"{workflow_id}:update:followup_due",
+                status="followup_due",
+                followup_replies=followup_replies,
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
@@ -594,8 +586,8 @@ class ReviewWorkflow:
             update_card,
             UpdateCardInput(
                 workflow_id=workflow.info().workflow_id,
-                updates={"reply_post_id": reply_post_id},
                 idempotency_key=f"{workflow.info().workflow_id}:update:reply_id:{client_request_id}",
+                reply_post_id=reply_post_id,
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
@@ -668,11 +660,9 @@ class ReviewWorkflow:
             update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
-                updates={
-                    "evidence": self.evidence,
-                    "edited_text_gate_results": gate_results,
-                },
                 idempotency_key=f"{workflow_id}:update:edit:{client_request_id}",
+                evidence=self.evidence,
+                edited_text_gate_results=gate_results,
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
@@ -725,8 +715,8 @@ class ReviewWorkflow:
             update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
-                updates={"evidence": self.evidence},
                 idempotency_key=f"{workflow_id}:update:nudge:{client_request_id}",
+                evidence=self.evidence,
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )

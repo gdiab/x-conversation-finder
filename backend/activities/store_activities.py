@@ -10,10 +10,6 @@ from backend.models import ReviewCard, Evidence
 from backend.database import get_db, ReviewCardDB
 
 
-# Type alias for update patches
-CardUpdate = Dict[str, Union[str, Evidence, List[Dict[str, Any]]]]
-
-
 @dataclass
 class StoreCardInput:
     """Input for store_card activity."""
@@ -25,29 +21,14 @@ class StoreCardInput:
 @dataclass
 class UpdateCardInput:
     """
-    B1: Input for update_card activity with proper typing.
+    B1: Input for update_card activity with typed fields to fix bool payload decoding.
     
-    Valid update keys:
-    - status: str (ReviewStatus value)
-    - approved_by: str
-    - posted_url: str
-    - reply_post_id: str
-    - skip_reason: str
-    - followup_replies: List[Dict[str, Any]]
-    - evidence: Evidence (full object with draft)
-    - edited_text_gate_results: List[Dict[str, Any]]
-    - post_anyway: bool
-    - post_anyway_failing_sentences: List[str]
+    Replaces dict-based updates with explicit typed fields so Temporal can properly
+    serialize/deserialize all values, including bools.
     """
-    
     workflow_id: str
-    updates: CardUpdate
     idempotency_key: str
-
-
-@dataclass
-class CardUpdateTyped:
-    """B1: Typed alternative to dict-based updates to fix bool payload decoding."""
+    # Typed update fields
     status: Optional[str] = None
     approved_by: Optional[str] = None
     posted_url: Optional[str] = None
@@ -58,31 +39,6 @@ class CardUpdateTyped:
     edited_text_gate_results: Optional[List[Dict[str, Any]]] = None
     post_anyway: Optional[bool] = None
     post_anyway_failing_sentences: Optional[List[str]] = None
-    
-    def to_dict(self) -> CardUpdate:
-        """Convert to dict for backward compatibility."""
-        d = {}
-        if self.status is not None:
-            d["status"] = self.status
-        if self.approved_by is not None:
-            d["approved_by"] = self.approved_by
-        if self.posted_url is not None:
-            d["posted_url"] = self.posted_url
-        if self.reply_post_id is not None:
-            d["reply_post_id"] = self.reply_post_id
-        if self.skip_reason is not None:
-            d["skip_reason"] = self.skip_reason
-        if self.followup_replies is not None:
-            d["followup_replies"] = self.followup_replies
-        if self.evidence is not None:
-            d["evidence"] = self.evidence
-        if self.edited_text_gate_results is not None:
-            d["edited_text_gate_results"] = self.edited_text_gate_results
-        if self.post_anyway is not None:
-            d["post_anyway"] = self.post_anyway
-        if self.post_anyway_failing_sentences is not None:
-            d["post_anyway_failing_sentences"] = self.post_anyway_failing_sentences
-        return d
 
 
 @dataclass
@@ -267,7 +223,7 @@ async def store_card(input: StoreCardInput) -> bool:
 
 
 def _update_card_sync(input: UpdateCardInput) -> bool:
-    """Synchronous DB work for update_card. B1: Properly handle bool fields."""
+    """Synchronous DB work for update_card. B1: Works with typed fields instead of dict."""
     db = get_db()
     try:
         card_db = db.query(ReviewCardDB).filter(
@@ -277,34 +233,45 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         if not card_db:
             return False
         
-        # B1: Apply updates with explicit type handling for bools
-        for key, value in input.updates.items():
-            if key == "status":
-                card_db.status = str(value) if value is not None else None
-            elif key == "approved_by":
-                card_db.approved_by = str(value) if value is not None else None
-            elif key == "posted_url":
-                card_db.posted_url = str(value) if value is not None else None
-            elif key == "reply_post_id":
-                card_db.reply_post_id = str(value) if value is not None else None
-            elif key == "skip_reason":
-                card_db.skip_reason = str(value) if value is not None else None
-            elif key == "followup_replies":
-                card_db.followup_replies = value if value else None
-            elif key == "edited_text_gate_results":
-                # Edit re-gate results (ADR-0006 Amendment E)
-                card_db.edited_text_gate_results = value if value else None
-            elif key == "post_anyway":
-                # B1: Explicit bool conversion to handle Temporal serialization
-                card_db.post_anyway = bool(value) if value is not None else None
-            elif key == "post_anyway_failing_sentences":
-                card_db.post_anyway_failing_sentences = value if value else None
-            elif key == "evidence":
-                # B2: Update evidence_data JSON with flag_modified to ensure SQLAlchemy persists it
-                evidence_data = card_db.evidence_data.copy()  # Make a new dict
-                if hasattr(value, 'draft') and value.draft:
-                    evidence_data["draft"] = {
-                        "text": value.draft.text,
+        # B1: Apply updates from typed fields
+        if input.status is not None:
+            card_db.status = input.status
+        if input.approved_by is not None:
+            card_db.approved_by = input.approved_by
+        if input.posted_url is not None:
+            card_db.posted_url = input.posted_url
+        if input.reply_post_id is not None:
+            card_db.reply_post_id = input.reply_post_id
+        if input.skip_reason is not None:
+            card_db.skip_reason = input.skip_reason
+        if input.followup_replies is not None:
+            card_db.followup_replies = input.followup_replies
+        if input.edited_text_gate_results is not None:
+            card_db.edited_text_gate_results = input.edited_text_gate_results
+        if input.post_anyway is not None:
+            # B1: Direct assignment of bool - Temporal now handles it correctly
+            card_db.post_anyway = input.post_anyway
+        if input.post_anyway_failing_sentences is not None:
+            card_db.post_anyway_failing_sentences = input.post_anyway_failing_sentences
+        
+        # B2: Update evidence_data JSON with flag_modified
+        if input.evidence is not None:
+            value = input.evidence
+            evidence_data = card_db.evidence_data.copy()  # Make a new dict
+            if hasattr(value, 'draft') and value.draft:
+                evidence_data["draft"] = {
+                    "text": value.draft.text,
+                    "segments": [
+                        {
+                            "kind": s.kind,
+                            "text": s.text,
+                            "source_passage_id": s.source_passage_id,
+                            "sentence_index": s.sentence_index,
+                        }
+                        for s in value.draft.segments
+                    ],
+                    "claim_gate": {
+                        "passed": value.draft.claim_gate.passed,
                         "segments": [
                             {
                                 "kind": s.kind,
@@ -312,56 +279,45 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                                 "source_passage_id": s.source_passage_id,
                                 "sentence_index": s.sentence_index,
                             }
-                            for s in value.draft.segments
+                            for s in value.draft.claim_gate.segments
                         ],
-                        "claim_gate": {
-                            "passed": value.draft.claim_gate.passed,
-                            "segments": [
-                                {
-                                    "kind": s.kind,
-                                    "text": s.text,
-                                    "source_passage_id": s.source_passage_id,
-                                    "sentence_index": s.sentence_index,
-                                }
-                                for s in value.draft.claim_gate.segments
-                            ],
-                            "failed_sentences": [
-                                {
-                                    "sentence": sentence,
-                                    "reason": reason,
-                                }
-                                for sentence, reason in value.draft.claim_gate.failed_sentences
-                            ],
-                            "reasoning": value.draft.claim_gate.reasoning,
-                            # Legacy fields
-                            "claims": [
-                                {
+                        "failed_sentences": [
+                            {
+                                "sentence": sentence,
+                                "reason": reason,
+                            }
+                            for sentence, reason in value.draft.claim_gate.failed_sentences
+                        ],
+                        "reasoning": value.draft.claim_gate.reasoning,
+                        # Legacy fields
+                        "claims": [
+                            {
+                                "text": c.text,
+                                "cited_passage_ids": c.cited_passage_ids,
+                                "quoted_spans": c.quoted_spans,
+                            }
+                            for c in value.draft.claim_gate.claims
+                        ],
+                        "failed_claims": [
+                            {
+                                "claim": {
                                     "text": c.text,
                                     "cited_passage_ids": c.cited_passage_ids,
                                     "quoted_spans": c.quoted_spans,
-                                }
-                                for c in value.draft.claim_gate.claims
-                            ],
-                            "failed_claims": [
-                                {
-                                    "claim": {
-                                        "text": c.text,
-                                        "cited_passage_ids": c.cited_passage_ids,
-                                        "quoted_spans": c.quoted_spans,
-                                    },
-                                    "reason": reason,
-                                }
-                                for c, reason in value.draft.claim_gate.failed_claims
-                            ],
-                        },
-                        "steers_applied": value.draft.steers_applied,
-                        "token_count": value.draft.token_count,
-                        "model_used": value.draft.model_used,
-                        "input_tokens": value.draft.input_tokens,
-                        "output_tokens": value.draft.output_tokens,
-                    }
-                card_db.evidence_data = evidence_data
-                flag_modified(card_db, "evidence_data")
+                                },
+                                "reason": reason,
+                            }
+                            for c, reason in value.draft.claim_gate.failed_claims
+                        ],
+                    },
+                    "steers_applied": value.draft.steers_applied,
+                    "token_count": value.draft.token_count,
+                    "model_used": value.draft.model_used,
+                    "input_tokens": value.draft.input_tokens,
+                    "output_tokens": value.draft.output_tokens,
+                }
+            card_db.evidence_data = evidence_data
+            flag_modified(card_db, "evidence_data")
         
         db.commit()
         return True

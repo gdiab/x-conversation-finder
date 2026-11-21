@@ -94,6 +94,8 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             )
             assert "Approved" in approve_result
             
+            await env.sleep(1)
+            
             # S-6: Verify stored card shows approved
             db = get_db()
             try:
