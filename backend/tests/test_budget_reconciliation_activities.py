@@ -48,8 +48,8 @@ async def test_reconcile_x_reads_overage_charged():
         actual_reads=10,
         reservation_date=reservation_date,
         workflow_id="test_wf",
+        workflow_run_id="test-run-1",
         activity_id="test_act",
-        attempt=1,
         cost_per_read=settings.x_post_read_cost,
     )
     
@@ -92,8 +92,8 @@ async def test_reconcile_x_reads_underage_refunded():
         actual_reads=3,
         reservation_date=reservation_date,
         workflow_id="test_wf_2",
+        workflow_run_id="test-run-2",
         activity_id="test_act",
-        attempt=1,
         cost_per_read=settings.x_post_read_cost,
     )
     
@@ -137,8 +137,8 @@ async def test_reconcile_inference_tokens_overage_charged():
         actual_output=300,
         reservation_date=reservation_date,
         workflow_id="test_wf_3",
+        workflow_run_id="test-run-3",
         activity_id="test_act",
-        attempt=1,
     )
     
     # Verify delta was charged
@@ -197,7 +197,7 @@ async def test_reconcile_with_missing_usage_keeps_reservation():
 
 @pytest.mark.asyncio
 async def test_reconcile_retry_idempotency():
-    """Test that retries with same workflow_id/activity_id/attempt are idempotent."""
+    """Test that retries with same workflow_id/workflow_run_id/activity_id are idempotent."""
     settings = get_settings()
     
     # Reserve and reconcile first time
@@ -208,8 +208,8 @@ async def test_reconcile_retry_idempotency():
         actual_reads=7,
         reservation_date=reservation_date,
         workflow_id="test_wf_idempotent",
+        workflow_run_id="test-run-idempotent",
         activity_id="test_act_idempotent",
-        attempt=1,
         cost_per_read=settings.x_post_read_cost,
     )
     
@@ -224,7 +224,7 @@ async def test_reconcile_retry_idempotency():
         
         # Check reconciliation record exists
         reconciliation = db.query(BudgetReconciliationDB).filter(
-            BudgetReconciliationDB.reconciliation_key == "test_wf_idempotent:test_act_idempotent:1:x_reads"
+            BudgetReconciliationDB.reconciliation_key == "test_wf_idempotent:test-run-idempotent:test_act_idempotent:x_reads"
         ).first()
         assert reconciliation is not None
         assert reconciliation.reserved_amount == 10.0
@@ -232,14 +232,14 @@ async def test_reconcile_retry_idempotency():
     finally:
         db.close()
     
-    # Retry: reconcile again with same workflow_id/activity_id/attempt
+    # Retry: reconcile again with same workflow_id/workflow_run_id/activity_id
     second_cost = reconcile_x_reads(
         reserved_reads=10,
         actual_reads=7,
         reservation_date=reservation_date,
         workflow_id="test_wf_idempotent",
+        workflow_run_id="test-run-idempotent",  # Same run
         activity_id="test_act_idempotent",
-        attempt=1,  # Same attempt
         cost_per_read=settings.x_post_read_cost,
     )
     
@@ -308,8 +308,8 @@ async def test_reconcile_across_midnight_hits_reservation_day():
         actual_reads=10,
         reservation_date=yesterday,  # Yesterday's date
         workflow_id="test_wf_midnight",
+        workflow_run_id="test-run-midnight",
         activity_id="test_act_midnight",
-        attempt=1,
         cost_per_read=settings.x_post_read_cost,
     )
     
@@ -385,8 +385,8 @@ async def test_reconcile_never_goes_negative():
         actual_reads=0,  # Full refund
         reservation_date=today,
         workflow_id="test_wf_clamp",
+        workflow_run_id="test-run-clamp",
         activity_id="test_act_clamp",
-        attempt=1,
         cost_per_read=settings.x_post_read_cost,
     )
     

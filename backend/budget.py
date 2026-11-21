@@ -203,8 +203,8 @@ def reconcile_x_reads(
     actual_reads: int,
     reservation_date: str,
     workflow_id: str,
+    workflow_run_id: str,
     activity_id: str,
-    attempt: int,
     cost_per_read: float = None
 ) -> float:
     """
@@ -213,7 +213,7 @@ def reconcile_x_reads(
     - Charges delta when actual > reserved
     - Refunds delta when actual < reserved  
     - Applies to reservation's own UTC day, not today
-    - Idempotent per activity attempt (workflow_id, activity_id, attempt)
+    - Idempotent per workflow run and activity (workflow_id, workflow_run_id, activity_id)
     - Never takes a day below zero
     
     Returns the actual cost charged.
@@ -224,7 +224,7 @@ def reconcile_x_reads(
         cost_per_read = settings.x_post_read_cost
     
     actual_cost = actual_reads * cost_per_read
-    reconciliation_key = f"{workflow_id}:{activity_id}:{attempt}:x_reads"
+    reconciliation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:x_reads"
     
     db = get_db()
     try:
@@ -274,7 +274,7 @@ def reconcile_x_reads(
             reconciliation_key=reconciliation_key,
             workflow_id=workflow_id,
             activity_id=activity_id,
-            attempt=str(attempt),
+            attempt=workflow_run_id,  # Store run_id in attempt field for now
             reservation_date=reservation_date,
             reserved_amount=float(reserved_reads),
             actual_amount=float(actual_reads),
@@ -300,8 +300,8 @@ def reconcile_inference_tokens(
     actual_output: int,
     reservation_date: str,
     workflow_id: str,
-    activity_id: str,
-    attempt: int
+    workflow_run_id: str,
+    activity_id: str
 ) -> float:
     """
     Reconcile inference budget after actual usage known (R5-B1: two-way with idempotency).
@@ -309,7 +309,7 @@ def reconcile_inference_tokens(
     - Charges delta when actual > reserved
     - Refunds delta when actual < reserved
     - Applies to reservation's own UTC day, not today
-    - Idempotent per activity attempt (workflow_id, activity_id, attempt)
+    - Idempotent per workflow run and activity (workflow_id, workflow_run_id, activity_id)
     - Never takes a day below zero
     
     Returns the actual cost charged.
@@ -326,7 +326,7 @@ def reconcile_inference_tokens(
         actual_output * settings.inference_output_token_cost_usd
     )
     
-    reconciliation_key = f"{workflow_id}:{activity_id}:{attempt}:inference"
+    reconciliation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:inference"
     
     db = get_db()
     try:
@@ -375,7 +375,7 @@ def reconcile_inference_tokens(
             reconciliation_key=reconciliation_key,
             workflow_id=workflow_id,
             activity_id=activity_id,
-            attempt=str(attempt),
+            attempt=workflow_run_id,  # Store run_id in attempt field for now
             reservation_date=reservation_date,
             reserved_amount=float(total_reserved),
             actual_amount=float(total_actual),

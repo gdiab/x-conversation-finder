@@ -96,8 +96,8 @@ class XActivities:
             actual_reads=actual_reads,
             reservation_date=reservation_date,
             workflow_id=activity.info().workflow_id,
+            workflow_run_id=activity.info().workflow_run_id,
             activity_id=activity.info().activity_id,
-            attempt=activity.info().attempt,
             cost_per_read=settings.x_post_read_cost,
         )
         
@@ -182,8 +182,8 @@ class XActivities:
             actual_reads=actual_reads,
             reservation_date=reservation_date,
             workflow_id=activity.info().workflow_id,
+            workflow_run_id=activity.info().workflow_run_id,
             activity_id=activity.info().activity_id,
-            attempt=activity.info().attempt,
             cost_per_read=settings.x_post_read_cost,
         )
         

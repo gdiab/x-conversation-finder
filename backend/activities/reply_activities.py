@@ -76,8 +76,8 @@ class ReplyActivities:
                 actual_output=evidence.output_tokens,
                 reservation_date=reservation_date,
                 workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
                 activity_id=activity.info().activity_id,
-                attempt=activity.info().attempt,
             )
             activity.logger.info(
                 f"Research complete: confidence={evidence.confidence_score:.2f}, "
@@ -136,8 +136,8 @@ class ReplyActivities:
                     actual_output=evidence.draft.output_tokens,
                     reservation_date=reservation_date,
                     workflow_id=activity.info().workflow_id,
+                    workflow_run_id=activity.info().workflow_run_id,
                     activity_id=activity.info().activity_id,
-                    attempt=activity.info().attempt,
                 )
                 activity.logger.info(
                     f"Draft complete: {len(evidence.draft.text)} chars, "

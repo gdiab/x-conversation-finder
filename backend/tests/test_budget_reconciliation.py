@@ -68,8 +68,8 @@ def test_reconcile_x_reads_refunds_unused(temp_db_reconcile):
         actual_reads=5,
         reservation_date=reservation_date,
         workflow_id="test-wf",
+        workflow_run_id="test-run-1",
         activity_id="test-act",
-        attempt=1,
         cost_per_read=0.005
     )
     assert cost_actual == 0.025
@@ -89,8 +89,8 @@ def test_reconcile_x_reads_no_refund_when_equal(temp_db_reconcile):
         actual_reads=10,
         reservation_date=date,
         workflow_id="test-wf",
+        workflow_run_id="test-run-1",
         activity_id="test-act",
-        attempt=1,
         cost_per_read=0.005
     )
     assert cost_actual == 0.05
@@ -119,8 +119,8 @@ def test_reconcile_inference_tokens_refunds_unused(temp_db_reconcile):
         actual_output=300,
         reservation_date=date,
         workflow_id="test-wf",
-        activity_id="test-act",
-        attempt=1
+        workflow_run_id="test-run-1",
+        activity_id="test-act"
     )
     expected_actual = (600 * 0.00000015) + (300 * 0.0000006)
     assert abs(cost_actual - expected_actual) < 1e-9
@@ -143,8 +143,8 @@ def test_reconcile_inference_tokens_no_refund_when_more(temp_db_reconcile):
         actual_output=100,
         reservation_date=date,
         workflow_id="test-wf",
-        activity_id="test-act",
-        attempt=1
+        workflow_run_id="test-run-1",
+        activity_id="test-act"
     )
     expected = (200 * 0.00000015) + (100 * 0.0000006)
     assert abs(cost_actual - expected) < 1e-9
@@ -158,11 +158,11 @@ def test_multiple_reconciliations_accumulate(temp_db_reconcile):
     """R5-B1: Multiple reconciliations accumulate correctly."""
     # First operation: reserve 10, use 7
     _, date1 = reserve_x_budget(10, 0.005)
-    reconcile_x_reads(10, 7, date1, "wf1", "act1", 1, 0.005)
+    reconcile_x_reads(10, 7, date1, "wf1", "run1", "act1", 0.005)
     
     # Second operation: reserve 10, use 6
     _, date2 = reserve_x_budget(10, 0.005)
-    reconcile_x_reads(10, 6, date2, "wf2", "act2", 1, 0.005)
+    reconcile_x_reads(10, 6, date2, "wf2", "run2", "act2", 0.005)
     
     budget = get_today_budget()
     assert budget["x_reads"] == 13, "Should have 7 + 6 = 13 reads"
