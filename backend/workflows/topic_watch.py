@@ -29,6 +29,7 @@ class TopicWatchConfig:
     poll_interval_hours: int = 3
     activity_timeout_medium_sec: int = 30
     activity_max_attempts: int = 3
+    allow_sub_floor_poll: bool = False  # S-3: Allow poll_interval_hours < 1 (test-only)
 
 
 @dataclass
@@ -76,11 +77,24 @@ class TopicWatchWorkflow:
     
     @workflow.run
     async def run(self, input: TopicWatchInput) -> str:
-        """Run the topic watch loop."""
+        """Run the topic watch loop.
+        
+        S-3: Enforces minimum 1-hour poll interval unless allow_sub_floor_poll=True.
+        Direct workflow starts with sub-floor polls will be clamped with a warning.
+        """
         workflow.logger.info(
             f"TopicWatch starting: account={input.account}, topic={input.topic}, "
             f"iteration={input.iteration}"
         )
+        
+        # S-3: Validate poll floor at workflow start
+        poll_interval_hours = input.config.poll_interval_hours
+        if poll_interval_hours < 1 and not input.config.allow_sub_floor_poll:
+            workflow.logger.warning(
+                f"Poll interval {poll_interval_hours}h is below 1h minimum "
+                f"and allow_sub_floor_poll=False, clamping to 1h"
+            )
+            poll_interval_hours = 1
         
         seen_post_ids = input.seen_post_ids or []
         since_id = input.since_id
@@ -90,12 +104,12 @@ class TopicWatchWorkflow:
                 workflow.logger.info("Stop requested, ending watch")
                 return "stopped"
             
-            workflow.logger.info(f"Iteration {iteration}: sleeping {input.config.poll_interval_hours}h")
+            workflow.logger.info(f"Iteration {iteration}: sleeping {poll_interval_hours}h")
             
             try:
                 await workflow.wait_condition(
                     lambda: self.stop_requested,
-                    timeout=timedelta(hours=input.config.poll_interval_hours),
+                    timeout=timedelta(hours=poll_interval_hours),
                 )
             except asyncio.TimeoutError:
                 pass

@@ -101,9 +101,10 @@ async def test_topicwatch_budget_across_multiple_can():
             confidence_threshold=0.99,  # High threshold to skip Review spawns for speed
             continue_as_new_after=2,  # CAN after 2 iterations
             config=TopicWatchConfig(
-                poll_interval_hours=0,  # Immediate poll (allowed with fake)
+                poll_interval_hours=0,  # Immediate poll
                 activity_timeout_medium_sec=10,
                 activity_max_attempts=2,
+                allow_sub_floor_poll=True,  # S-3: Required for 0h poll
             ),
             review_config=ReviewConfig(
                 review_timeout_hours=1,

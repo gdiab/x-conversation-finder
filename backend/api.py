@@ -144,10 +144,16 @@ async def start_watch(request: StartWatchRequest):
     from backend.workflows.review import ReviewConfig
     from backend.workflows.topic_watch import TopicWatchConfig
     review_config = ReviewConfig.from_settings(settings)
+    # S-3: Allow sub-floor poll interval only with fake adapter (test-only)
+    allow_sub_floor = (
+        settings.watch_poll_interval_hours == 0 and 
+        settings.x_client_adapter == 'fake'
+    )
     topic_watch_config = TopicWatchConfig(
         poll_interval_hours=settings.watch_poll_interval_hours,
         activity_timeout_medium_sec=settings.activity_timeout_medium_sec,
         activity_max_attempts=settings.activity_max_attempts,
+        allow_sub_floor_poll=allow_sub_floor,
     )
     
     try:

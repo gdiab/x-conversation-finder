@@ -30,7 +30,7 @@ jobs:
     - name: Run tests
       run: |
         cd backend
-        pytest -v --tb=short
+        pytest -v -m "not integration" --tb=short
     
     - name: Check for secrets in code
       run: |
@@ -40,6 +40,37 @@ jobs:
         else
           echo "No secrets found in code"
         fi
+  
+  test-integration:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install Python dependencies
+      run: |
+        cd backend
+        pip install -r requirements.txt
+    
+    - name: Install Temporal CLI
+      run: |
+        curl -sSf https://temporal.download/cli.sh | sh
+        echo "$HOME/.temporalio/bin" >> $GITHUB_PATH
+    
+    - name: Start Temporal dev server
+      run: |
+        temporal server start-dev &
+        sleep 10
+    
+    - name: Run integration tests
+      run: |
+        cd backend
+        pytest -v -m integration --tb=short
   
   build-frontend:
     runs-on: ubuntu-latest
