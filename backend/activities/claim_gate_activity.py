@@ -453,19 +453,30 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
             continue
         
         # QA R13: Check if it's a fixed phrase (exact match only, no frames)
-        from backend.gate.non_claim_set import find_phrase_by_text
+        # S2 (QA R14): Also check terminal punctuation type matches
+        from backend.gate.non_claim_set import find_phrase_by_text, get_phrase_text
         phrase = find_phrase_by_text(sentence)
         if phrase:
-            results.append(SentenceGateResult(
-                sentence=sentence,
-                passed=True,
-                kind="non_claim",
-                reason="",
-                kept_segment=False,
-                phrase_id=phrase.id
-            ))
-            activity.logger.info(f"Sentence '{sentence[:50]}...' matched phrase {phrase.id}")
-            continue
+            # S2 (QA R14): Check if punctuation type matches
+            phrase_text = get_phrase_text(phrase.id)
+            phrase_is_question = phrase_text and phrase_text.rstrip().endswith('?')
+            
+            if is_question == phrase_is_question:
+                # Punctuation types match
+                results.append(SentenceGateResult(
+                    sentence=sentence,
+                    passed=True,
+                    kind="non_claim",
+                    reason="",
+                    kept_segment=False,
+                    phrase_id=phrase.id
+                ))
+                activity.logger.info(f"Sentence '{sentence[:50]}...' matched phrase {phrase.id}")
+                continue
+            else:
+                # Punctuation types don't match
+                activity.logger.warning(f"Sentence '{sentence[:50]}...' matched phrase text but wrong punctuation type")
+                # Fall through to failed
         
         # Failed - not a passage sentence, not a gated segment, not a non_claim
         results.append(SentenceGateResult(
