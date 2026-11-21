@@ -2,7 +2,7 @@
 
 from .evidence import Evidence, FounderMaterial, Claim, Segment, ClaimGateResult, Draft
 from .post import Post, Author
-from .review import ReviewCard
+from .review import ReviewCard, SentenceGateResult
 
 __all__ = [
     "Evidence",
@@ -14,4 +14,5 @@ __all__ = [
     "Post",
     "Author",
     "ReviewCard",
+    "SentenceGateResult",
 ]

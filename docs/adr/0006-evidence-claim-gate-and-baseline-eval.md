@@ -109,9 +109,11 @@ George wants the review UI to show the research alongside the draft.
 - 'I think this is a hard problem.' → PASSES (opinion without product claim)
 - Claim whose content words all appear in its quote → PASSES
 
+**Implemented:**
+- **Founder-edit re-gate (Amendment E):** When a founder edits the draft text in the Review workflow, the strict claim gate re-runs on the edited text. The edited text is split into sentences; sentences that verbatim match previously gated segments keep their verdict, and new sentences are classified with the closed-set non_claim rules. Claims without quotes must have all content words, numbers, and negations appearing in a single founder passage. Per-sentence results are stored on the card as an evidence trail. This is not a hard block: if the edited text fails, the `approve` Update requires `post_anyway=True`. The Update validator rejects approve without it when failures exist, and the card records `post_anyway` and the failing sentences at approve time. Agent-drafted replies remain hard-gated (unchanged). The frontend shows per-sentence gate results for edited text and, when failing, provides a "Post anyway" confirmation that sends `post_anyway=true`.
+
 **Deferred items:**
 - Independent verifier call as an option (b) alternative to near-verbatim matching is deferred to the ADR-0003 eval program. Near-verbatim matching is the baseline; a verifier call would be evaluated for precision/recall improvement.
-- Founder-edit re-gate with explicit `post_anyway` override is approved in principle and will be implemented in a subsequent change. This allows the founder to override a gate failure with an explicit acknowledgment.
 
 **Alternatives considered:**
 - **Option (b): Independent verifier LLM call.** Instead of near-verbatim matching, call an LLM to judge whether the segment is supported by the quote. Rejected for the baseline because it adds cost, latency, and non-determinism. Deferred to eval as a potential improvement.

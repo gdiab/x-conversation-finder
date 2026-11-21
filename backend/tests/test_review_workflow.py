@@ -59,7 +59,7 @@ async def test_review_workflow_approve(make_review_input, x_activities, reply_ac
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                args=["https://x.com/test/status/999", client_request_id]
+                args=["https://x.com/test/status/999", client_request_id, False]
             )
             
             await env.sleep(1)
@@ -68,7 +68,7 @@ async def test_review_workflow_approve(make_review_input, x_activities, reply_ac
             client_request_id = str(uuid.uuid4())
             reply_msg = await handle.execute_update(
                 "confirm_posted",
-                args=["https://x.com/founder/status/9999", client_request_id]
+                args=["https://x.com/founder/status/9999", client_request_id, False]
             )
             assert "Confirmed" in reply_msg
             
@@ -163,7 +163,7 @@ async def test_review_workflow_nudge(make_review_input, x_activities, reply_acti
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                args=["https://x.com/test/status/999", client_request_id]
+                args=["https://x.com/test/status/999", client_request_id, False]
             )
             
             await env.sleep(1)
@@ -172,7 +172,7 @@ async def test_review_workflow_nudge(make_review_input, x_activities, reply_acti
             client_request_id = str(uuid.uuid4())
             await handle.execute_update(
                 "confirm_posted",
-                args=["https://x.com/test/status/1001", client_request_id]
+                args=["https://x.com/test/status/1001", client_request_id, False]
             )
             
             # Skip ahead for follow-up
@@ -285,7 +285,7 @@ async def test_review_workflow_approved_not_confirmed(make_review_input, x_activ
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                args=["https://x.com/test/status/999", client_request_id]
+                args=["https://x.com/test/status/999", client_request_id, False]
             )
             
             # Skip ahead 48h without confirming
@@ -330,7 +330,7 @@ async def test_review_workflow_confirm_posted_invalid_url(make_review_input, x_a
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                args=["https://x.com/test/status/999", client_request_id]
+                args=["https://x.com/test/status/999", client_request_id, False]
             )
             
             await env.sleep(1)
@@ -341,7 +341,7 @@ async def test_review_workflow_confirm_posted_invalid_url(make_review_input, x_a
             try:
                 await handle.execute_update(
                     "confirm_posted",
-                    args=["https://invalid-url.com/foo", client_request_id]
+                    args=["https://invalid-url.com/foo", client_request_id, False]
                 )
                 assert False, "Should have raised WorkflowUpdateFailedError"
             except WorkflowUpdateFailedError as e:
@@ -387,7 +387,7 @@ async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_ac
             request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                args=["https://x.com/test/status/999", request_id]
+                args=["https://x.com/test/status/999", request_id, False]
             )
             
             await env.sleep(1)
@@ -395,7 +395,7 @@ async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_ac
             # Try to approve again with same request ID (should be idempotent)
             await handle.signal(
                 "approve",
-                args=["https://x.com/test/status/999", request_id]
+                args=["https://x.com/test/status/999", request_id, False]
             )
             
             await env.sleep(1)
@@ -734,7 +734,7 @@ async def test_review_workflow_confirm_posted_with_post_1005(x_activities, reply
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                args=["https://x.com/test/status/999", client_request_id]
+                args=["https://x.com/test/status/999", client_request_id, False]
             )
             
             await env.sleep(1)
@@ -743,7 +743,7 @@ async def test_review_workflow_confirm_posted_with_post_1005(x_activities, reply
             client_request_id = str(uuid.uuid4())
             await handle.execute_update(
                 "confirm_posted",
-                args=["https://x.com/founder/status/10005", client_request_id]
+                args=["https://x.com/founder/status/10005", client_request_id, False]
             )
             
             # Should work without error - fake client maps post 10005 to conversation 1005

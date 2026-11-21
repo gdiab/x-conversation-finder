@@ -94,6 +94,16 @@ export interface ReviewCard {
     author: string;
     url: string;
   }> | null;
+  // Edit re-gate fields (ADR-0006 Amendment E)
+  edited_text_gate_results: Array<{
+    sentence: string;
+    passed: boolean;
+    kind: "claim" | "non_claim";
+    reason: string;
+    kept_segment: boolean;
+  }> | null;
+  post_anyway: boolean | null;
+  post_anyway_failing_sentences: string[] | null;
 }
 
 export interface StartWatchRequest {
@@ -137,18 +147,25 @@ export async function listReviews(): Promise<{ cards: ReviewCard[]; count: numbe
   return response.json();
 }
 
-export async function approveReview(workflowId: string, postedUrl: string, clientRequestId: string): Promise<void> {
+export async function approveReview(
+  workflowId: string, 
+  postedUrl: string, 
+  clientRequestId: string,
+  postAnyway: boolean = false
+): Promise<void> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       posted_url: postedUrl,
       client_request_id: clientRequestId,
+      post_anyway: postAnyway,
     }),
   });
   
   if (!response.ok) {
-    throw new Error(`Failed to approve review: ${response.statusText}`);
+    const errorText = await response.text();
+    throw new Error(`Failed to approve review: ${response.statusText}. ${errorText}`);
   }
 }
 

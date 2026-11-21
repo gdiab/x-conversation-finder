@@ -325,6 +325,148 @@ def verify_segment_coverage(
     return True, ""
 
 
+def verify_claim_in_passages(
+    claim_text: str,
+    materials: List[FounderMaterial]
+) -> tuple[bool, str]:
+    """
+    Verify a claim sentence (without quote) appears in founder material.
+    
+    Per founder-edit re-gate requirement:
+    A claim passes if all its content words, numbers, and negations 
+    appear within a SINGLE founder passage.
+    
+    Returns (passed, failure_reason).
+    """
+    if not materials:
+        return False, "No founder materials available"
+    
+    claim_content = extract_content_words(claim_text)
+    claim_numbers = extract_numbers(claim_text)
+    claim_negations = extract_negations(claim_text)
+    
+    # Try each passage
+    for material in materials:
+        passage_content = extract_content_words(material.passage)
+        passage_numbers = extract_numbers(material.passage)
+        passage_negations = extract_negations(material.passage)
+        
+        # Check if all claim elements are in this passage
+        content_covered = claim_content.issubset(passage_content)
+        numbers_covered = claim_numbers.issubset(passage_numbers)
+        negations_match = claim_negations == passage_negations
+        
+        if content_covered and numbers_covered and negations_match:
+            return True, ""
+    
+    # Failed - report what's missing
+    return False, "Content words/numbers/negations not found in any single founder passage"
+
+
+@dataclass
+class EditedTextGateInput:
+    """Input for verifying edited free text."""
+    edited_text: str
+    gated_segments: List[Segment]  # Previously gated segments for verbatim matching
+    founder_materials: List[FounderMaterial]
+    idempotency_key: str
+
+
+@dataclass
+class SentenceGateResult:
+    """Per-sentence gate result for edited text."""
+    sentence: str
+    passed: bool
+    kind: str  # "claim" or "non_claim"
+    reason: str  # Failure reason or empty if passed
+    kept_segment: bool  # True if verbatim match to gated segment
+
+
+@activity.defn(name="verify_edited_text")
+async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateResult]:
+    """
+    Verify edited free text using the strict claim gate.
+    
+    Per founder-edit re-gate requirement (ADR-0006 Amendment E):
+    1. Split edited text into sentences
+    2. For each sentence:
+       - If it verbatim matches a previously gated segment, keep that verdict
+       - Otherwise, classify with closed-set non_claim rules
+       - Claims without quotes must have all content words/numbers/negations in a single passage
+    3. Return per-sentence results (evidence trail)
+    
+    This is NOT a hard block - results are stored, and approve requires post_anyway=True if any fail.
+    """
+    activity.logger.info(
+        f"Verifying edited text: {len(input.edited_text)} chars, "
+        f"{len(input.gated_segments)} gated segments (key: {input.idempotency_key})"
+    )
+    
+    # Split into sentences
+    sentences = split_into_sentences(input.edited_text)
+    activity.logger.info(f"Split edited text into {len(sentences)} sentences")
+    
+    # Build normalized segment lookup for verbatim matching
+    norm_segment_map = {}
+    for seg in input.gated_segments:
+        norm_text = normalize_text(seg.text)
+        norm_segment_map[norm_text] = seg
+    
+    results = []
+    
+    for sentence in sentences:
+        norm_sentence = normalize_text(sentence)
+        
+        # Check if this sentence verbatim matches a gated segment
+        if norm_sentence in norm_segment_map:
+            matched_seg = norm_segment_map[norm_sentence]
+            # Keep the segment's verdict
+            results.append(SentenceGateResult(
+                sentence=sentence,
+                passed=True,  # Previously gated segments are trusted
+                kind=matched_seg.kind,
+                reason="",
+                kept_segment=True
+            ))
+            activity.logger.info(f"Sentence '{sentence[:50]}...' kept gated segment verdict ({matched_seg.kind})")
+            continue
+        
+        # New sentence - classify with strict rules
+        effective_kind = determine_effective_kind(sentence, "claim")  # Default to claim
+        
+        if effective_kind == "non_claim":
+            # Non-claims always pass
+            results.append(SentenceGateResult(
+                sentence=sentence,
+                passed=True,
+                kind="non_claim",
+                reason="",
+                kept_segment=False
+            ))
+            activity.logger.info(f"Sentence '{sentence[:50]}...' classified as non_claim")
+        else:
+            # Claim - verify coverage in founder materials
+            passed, reason = verify_claim_in_passages(sentence, input.founder_materials)
+            results.append(SentenceGateResult(
+                sentence=sentence,
+                passed=passed,
+                kind="claim",
+                reason=reason if not passed else "",
+                kept_segment=False
+            ))
+            if not passed:
+                activity.logger.warning(f"Sentence '{sentence[:50]}...' failed: {reason}")
+            else:
+                activity.logger.info(f"Sentence '{sentence[:50]}...' passed coverage check")
+    
+    passed_count = sum(1 for r in results if r.passed)
+    activity.logger.info(
+        f"Edited text gate: {passed_count}/{len(results)} sentences passed"
+    )
+    
+    return results
+
+
 @activity.defn(name="claim_gate")
 async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     """

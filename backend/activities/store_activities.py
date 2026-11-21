@@ -170,6 +170,19 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
         reply_post_id=card.reply_post_id,
         skip_reason=card.skip_reason,
         followup_replies=card.followup_replies if card.followup_replies else None,
+        # Edit re-gate fields (ADR-0006 Amendment E)
+        edited_text_gate_results=[
+            {
+                "sentence": r.sentence,
+                "passed": r.passed,
+                "kind": r.kind,
+                "reason": r.reason,
+                "kept_segment": r.kept_segment,
+            }
+            for r in card.edited_text_gate_results
+        ] if card.edited_text_gate_results else None,
+        post_anyway=card.post_anyway,
+        post_anyway_failing_sentences=card.post_anyway_failing_sentences,
     )
 
 
@@ -232,6 +245,13 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                 card_db.skip_reason = value
             elif key == "followup_replies":
                 card_db.followup_replies = value if value else None
+            elif key == "edited_text_gate_results":
+                # Edit re-gate results (ADR-0006 Amendment E)
+                card_db.edited_text_gate_results = value if value else None
+            elif key == "post_anyway":
+                card_db.post_anyway = value
+            elif key == "post_anyway_failing_sentences":
+                card_db.post_anyway_failing_sentences = value if value else None
             elif key == "evidence":
                 # Update evidence_data JSON
                 evidence_data = card_db.evidence_data

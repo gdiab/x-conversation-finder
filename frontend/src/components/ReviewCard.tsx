@@ -21,6 +21,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [isNudging, setIsNudging] = useState(false);
+  const [showPostAnywayConfirm, setShowPostAnywayConfirm] = useState(false);
   
   // Stable request IDs - generated once per user action attempt, reused on retries
   const approveRequestId = useRef<string | null>(null);
@@ -29,7 +30,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const nudgeRequestId = useRef<string | null>(null);
   const confirmRequestId = useRef<string | null>(null);
 
-  const handleApprove = async () => {
+  const handleApprove = async (postAnyway: boolean = false) => {
     if (!postedUrl.trim()) {
       setError('Please enter the posted URL');
       return;
@@ -42,13 +43,19 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     
     setLoading(true);
     setError(null);
+    setShowPostAnywayConfirm(false);
     
     try {
-      await approveReview(card.workflow_id, postedUrl, approveRequestId.current);
+      await approveReview(card.workflow_id, postedUrl, approveRequestId.current, postAnyway);
       approveRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to approve');
+      const errorMsg = err instanceof Error ? err.message : 'Failed to approve';
+      // If error mentions post_anyway, show the confirm dialog
+      if (errorMsg.toLowerCase().includes('post_anyway') && !postAnyway) {
+        setShowPostAnywayConfirm(true);
+      }
+      setError(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -402,6 +409,103 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         </div>
       )}
 
+      {/* Edited Text Gate Results (ADR-0006 Amendment E) */}
+      {card.edited_text_gate_results && card.edited_text_gate_results.length > 0 && (
+        <div style={{ marginBottom: '20px', borderTop: '1px solid #eee', paddingTop: '20px' }}>
+          <h4>Edited Text Gate Results</h4>
+          <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
+            Each sentence from the edited text is re-verified against the strict claim gate.
+          </div>
+          {card.edited_text_gate_results.map((result, idx) => {
+            const isPassed = result.passed;
+            const isKept = result.kept_segment;
+            
+            return (
+              <div key={idx} style={{
+                backgroundColor: isPassed ? '#e8f5e9' : '#ffebee',
+                padding: '12px',
+                borderRadius: '4px',
+                marginBottom: '8px',
+                border: `1px solid ${isPassed ? '#4caf50' : '#f44336'}`,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                  <div style={{ flex: 1 }}>
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      fontWeight: 'bold',
+                      backgroundColor: isPassed ? '#4caf50' : '#f44336',
+                      color: '#fff',
+                      marginRight: '8px',
+                    }}>
+                      {isPassed ? 'PASS' : 'FAIL'}
+                    </span>
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      backgroundColor: result.kind === 'claim' ? '#1976d2' : '#757575',
+                      color: '#fff',
+                      marginRight: '8px',
+                    }}>
+                      {result.kind}
+                    </span>
+                    {isKept && (
+                      <span style={{
+                        display: 'inline-block',
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        backgroundColor: '#9c27b0',
+                        color: '#fff',
+                        marginRight: '8px',
+                      }}>
+                        verbatim
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div style={{ marginBottom: '8px' }}>"{result.sentence}"</div>
+                {!isPassed && result.reason && (
+                  <div style={{ 
+                    fontSize: '12px', 
+                    color: '#c62828',
+                    padding: '8px',
+                    backgroundColor: '#fff',
+                    borderRadius: '4px',
+                  }}>
+                    <strong>Reason:</strong> {result.reason}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          
+          {card.post_anyway && card.post_anyway_failing_sentences && (
+            <div style={{
+              backgroundColor: '#fff3e0',
+              padding: '12px',
+              borderRadius: '4px',
+              marginTop: '12px',
+              border: '1px solid #ff9800',
+            }}>
+              <div style={{ fontWeight: 'bold', color: '#e65100', marginBottom: '8px' }}>
+                ⚠️ Posted Anyway Override
+              </div>
+              <div style={{ fontSize: '14px', marginBottom: '8px' }}>
+                This draft was approved with failing sentences using the "Post anyway" override.
+              </div>
+              <div style={{ fontSize: '12px', color: '#666' }}>
+                Failing sentences at approval: {card.post_anyway_failing_sentences.length}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Error Display */}
       {error && (
         <div style={{
@@ -475,12 +579,52 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
               style={{ width: '300px', padding: '8px', marginRight: '8px' }}
             />
             <button
-              onClick={handleApprove}
+              onClick={() => handleApprove(false)}
               disabled={loading}
               style={{ backgroundColor: '#4caf50', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '4px' }}
             >
               Approve
             </button>
+            
+            {/* Post Anyway confirmation (ADR-0006 Amendment E) */}
+            {showPostAnywayConfirm && (
+              <div style={{
+                marginTop: '12px',
+                padding: '12px',
+                backgroundColor: '#fff3e0',
+                borderRadius: '4px',
+                border: '1px solid #ff9800',
+              }}>
+                <div style={{ fontWeight: 'bold', color: '#e65100', marginBottom: '8px' }}>
+                  ⚠️ Edited text has failing sentences
+                </div>
+                <div style={{ fontSize: '14px', marginBottom: '12px' }}>
+                  The edited text contains claims that failed the claim gate. 
+                  You can override this and post anyway by confirming below.
+                </div>
+                <button
+                  onClick={() => handleApprove(true)}
+                  disabled={loading}
+                  style={{
+                    backgroundColor: '#ff9800',
+                    color: '#fff',
+                    border: 'none',
+                    padding: '8px 16px',
+                    borderRadius: '4px',
+                    fontWeight: 'bold',
+                  }}
+                >
+                  Post Anyway (Override)
+                </button>
+                <button
+                  onClick={() => setShowPostAnywayConfirm(false)}
+                  disabled={loading}
+                  style={{ marginLeft: '8px' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Edit */}

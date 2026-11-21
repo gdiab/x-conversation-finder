@@ -105,6 +105,7 @@ class ApproveRequest(BaseModel):
     """Request to approve a review."""
     posted_url: str
     client_request_id: str
+    post_anyway: bool = False  # Per ADR-0006 Amendment E
 
 
 class SkipRequest(BaseModel):
@@ -201,18 +202,23 @@ async def list_reviews():
 
 @app.post("/api/reviews/{workflow_id}/approve")
 async def approve_review(workflow_id: str, request: ApproveRequest):
-    """Send approve signal to a review workflow."""
+    """
+    Send approve update to a review workflow.
+    
+    Per ADR-0006 Amendment E: Now an Update (not Signal) with validation.
+    Requires post_anyway=true if edited text failed re-gate.
+    """
     if not temporal_client:
         raise HTTPException(status_code=500, detail="Temporal client not connected")
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
-        await handle.signal(
+        result = await handle.execute_update(
             "approve",
-            args=[request.posted_url, request.client_request_id]
+            args=[request.posted_url, request.client_request_id, request.post_anyway]
         )
         
-        return {"message": "Approved"}
+        return {"message": result}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

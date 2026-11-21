@@ -12,6 +12,16 @@ ReviewStatusStr = Literal["pending", "approved", "approved_not_confirmed", "skip
 
 
 @dataclass
+class SentenceGateResult:
+    """Per-sentence gate result for edited text."""
+    sentence: str
+    passed: bool
+    kind: str  # "claim" or "non_claim"
+    reason: str  # Failure reason or empty if passed
+    kept_segment: bool  # True if verbatim match to gated segment
+
+
+@dataclass
 class ReviewCard:
     """Complete review card shown in the UI."""
     
@@ -27,6 +37,10 @@ class ReviewCard:
     skip_reason: Optional[str] = None
     client_request_id: Optional[str] = None
     followup_replies: Optional[list] = None
+    # Founder-edit re-gate fields (ADR-0006 Amendment E)
+    edited_text_gate_results: Optional[list[SentenceGateResult]] = None
+    post_anyway: Optional[bool] = None
+    post_anyway_failing_sentences: Optional[list[str]] = None
     
     def to_dict(self):
         """Convert to dict for serialization."""
@@ -126,4 +140,16 @@ class ReviewCard:
             "reply_post_id": self.reply_post_id,
             "skip_reason": self.skip_reason,
             "followup_replies": self.followup_replies,
+            "edited_text_gate_results": [
+                {
+                    "sentence": r.sentence,
+                    "passed": r.passed,
+                    "kind": r.kind,
+                    "reason": r.reason,
+                    "kept_segment": r.kept_segment,
+                }
+                for r in self.edited_text_gate_results
+            ] if self.edited_text_gate_results else None,
+            "post_anyway": self.post_anyway,
+            "post_anyway_failing_sentences": self.post_anyway_failing_sentences,
         }

@@ -27,6 +27,7 @@ with workflow.unsafe.imports_passed_through():
         ReviewCard,
         Post,
         Evidence,
+        SentenceGateResult,
     )
     from backend.activities import (
         ResearchPostInput,
@@ -36,7 +37,12 @@ with workflow.unsafe.imports_passed_through():
         LookupPostInput,
         CheckFollowupInput,
     )
-    from backend.activities.claim_gate_activity import ClaimGateInput, claim_gate
+    from backend.activities.claim_gate_activity import (
+        ClaimGateInput,
+        claim_gate,
+        EditedTextGateInput,
+        verify_edited_text,
+    )
     from backend.activities.store_activities import store_card, update_card
 
 
@@ -120,6 +126,10 @@ class ReviewWorkflow:
         self._edit_requests: set[str] = set()
         self._confirm_requests: set[str] = set()
         self._nudge_requests: set[str] = set()
+        # Edit re-gate fields (ADR-0006 Amendment E)
+        self.edited_text_gate_results: Optional[List[SentenceGateResult]] = None
+        self.post_anyway: Optional[bool] = None
+        self.post_anyway_failing_sentences: Optional[List[str]] = None
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -133,6 +143,9 @@ class ReviewWorkflow:
             skip_reason=self.skip_reason if self.skipped else None,
             posted_url=self.posted_url,
             reply_post_id=self.reply_post_id,
+            edited_text_gate_results=self.edited_text_gate_results,
+            post_anyway=self.post_anyway,
+            post_anyway_failing_sentences=self.post_anyway_failing_sentences,
         )
 
     async def _research_post(self, workflow_id: str, created_at: str) -> Optional[Evidence]:
@@ -342,15 +355,21 @@ class ReviewWorkflow:
         # Handle approval (approved is True at this point)
         workflow.logger.info(f"Approved by founder")
         
-        # Update to approved status
+        # Update to approved status (including post_anyway if used)
+        updates = {
+            "status": "approved",
+            "posted_url": self.posted_url,
+        }
+        if self.post_anyway is not None:
+            updates["post_anyway"] = self.post_anyway
+            if self.post_anyway_failing_sentences:
+                updates["post_anyway_failing_sentences"] = self.post_anyway_failing_sentences
+        
         await workflow.execute_activity(
             update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
-                updates={
-                    "status": "approved",
-                    "posted_url": self.posted_url,
-                },
+                updates=updates,
                 idempotency_key=f"{workflow_id}:update:approve",
             ),
             start_to_close_timeout=timedelta(seconds=10),
@@ -436,25 +455,57 @@ class ReviewWorkflow:
         
         return "followup_due"
     
-    @workflow.signal
-    async def approve(self, posted_url: str, client_request_id: str):
+    @workflow.update
+    async def approve(self, posted_url: str, client_request_id: str, post_anyway: bool = False) -> str:
         """
-        Approve signal - founder will post this.
+        Approve update - founder will post this.
         
         Per ADR-0004: approve just yields the copy text.
         The founder posts manually and then calls confirm_posted.
+        
+        Per ADR-0006 Amendment E: If edited text failed re-gate, requires post_anyway=True.
+        Validator rejects approve without post_anyway when edited text fails gate.
         """
         # Deduplicate (B9: per-handler set)
         if client_request_id in self._approve_requests:
-            workflow.logger.info(f"Ignoring duplicate approve signal: {client_request_id}")
-            return
+            workflow.logger.info(f"Ignoring duplicate approve: {client_request_id}")
+            return "Approved"
         
-        workflow.logger.info(f"Received approve signal")
+        workflow.logger.info(f"Received approve (post_anyway={post_anyway})")
         self._approve_requests.add(client_request_id)
         
         self.approved = True
         self.posted_url = posted_url
         self.status = "approved"
+        self.post_anyway = post_anyway if post_anyway else None
+        
+        # If post_anyway was used, record the failing sentences
+        if post_anyway and self.edited_text_gate_results:
+            failing = [r.sentence for r in self.edited_text_gate_results if not r.passed]
+            self.post_anyway_failing_sentences = failing
+            workflow.logger.info(f"Approved with post_anyway: {len(failing)} failing sentences")
+        
+        return "Approved"
+    
+    @approve.validator
+    def validate_approve(self, posted_url: str, client_request_id: str, post_anyway: bool = False) -> None:
+        """
+        Validator for approve Update.
+        
+        Per ADR-0006 Amendment E: Rejects approve without post_anyway=True when edited text fails gate.
+        """
+        if self.status not in ["pending", "approved"]:
+            raise ValueError(f"Cannot approve in status {self.status}")
+        
+        # Check if edited text exists and has failing sentences
+        if self.edited_text_gate_results:
+            has_failures = any(not r.passed for r in self.edited_text_gate_results)
+            if has_failures and not post_anyway:
+                failing_count = sum(1 for r in self.edited_text_gate_results if not r.passed)
+                raise ValueError(
+                    f"Edited text has {failing_count} failing sentence(s). "
+                    f"Set post_anyway=true to approve anyway."
+                )
     
     @workflow.signal
     async def skip(self, reason: str, client_request_id: str):
@@ -565,7 +616,12 @@ class ReviewWorkflow:
     
     @workflow.update
     async def edit(self, new_text: str, client_request_id: str) -> str:
-        """Edit update - founder edits the draft."""
+        """
+        Edit update - founder edits the draft.
+        
+        Per ADR-0006 Amendment E: Re-runs strict claim gate on edited text.
+        Results stored for evidence trail; not a hard block (approve requires post_anyway if fails).
+        """
         # Deduplicate (B9: per-handler set)
         if client_request_id in self._edit_requests:
             workflow.logger.info(f"Ignoring duplicate edit: {client_request_id}")
@@ -574,16 +630,44 @@ class ReviewWorkflow:
         workflow.logger.info(f"Received edit update: {len(new_text)} chars")
         self._edit_requests.add(client_request_id)
         
+        # Update draft text
         self.evidence.draft.text = new_text
         self.evidence.draft.steers_applied.append("manual_edit")
         
         workflow_id = workflow.info().workflow_id
         
+        # Re-gate edited text (ADR-0006 Amendment E)
+        workflow.logger.info(f"Running re-gate on edited text")
+        gate_results = await workflow.execute_activity(
+            verify_edited_text,
+            EditedTextGateInput(
+                edited_text=new_text,
+                gated_segments=self.evidence.draft.segments,
+                founder_materials=self.evidence.founder_materials,
+                idempotency_key=f"{workflow_id}:edit_gate:{client_request_id}",
+            ),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_medium_sec),
+            result_type=List[SentenceGateResult],
+        )
+        
+        # Store gate results
+        self.edited_text_gate_results = gate_results
+        
+        # Log gate results
+        passed_count = sum(1 for r in gate_results if r.passed)
+        workflow.logger.info(
+            f"Edit gate: {passed_count}/{len(gate_results)} sentences passed"
+        )
+        
+        # Update card with edited text and gate results
         await workflow.execute_activity(
             update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
-                updates={"evidence": self.evidence},
+                updates={
+                    "evidence": self.evidence,
+                    "edited_text_gate_results": gate_results,
+                },
                 idempotency_key=f"{workflow_id}:update:edit:{client_request_id}",
             ),
             start_to_close_timeout=timedelta(seconds=10),
