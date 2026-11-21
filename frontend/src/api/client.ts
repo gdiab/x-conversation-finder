@@ -64,32 +64,12 @@ export interface StartWatchRequest {
 
 const API_BASE = '/api';
 
-// Stable request IDs based on operation and timestamp window
-// This ensures that rapid retries use the same ID for deduplication
-const requestIdCache = new Map<string, string>();
-
-function generateRequestId(operation: string, workflowId: string): string {
-  // Round timestamp to nearest 5 seconds for retry stability
-  const timestampWindow = Math.floor(Date.now() / 5000) * 5000;
-  const cacheKey = `${operation}:${workflowId}:${timestampWindow}`;
-  
-  // Reuse cached ID within the same time window
-  if (requestIdCache.has(cacheKey)) {
-    return requestIdCache.get(cacheKey)!;
-  }
-  
-  const requestId = `req_${timestampWindow}_${Math.random().toString(36).slice(2)}`;
-  requestIdCache.set(cacheKey, requestId);
-  
-  // Clear old cache entries (keep last 10)
-  if (requestIdCache.size > 10) {
-    const firstKey = requestIdCache.keys().next().value;
-    if (firstKey) {
-      requestIdCache.delete(firstKey);
-    }
-  }
-  
-  return requestId;
+// Generate a unique request ID for idempotency
+// Call this ONCE per user action attempt, not per retry
+export function generateRequestId(): string {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).slice(2);
+  return `req_${timestamp}_${random}`;
 }
 
 export async function startWatch(request: StartWatchRequest): Promise<{ workflow_id: string; message: string }> {
@@ -116,13 +96,13 @@ export async function listReviews(): Promise<{ cards: ReviewCard[]; count: numbe
   return response.json();
 }
 
-export async function approveReview(workflowId: string, postedUrl: string): Promise<void> {
+export async function approveReview(workflowId: string, postedUrl: string, clientRequestId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       posted_url: postedUrl,
-      client_request_id: generateRequestId('approve', workflowId),
+      client_request_id: clientRequestId,
     }),
   });
   
@@ -131,13 +111,13 @@ export async function approveReview(workflowId: string, postedUrl: string): Prom
   }
 }
 
-export async function skipReview(workflowId: string, reason: string): Promise<void> {
+export async function skipReview(workflowId: string, reason: string, clientRequestId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/skip`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       reason,
-      client_request_id: generateRequestId('skip', workflowId),
+      client_request_id: clientRequestId,
     }),
   });
   
@@ -146,13 +126,13 @@ export async function skipReview(workflowId: string, reason: string): Promise<vo
   }
 }
 
-export async function editReview(workflowId: string, newText: string): Promise<string> {
+export async function editReview(workflowId: string, newText: string, clientRequestId: string): Promise<string> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/edit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       new_text: newText,
-      client_request_id: generateRequestId('edit', workflowId),
+      client_request_id: clientRequestId,
     }),
   });
   
@@ -164,13 +144,13 @@ export async function editReview(workflowId: string, newText: string): Promise<s
   return result.new_text;
 }
 
-export async function nudgeReview(workflowId: string, instruction: string): Promise<string> {
+export async function nudgeReview(workflowId: string, instruction: string, clientRequestId: string): Promise<string> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/nudge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       instruction,
-      client_request_id: generateRequestId('nudge', workflowId),
+      client_request_id: clientRequestId,
     }),
   });
   
@@ -182,13 +162,13 @@ export async function nudgeReview(workflowId: string, instruction: string): Prom
   return result.new_draft;
 }
 
-export async function confirmPostedReview(workflowId: string, replyUrl: string): Promise<void> {
+export async function confirmPostedReview(workflowId: string, replyUrl: string, clientRequestId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/confirm_posted`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       reply_url: replyUrl,
-      client_request_id: generateRequestId('confirm_posted', workflowId),
+      client_request_id: clientRequestId,
     }),
   });
   

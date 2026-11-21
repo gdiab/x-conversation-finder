@@ -2,9 +2,9 @@
  * ReviewCard component - shows a single review with evidence and draft.
  */
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import type { ReviewCard as ReviewCardType } from '../api/client';
-import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview } from '../api/client';
+import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId } from '../api/client';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -21,6 +21,13 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [isNudging, setIsNudging] = useState(false);
+  
+  // Stable request IDs - generated once per user action attempt, reused on retries
+  const approveRequestId = useRef<string | null>(null);
+  const skipRequestId = useRef<string | null>(null);
+  const editRequestId = useRef<string | null>(null);
+  const nudgeRequestId = useRef<string | null>(null);
+  const confirmRequestId = useRef<string | null>(null);
 
   const handleApprove = async () => {
     if (!postedUrl.trim()) {
@@ -28,11 +35,17 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       return;
     }
     
+    // Generate request ID once per action attempt (on first click)
+    if (!approveRequestId.current) {
+      approveRequestId.current = generateRequestId();
+    }
+    
     setLoading(true);
     setError(null);
     
     try {
-      await approveReview(card.workflow_id, postedUrl);
+      await approveReview(card.workflow_id, postedUrl, approveRequestId.current);
+      approveRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to approve');
@@ -42,11 +55,17 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   };
 
   const handleSkip = async () => {
+    // Generate request ID once per action attempt
+    if (!skipRequestId.current) {
+      skipRequestId.current = generateRequestId();
+    }
+    
     setLoading(true);
     setError(null);
     
     try {
-      await skipReview(card.workflow_id, skipReason || 'Not relevant');
+      await skipReview(card.workflow_id, skipReason || 'Not relevant', skipRequestId.current);
+      skipRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to skip');
@@ -61,11 +80,17 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       return;
     }
     
+    // Generate request ID once per action attempt
+    if (!editRequestId.current) {
+      editRequestId.current = generateRequestId();
+    }
+    
     setLoading(true);
     setError(null);
     
     try {
-      await editReview(card.workflow_id, editText);
+      await editReview(card.workflow_id, editText, editRequestId.current);
+      editRequestId.current = null; // Reset for next action
       setIsEditing(false);
       onUpdate();
     } catch (err) {
@@ -81,11 +106,17 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       return;
     }
     
+    // Generate request ID once per action attempt
+    if (!nudgeRequestId.current) {
+      nudgeRequestId.current = generateRequestId();
+    }
+    
     setLoading(true);
     setError(null);
     
     try {
-      const newDraft = await nudgeReview(card.workflow_id, nudgeInstruction);
+      const newDraft = await nudgeReview(card.workflow_id, nudgeInstruction, nudgeRequestId.current);
+      nudgeRequestId.current = null; // Reset for next action
       setEditText(newDraft);
       setNudgeInstruction('');
       setIsNudging(false);
@@ -103,11 +134,17 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       return;
     }
     
+    // Generate request ID once per action attempt
+    if (!confirmRequestId.current) {
+      confirmRequestId.current = generateRequestId();
+    }
+    
     setLoading(true);
     setError(null);
     
     try {
-      await confirmPostedReview(card.workflow_id, replyUrl);
+      await confirmPostedReview(card.workflow_id, replyUrl, confirmRequestId.current);
+      confirmRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to confirm posted');
