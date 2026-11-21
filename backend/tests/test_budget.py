@@ -137,15 +137,27 @@ def test_reserve_x_budget_read_cap_enforced(temp_db):
 
 def test_reserve_x_budget_atomic(temp_db):
     """Test that reserve is atomic - failure doesn't change ledger."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_spend_limit_usd=1.0,
             daily_post_read_cap=100,
             x_post_read_cost=0.5,
             budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         reserve_x_budget(1, 0.5)
         
@@ -161,15 +173,27 @@ def test_reserve_x_budget_atomic(temp_db):
 
 def test_reserve_x_budget_kill_switch_config(temp_db):
     """Test that config kill switch blocks budget."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_spend_limit_usd=10.0,
             daily_post_read_cap=100,
             x_post_read_cost=0.005,
             budget_kill_switch=True,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         with pytest.raises(BudgetExceeded, match="kill switch enabled in config"):
             reserve_x_budget(1)
@@ -177,15 +201,27 @@ def test_reserve_x_budget_kill_switch_config(temp_db):
 
 def test_reserve_x_budget_kill_switch_db(temp_db):
     """Test that DB kill switch blocks budget."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_spend_limit_usd=10.0,
             daily_post_read_cap=100,
             x_post_read_cost=0.005,
             budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         set_kill_switch(True)
         
@@ -195,15 +231,27 @@ def test_reserve_x_budget_kill_switch_db(temp_db):
 
 def test_reserve_inference_budget_per_token_pricing(temp_db):
     """Test per-token pricing for inference (NB3)."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_inference_limit_usd=1.0,
             inference_input_token_cost_usd=0.001,
             inference_output_token_cost_usd=0.002,
             budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         cost = reserve_inference_budget(input_tokens=100, output_tokens=50)
         
@@ -213,15 +261,27 @@ def test_reserve_inference_budget_per_token_pricing(temp_db):
 
 def test_reserve_inference_budget_enforces_cap_first_call(temp_db):
     """Test that inference budget cap is enforced on first call."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_inference_limit_usd=0.01,
             inference_input_token_cost_usd=0.001,
             inference_output_token_cost_usd=0.002,
             budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         with pytest.raises(BudgetExceeded, match="exceed daily inference limit"):
             reserve_inference_budget(input_tokens=100, output_tokens=100)
@@ -229,15 +289,27 @@ def test_reserve_inference_budget_enforces_cap_first_call(temp_db):
 
 def test_reserve_inference_budget_atomic(temp_db):
     """Test that inference reserve is atomic."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_inference_limit_usd=0.02,
             inference_input_token_cost_usd=0.001,
             inference_output_token_cost_usd=0.002,
             budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         reserve_inference_budget(input_tokens=5, output_tokens=5)
         
@@ -253,15 +325,27 @@ def test_reserve_inference_budget_atomic(temp_db):
 
 def test_reserve_inference_budget_kill_switch(temp_db):
     """Test that kill switch blocks inference."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_inference_limit_usd=1.0,
             inference_input_token_cost_usd=0.001,
             inference_output_token_cost_usd=0.002,
             budget_kill_switch=True,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         with pytest.raises(BudgetExceeded, match="kill switch enabled"):
             reserve_inference_budget(input_tokens=10, output_tokens=10)
@@ -269,15 +353,27 @@ def test_reserve_inference_budget_kill_switch(temp_db):
 
 def test_get_today_budget_includes_kill_switch(temp_db):
     """Test that get_today_budget includes kill switch status."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_spend_limit_usd=10.0,
             daily_post_read_cap=100,
             daily_inference_limit_usd=5.0,
             budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         budget = get_today_budget()
         assert "kill_switch" in budget
@@ -291,15 +387,27 @@ def test_get_today_budget_includes_kill_switch(temp_db):
 
 def test_multiple_reserves_accumulate(temp_db):
     """Test that multiple reserves accumulate correctly."""
-    with patch("backend.config.get_settings") as mock_settings:
-        settings = Settings(
+    settings = Settings(
+
             database_url=f"sqlite:///{temp_db}",
             daily_spend_limit_usd=10.0,
             daily_post_read_cap=100,
             x_post_read_cost=0.1,
             budget_kill_switch=False,
-        )
-        mock_settings.return_value = settings
+        
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
         
         reserve_x_budget(10, 0.1)
         reserve_x_budget(20, 0.1)
