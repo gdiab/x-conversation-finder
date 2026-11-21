@@ -53,9 +53,9 @@ async def test_review_workflow_replay(make_review_input, x_activities, reply_act
             
             # Step 1: Approve with reply URL
             import uuid
-            await handle.signal(
+            await handle.execute_update(
                 "approve",
-                args=["https://x.com/test/status/999", str(uuid.uuid4())]
+                args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
             )
             
             await env.sleep(1)

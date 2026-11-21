@@ -17,8 +17,8 @@ Temporal fit: a durable loop per topic, a pause for a human, and follow-ups days
 - After approval the founder pastes the URL of their posted reply. A durable timer then fires days later, and `check_followup` reads replies to it.
 
 **Messages into `Review`**
-- Signals: `approve`, `skip`.
-- Updates (tracked request/response, validated): `edit(text)` and `nudge(instruction)`. Nudge re-runs `draft_reply` with a steer such as "shorter" or "less salesy", then re-runs the claim gate, and returns the new draft.
+- Signals: `skip`.
+- Updates (tracked request/response, validated): `approve(posted_url, post_anyway)` (changed from Signal to Update 2026-11-21 to enable validator enforcement of post_anyway requirement), `edit(text)`, `nudge(instruction)`, and `confirm_posted(reply_url)`. Nudge re-runs `draft_reply` with a steer such as "shorter" or "less salesy", then re-runs the claim gate, and returns the new draft.
 - Query: `get_card` returns the whole review card.
 - Each human message carries a client request ID so a retried click is a no-op.
 

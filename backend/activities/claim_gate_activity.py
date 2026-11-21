@@ -406,20 +406,22 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     sentences = split_into_sentences(input.edited_text)
     activity.logger.info(f"Split edited text into {len(sentences)} sentences")
     
-    # Build normalized segment lookup for verbatim matching
-    norm_segment_map = {}
-    for seg in input.gated_segments:
-        norm_text = normalize_text(seg.text)
-        norm_segment_map[norm_text] = seg
-    
     results = []
     
     for sentence in sentences:
         norm_sentence = normalize_text(sentence)
         
         # Check if this sentence verbatim matches a gated segment
-        if norm_sentence in norm_segment_map:
-            matched_seg = norm_segment_map[norm_sentence]
+        # Use fuzzy matching (substring containment) like claim_gate does
+        matched_seg = None
+        for seg in input.gated_segments:
+            norm_seg = normalize_text(seg.text)
+            # Sentence maps to segment if either contains the other (fuzzy match)
+            if norm_sentence in norm_seg or norm_seg in norm_sentence:
+                matched_seg = seg
+                break
+        
+        if matched_seg:
             # Keep the segment's verdict
             results.append(SentenceGateResult(
                 sentence=sentence,
