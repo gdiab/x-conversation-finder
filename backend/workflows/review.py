@@ -3,15 +3,17 @@ Review workflow - one per post.
 
 Per ADR-0002:
 - Signals: approve, skip
-- Updates: edit, nudge
+- Updates: edit, nudge, confirm_posted
 - Query: get_card
 - 48h expiry timeout
+- Follow-up timer after confirmation
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, List
 import asyncio
+import re
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -28,11 +30,16 @@ with workflow.unsafe.imports_passed_through():
         draft_reply,
         store_card,
         update_card,
+        lookup_post,
+        check_followup,
         ResearchPostInput,
         DraftReplyInput,
         StoreCardInput,
         UpdateCardInput,
+        LookupPostInput,
+        CheckFollowupInput,
     )
+    from backend.config import get_settings
 
 
 @dataclass
@@ -58,15 +65,19 @@ class ReviewWorkflow:
     2. Draft a reply
     3. Run claim gate
     4. Wait for human (approve/skip/edit/nudge)
-    5. Expire after 48h
+    5. If approved, wait for confirm_posted with reply URL
+    6. Start follow-up timer (3 days)
+    7. Check for replies and resurface
     """
     
     def __init__(self):
         self.evidence: Optional[Evidence] = None
         self.status = ReviewStatus.PENDING
         self.approved = False
+        self.confirmed = False
         self.skipped = False
         self.posted_url: Optional[str] = None
+        self.reply_post_id: Optional[str] = None
         self.skip_reason: Optional[str] = None
         self.client_request_id: Optional[str] = None
     
@@ -75,10 +86,12 @@ class ReviewWorkflow:
         """Run the review workflow."""
         workflow.logger.info(f"Starting review for post {input.post.id}")
         
+        settings = get_settings()
         workflow_id = workflow.info().workflow_id
         created_at = workflow.now().isoformat()
         
         try:
+            # Step 1: Research
             evidence = await workflow.execute_activity(
                 research_post,
                 ResearchPostInput(
@@ -93,6 +106,7 @@ class ReviewWorkflow:
             
             workflow.logger.info(f"Research complete: confidence={evidence.confidence_score:.2f}")
             
+            # Skip if low confidence
             if evidence.confidence_score < input.confidence_threshold:
                 self.status = ReviewStatus.SKIPPED
                 self.skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
@@ -116,6 +130,7 @@ class ReviewWorkflow:
                 
                 return "skipped"
             
+            # Step 2: Draft
             evidence = await workflow.execute_activity(
                 draft_reply,
                 DraftReplyInput(
@@ -126,6 +141,7 @@ class ReviewWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             
+            # Skip if claim gate failed
             if not evidence.draft or not evidence.draft.claim_gate.passed:
                 self.status = ReviewStatus.SKIPPED
                 self.skip_reason = "Claim gate failed"
@@ -151,6 +167,7 @@ class ReviewWorkflow:
             
             self.evidence = evidence
             
+            # Store pending card
             card = ReviewCard(
                 workflow_id=workflow_id,
                 post=input.post,
@@ -166,6 +183,7 @@ class ReviewWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
             
+            # Step 3: Wait for human decision (48h timeout)
             workflow.logger.info("Waiting for human decision (48h timeout)")
             
             try:
@@ -189,25 +207,8 @@ class ReviewWorkflow:
                 
                 return "expired"
             
-            if self.approved:
-                self.status = ReviewStatus.APPROVED
-                workflow.logger.info(f"Approved by founder, posted_url={self.posted_url}")
-                
-                await workflow.execute_activity(
-                    update_card,
-                    UpdateCardInput(
-                        workflow_id=workflow_id,
-                        updates={
-                            "status": ReviewStatus.APPROVED.value,
-                            "posted_url": self.posted_url,
-                        },
-                        idempotency_key=f"{workflow_id}:update:approve",
-                    ),
-                    start_to_close_timeout=timedelta(seconds=10),
-                )
-                
-                return "approved"
-            else:
+            # Handle skip
+            if self.skipped:
                 workflow.logger.info(f"Skipped by founder: {self.skip_reason}")
                 
                 await workflow.execute_activity(
@@ -224,6 +225,93 @@ class ReviewWorkflow:
                 )
                 
                 return "skipped"
+            
+            # Handle approve - wait for confirmation
+            workflow.logger.info(f"Approved by founder, posted_url={self.posted_url}")
+            
+            # Update to approved status
+            await workflow.execute_activity(
+                update_card,
+                UpdateCardInput(
+                    workflow_id=workflow_id,
+                    updates={
+                        "status": ReviewStatus.APPROVED.value,
+                        "posted_url": self.posted_url,
+                    },
+                    idempotency_key=f"{workflow_id}:update:approve",
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            # Step 4: Wait for confirm_posted (48h timeout from approve)
+            workflow.logger.info("Waiting for reply URL confirmation (48h timeout)")
+            
+            try:
+                await workflow.wait_condition(
+                    lambda: self.confirmed,
+                    timeout=timedelta(hours=48),
+                )
+            except asyncio.TimeoutError:
+                self.status = ReviewStatus.APPROVED_NOT_CONFIRMED
+                workflow.logger.info("Approved but not confirmed after 48h")
+                
+                await workflow.execute_activity(
+                    update_card,
+                    UpdateCardInput(
+                        workflow_id=workflow_id,
+                        updates={"status": ReviewStatus.APPROVED_NOT_CONFIRMED.value},
+                        idempotency_key=f"{workflow_id}:update:not_confirmed",
+                    ),
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+                
+                return "approved_not_confirmed"
+            
+            # Step 5: Start follow-up timer
+            workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {settings.followup_delay_days}d follow-up timer")
+            
+            await workflow.sleep(timedelta(days=settings.followup_delay_days))
+            
+            # Step 6: Check for follow-up replies
+            workflow.logger.info("Follow-up timer fired, checking for replies")
+            
+            followup_posts = await workflow.execute_activity(
+                check_followup,
+                CheckFollowupInput(
+                    reply_post_id=self.reply_post_id,
+                    idempotency_key=f"{workflow_id}:followup",
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            
+            workflow.logger.info(f"Found {len(followup_posts)} follow-up replies")
+            
+            # Update card with followup_due status and replies
+            followup_replies = [
+                {
+                    "id": p.id,
+                    "text": p.text,
+                    "author": p.author.username,
+                    "url": p.url,
+                }
+                for p in followup_posts
+            ]
+            
+            await workflow.execute_activity(
+                update_card,
+                UpdateCardInput(
+                    workflow_id=workflow_id,
+                    updates={
+                        "status": ReviewStatus.FOLLOWUP_DUE.value,
+                        "followup_replies": followup_replies,
+                    },
+                    idempotency_key=f"{workflow_id}:update:followup_due",
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            return "followup_due"
         
         except Exception as e:
             workflow.logger.error(f"Review failed: {e}")
@@ -231,7 +319,12 @@ class ReviewWorkflow:
     
     @workflow.signal
     def approve(self, posted_url: str, client_request_id: str):
-        """Approve signal - founder will post this."""
+        """
+        Approve signal - founder will post this.
+        
+        Per ADR-0004: approve just yields the copy text.
+        The founder posts manually and then calls confirm_posted.
+        """
         if self.client_request_id == client_request_id:
             workflow.logger.info(f"Duplicate approve signal: {client_request_id}")
             return
@@ -252,6 +345,64 @@ class ReviewWorkflow:
         self.skipped = True
         self.skip_reason = reason
         self.client_request_id = client_request_id
+    
+    @workflow.update
+    async def confirm_posted(self, reply_url: str, client_request_id: str) -> str:
+        """
+        Confirm posted Update - verify the reply was actually posted.
+        
+        Parses reply post ID from URL, verifies it's a reply to our target post.
+        Returns success message or raises error if invalid.
+        """
+        workflow.logger.info(f"Received confirm_posted: {reply_url}")
+        
+        # Parse reply post ID from URL
+        # Expected format: https://x.com/username/status/1234567890
+        match = re.search(r'/status/(\d+)', reply_url)
+        if not match:
+            raise ValueError(f"Invalid X post URL: {reply_url}")
+        
+        reply_post_id = match.group(1)
+        
+        # Lookup the reply post
+        reply_post = await workflow.execute_activity(
+            lookup_post,
+            LookupPostInput(
+                post_id=reply_post_id,
+                idempotency_key=f"{workflow.info().workflow_id}:confirm:{reply_post_id}",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        
+        if not reply_post:
+            raise ValueError(f"Reply post {reply_post_id} not found")
+        
+        # Verify it's a reply to our target post
+        if reply_post.in_reply_to_user_id is None:
+            # For fake client, check conversation_id matches
+            if reply_post.conversation_id != self.evidence.post_id:
+                raise ValueError(
+                    f"Post {reply_post_id} is not a reply to target post {self.evidence.post_id}"
+                )
+        
+        workflow.logger.info(f"Confirmed reply {reply_post_id} is valid")
+        
+        self.confirmed = True
+        self.reply_post_id = reply_post_id
+        
+        # Update card with reply_post_id
+        await workflow.execute_activity(
+            update_card,
+            UpdateCardInput(
+                workflow_id=workflow.info().workflow_id,
+                updates={"reply_post_id": reply_post_id},
+                idempotency_key=f"{workflow.info().workflow_id}:update:reply_id:{client_request_id}",
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        
+        return f"Confirmed reply {reply_post_id}"
     
     @workflow.update
     async def edit(self, new_text: str, client_request_id: str) -> str:

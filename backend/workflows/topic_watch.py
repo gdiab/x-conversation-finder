@@ -80,10 +80,13 @@ class TopicWatchWorkflow:
             
             workflow.logger.info(f"Iteration {iteration}: sleeping {input.poll_interval_hours}h")
             
-            await workflow.wait_condition(
-                lambda: self.stop_requested,
-                timeout=timedelta(hours=input.poll_interval_hours),
-            )
+            try:
+                await workflow.wait_condition(
+                    lambda: self.stop_requested,
+                    timeout=timedelta(hours=input.poll_interval_hours),
+                )
+            except asyncio.TimeoutError:
+                pass
             
             if self.stop_requested:
                 workflow.logger.info("Stop requested during sleep, ending watch")

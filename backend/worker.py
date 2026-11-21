@@ -14,6 +14,7 @@ from backend.workflows import ReviewWorkflow, TopicWatchWorkflow
 from backend.activities import (
     search_recent,
     lookup_post,
+    check_followup,
     research_post,
     draft_reply,
     store_card,
@@ -45,6 +46,7 @@ async def main():
         activities=[
             search_recent,
             lookup_post,
+            check_followup,
             research_post,
             draft_reply,
             store_card,

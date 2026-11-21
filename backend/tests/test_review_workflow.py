@@ -18,6 +18,8 @@ from backend.activities import (
     draft_reply,
     store_card,
     update_card,
+    lookup_post,
+    check_followup,
 )
 
 
@@ -29,7 +31,7 @@ async def test_review_workflow_approve(sample_post, product_brief):
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card],
+            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
         ):
             workflow_id = f"review:test:{sample_post.id}"
             
@@ -48,19 +50,32 @@ async def test_review_workflow_approve(sample_post, product_brief):
             
             await env.sleep(1)
             
-            card = await handle.query(ReviewWorkflow.get_card)
+            card = await handle.query("get_card")
             assert card["status"] == "pending"
             assert card["evidence"]["post_id"] == sample_post.id
             
+            # Approve
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                "https://x.com/test/status/999",
-                client_request_id,
+                args=["https://x.com/test/status/999", client_request_id]
             )
             
+            await env.sleep(1)
+            
+            # Confirm posted with reply URL
+            client_request_id = str(uuid.uuid4())
+            reply_msg = await handle.execute_update(
+                "confirm_posted",
+                args=["https://x.com/test/status/1001", client_request_id]
+            )
+            assert "Confirmed" in reply_msg
+            
+            # Skip ahead 3 days for follow-up
+            await env.sleep(timedelta(days=3, hours=1))
+            
             result = await handle.result()
-            assert result == "approved"
+            assert result == "followup_due"
 
 
 @pytest.mark.asyncio
@@ -71,7 +86,7 @@ async def test_review_workflow_skip(sample_post, product_brief):
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card],
+            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
         ):
             workflow_id = f"review:test:{sample_post.id}_skip"
             
@@ -93,8 +108,7 @@ async def test_review_workflow_skip(sample_post, product_brief):
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "skip",
-                "Not relevant",
-                client_request_id,
+                args=["Not relevant", client_request_id]
             )
             
             result = await handle.result()
@@ -109,7 +123,7 @@ async def test_review_workflow_nudge(sample_post, product_brief):
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card],
+            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
         ):
             workflow_id = f"review:test:{sample_post.id}_nudge"
             
@@ -131,21 +145,32 @@ async def test_review_workflow_nudge(sample_post, product_brief):
             client_request_id = str(uuid.uuid4())
             new_draft = await handle.execute_update(
                 "nudge",
-                "Make it shorter",
-                client_request_id,
+                args=["Make it shorter", client_request_id]
             )
             
             assert len(new_draft) > 0
             
+            # Approve
             client_request_id = str(uuid.uuid4())
             await handle.signal(
                 "approve",
-                "https://x.com/test/status/999",
-                client_request_id,
+                args=["https://x.com/test/status/999", client_request_id]
             )
             
+            await env.sleep(1)
+            
+            # Confirm posted
+            client_request_id = str(uuid.uuid4())
+            await handle.execute_update(
+                "confirm_posted",
+                args=["https://x.com/test/status/1001", client_request_id]
+            )
+            
+            # Skip ahead for follow-up
+            await env.sleep(timedelta(days=3, hours=1))
+            
             result = await handle.result()
-            assert result == "approved"
+            assert result == "followup_due"
 
 
 @pytest.mark.asyncio
@@ -156,7 +181,7 @@ async def test_review_workflow_timeout(sample_post, product_brief):
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card],
+            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
         ):
             workflow_id = f"review:test:{sample_post.id}_timeout"
             
@@ -187,7 +212,7 @@ async def test_review_workflow_low_confidence(sample_post, product_brief):
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card],
+            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
         ):
             workflow_id = f"review:test:{sample_post.id}_low_conf"
             
@@ -206,3 +231,92 @@ async def test_review_workflow_low_confidence(sample_post, product_brief):
             
             result = await handle.result()
             assert result == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_review_workflow_approved_not_confirmed(sample_post, product_brief):
+    """Test Review workflow expires to approved_not_confirmed if no confirmation."""
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+        ):
+            workflow_id = f"review:test:{sample_post.id}_not_confirmed"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                ReviewInput(
+                    post=sample_post,
+                    topic="reliability",
+                    product_brief=product_brief,
+                    account="test",
+                    confidence_threshold=0.5,
+                ),
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Approve but don't confirm
+            client_request_id = str(uuid.uuid4())
+            await handle.signal(
+                "approve",
+                args=["https://x.com/test/status/999", client_request_id]
+            )
+            
+            # Skip ahead 48h without confirming
+            await env.sleep(timedelta(hours=49))
+            
+            result = await handle.result()
+            assert result == "approved_not_confirmed"
+
+
+@pytest.mark.asyncio
+async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_brief):
+    """Test confirm_posted rejects invalid URL."""
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+        ):
+            workflow_id = f"review:test:{sample_post.id}_invalid_url"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                ReviewInput(
+                    post=sample_post,
+                    topic="reliability",
+                    product_brief=product_brief,
+                    account="test",
+                    confidence_threshold=0.5,
+                ),
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Approve
+            client_request_id = str(uuid.uuid4())
+            await handle.signal(
+                "approve",
+                args=["https://x.com/test/status/999", client_request_id]
+            )
+            
+            await env.sleep(1)
+            
+            # Try to confirm with invalid URL
+            client_request_id = str(uuid.uuid4())
+            try:
+                await handle.execute_update(
+                    "confirm_posted",
+                    args=["https://invalid-url.com/foo", client_request_id]
+                )
+                assert False, "Should have raised ValueError"
+            except Exception as e:
+                assert "Invalid X post URL" in str(e)

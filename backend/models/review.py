@@ -14,9 +14,10 @@ class ReviewStatus(str, Enum):
     
     PENDING = "pending"
     APPROVED = "approved"
+    APPROVED_NOT_CONFIRMED = "approved_not_confirmed"
     SKIPPED = "skipped"
     EXPIRED = "expired"
-    EDITED = "edited"
+    FOLLOWUP_DUE = "followup_due"
 
 
 @dataclass
@@ -31,8 +32,10 @@ class ReviewCard:
     updated_at: str
     approved_by: Optional[str] = None
     posted_url: Optional[str] = None
+    reply_post_id: Optional[str] = None
     skip_reason: Optional[str] = None
     client_request_id: Optional[str] = None
+    followup_replies: Optional[list] = None
     
     def to_dict(self):
         """Convert to dict for serialization."""
@@ -82,5 +85,7 @@ class ReviewCard:
             "updated_at": self.updated_at,
             "approved_by": self.approved_by,
             "posted_url": self.posted_url,
+            "reply_post_id": self.reply_post_id,
             "skip_reason": self.skip_reason,
+            "followup_replies": self.followup_replies,
         }

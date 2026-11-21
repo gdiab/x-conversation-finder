@@ -149,8 +149,7 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         handle = temporal_client.get_workflow_handle(workflow_id)
         await handle.signal(
             "approve",
-            request.posted_url,
-            request.client_request_id,
+            args=[request.posted_url, request.client_request_id]
         )
         
         return {"message": "Approved"}
@@ -169,8 +168,7 @@ async def skip_review(workflow_id: str, request: SkipRequest):
         handle = temporal_client.get_workflow_handle(workflow_id)
         await handle.signal(
             "skip",
-            request.reason,
-            request.client_request_id,
+            args=[request.reason, request.client_request_id]
         )
         
         return {"message": "Skipped"}
@@ -189,8 +187,7 @@ async def edit_review(workflow_id: str, request: EditRequest):
         handle = temporal_client.get_workflow_handle(workflow_id)
         result = await handle.execute_update(
             "edit",
-            request.new_text,
-            request.client_request_id,
+            args=[request.new_text, request.client_request_id]
         )
         
         return {"message": "Edited", "new_text": result}
@@ -209,8 +206,7 @@ async def nudge_review(workflow_id: str, request: NudgeRequest):
         handle = temporal_client.get_workflow_handle(workflow_id)
         result = await handle.execute_update(
             "nudge",
-            request.instruction,
-            request.client_request_id,
+            args=[request.instruction, request.client_request_id]
         )
         
         return {"message": "Nudged", "new_draft": result}

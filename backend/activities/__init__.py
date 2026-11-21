@@ -3,9 +3,11 @@
 from .x_activities import (
     search_recent,
     lookup_post,
+    check_followup,
     SearchRecentInput,
     SearchRecentOutput,
     LookupPostInput,
+    CheckFollowupInput,
 )
 from .reply_activities import (
     research_post,
@@ -25,9 +27,11 @@ from .store_activities import (
 __all__ = [
     "search_recent",
     "lookup_post",
+    "check_followup",
     "SearchRecentInput",
     "SearchRecentOutput",
     "LookupPostInput",
+    "CheckFollowupInput",
     "research_post",
     "draft_reply",
     "ResearchPostInput",

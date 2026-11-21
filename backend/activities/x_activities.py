@@ -87,3 +87,37 @@ async def lookup_post(input: LookupPostInput) -> Optional[Post]:
         activity.logger.info(f"Post {input.post_id} not found (deleted or 404)")
     
     return post
+
+
+@dataclass
+class CheckFollowupInput:
+    """Input for check_followup activity."""
+    
+    reply_post_id: str
+    idempotency_key: str
+
+
+@activity.defn(name="check_followup")
+async def check_followup(input: CheckFollowupInput) -> List[Post]:
+    """
+    Check for replies to a posted reply.
+    
+    Searches conversation_id:<reply_post_id> to find replies.
+    Returns list of reply posts.
+    """
+    activity.logger.info(
+        f"Checking followup for reply {input.reply_post_id} (key: {input.idempotency_key})"
+    )
+    
+    client = FakeXClient()
+    
+    # Search for posts in the conversation thread
+    query = f"conversation_id:{input.reply_post_id}"
+    posts, _ = await client.search_recent(
+        query=query,
+        max_results=10,
+    )
+    
+    activity.logger.info(f"Found {len(posts)} replies in conversation")
+    
+    return posts

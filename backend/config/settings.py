@@ -39,13 +39,25 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./x_conversation_finder.db"
     
-    # Topic watch settings
+    # Topic watch settings (ADR-0005: X access polling)
+    # Set 2026-11-21: 3h poll interval matches ADR-0005
     watch_poll_interval_hours: int = 3
     watch_max_results: int = 10
     
+    # Daily read cap (ADR-0005: target ~300 posts/day across topics)
+    # Set 2026-11-21: Cost is $0.005/post, so 300 posts = $1.50/day
+    daily_post_read_cap: int = 300
+    
     # Review settings
     review_timeout_hours: int = 48
+    
+    # Confidence threshold (ADR-0006: computed confidence)
+    # Set 2026-11-21: Threshold 0.6 with guessed weights, revisit after first 50 real cards
     confidence_threshold: float = 0.6
+    
+    # Follow-up settings (ADR-0002: follow-up timer)
+    # Set 2026-11-21: 3 days after confirmation
+    followup_delay_days: int = 3
     
     class Config:
         env_file = ".env"
