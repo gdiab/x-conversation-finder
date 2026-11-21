@@ -23,11 +23,7 @@ with workflow.unsafe.imports_passed_through():
         ReviewCard,
         ReviewStatus,
         Post,
-        Author,
         Evidence,
-        FounderMaterial,
-        Draft,
-        ClaimGateResult,
     )
     from backend.activities import (
         ResearchPostInput,
@@ -37,84 +33,10 @@ with workflow.unsafe.imports_passed_through():
         LookupPostInput,
         CheckFollowupInput,
     )
-    from backend.activities.claim_gate_activity import ClaimGateInput
+    from backend.activities.claim_gate_activity import ClaimGateInput, claim_gate
+    from backend.activities.store_activities import store_card, update_card
+    from backend.activities import x_activity_funcs, reply_activity_funcs
     from backend.config import get_settings
-    
-    def dict_to_claim_gate_result(data: dict) -> ClaimGateResult:
-        """Convert dict to ClaimGateResult dataclass."""
-        return ClaimGateResult(
-            passed=data["passed"],
-            claims_checked=data["claims_checked"],
-            unsupported_claims=data["unsupported_claims"],
-            supported_claims=data["supported_claims"],
-            reasoning=data["reasoning"],
-        )
-    
-    def dict_to_post(data: dict) -> Post:
-        """Convert dict to Post dataclass."""
-        author = Author(
-            id=data["author"]["id"],
-            username=data["author"]["username"],
-            name=data["author"]["name"],
-            followers_count=data["author"]["followers_count"],
-            verified=data["author"]["verified"],
-        )
-        return Post(
-            id=data["id"],
-            text=data["text"],
-            author=author,
-            created_at=data["created_at"],
-            like_count=data["like_count"],
-            reply_count=data["reply_count"],
-            repost_count=data["repost_count"],
-            quote_count=data["quote_count"],
-            conversation_id=data["conversation_id"],
-            in_reply_to_user_id=data.get("in_reply_to_user_id"),
-            reply_settings=data["reply_settings"],
-            url=data["url"],
-        )
-    
-    def dict_to_evidence(data: dict) -> Evidence:
-        """Convert dict to Evidence dataclass."""
-        # Convert founder materials
-        materials = [
-            FounderMaterial(
-                source=m["source"],
-                passage=m["passage"],
-                relevance=m["relevance"],
-            )
-            for m in data.get("founder_materials", [])
-        ]
-        
-        # Convert draft if present
-        draft = None
-        if data.get("draft"):
-            d = data["draft"]
-            claim_gate = ClaimGateResult(
-                passed=d["claim_gate"]["passed"],
-                claims_checked=d["claim_gate"]["claims_checked"],
-                unsupported_claims=d["claim_gate"]["unsupported_claims"],
-                supported_claims=d["claim_gate"]["supported_claims"],
-                reasoning=d["claim_gate"]["reasoning"],
-            )
-            draft = Draft(
-                text=d["text"],
-                claim_gate=claim_gate,
-                steers_applied=d.get("steers_applied", []),
-                token_count=d.get("token_count", 0),
-                model_used=d.get("model_used", ""),
-            )
-        
-        return Evidence(
-            post_id=data["post_id"],
-            matched_topic=data["matched_topic"],
-            why_it_fits=data["why_it_fits"],
-            confidence_score=data["confidence_score"],
-            confidence_inputs=data["confidence_inputs"],
-            founder_materials=materials,
-            draft=draft,
-            skip_reason=data.get("skip_reason"),
-        )
 
 
 @dataclass
@@ -182,8 +104,8 @@ class ReviewWorkflow:
         
         try:
             # Step 1: Research
-            evidence_dict = await workflow.execute_activity(
-                "research_post",
+            evidence = await workflow.execute_activity(
+                reply_activity_funcs.research_post,
                 ResearchPostInput(
                     post=input.post,
                     topic=input.topic,
@@ -193,7 +115,6 @@ class ReviewWorkflow:
                 start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
                 retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
             )
-            evidence = dict_to_evidence(evidence_dict)
             
             workflow.logger.info(f"Research complete: confidence={evidence.confidence_score:.2f}")
             
@@ -207,9 +128,9 @@ class ReviewWorkflow:
                 card = self._build_card(workflow_id, input.post, created_at)
                 
                 await workflow.execute_activity(
-                    "store_card",
+                    store_card,
                     StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:skip"),
-                    start_to_close_timeout=timedelta(seconds=10),
+                    start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
                 )
                 
                 return "skipped"
@@ -223,8 +144,8 @@ class ReviewWorkflow:
                 
                 # Draft reply
                 steer = "Try again with only supported claims" if claim_gate_attempts > 1 else None
-                evidence_dict = await workflow.execute_activity(
-                    "draft_reply",
+                evidence = await workflow.execute_activity(
+                    reply_activity_funcs.draft_reply,
                     DraftReplyInput(
                         evidence=evidence,
                         steer=steer,
@@ -233,12 +154,11 @@ class ReviewWorkflow:
                     start_to_close_timeout=timedelta(seconds=settings.activity_timeout_long_sec),
                     retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
                 )
-                evidence = dict_to_evidence(evidence_dict)
                 
                 # Run deterministic claim gate
                 if evidence.draft:
-                    claim_gate_result_dict = await workflow.execute_activity(
-                        "claim_gate",
+                    claim_gate_result = await workflow.execute_activity(
+                        claim_gate,
                         ClaimGateInput(
                             draft_text=evidence.draft.text,
                             founder_materials=evidence.founder_materials,
@@ -246,7 +166,6 @@ class ReviewWorkflow:
                         ),
                         start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
                     )
-                    claim_gate_result = dict_to_claim_gate_result(claim_gate_result_dict)
                     
                     # Update evidence with gate result
                     evidence.draft.claim_gate = claim_gate_result
@@ -273,9 +192,9 @@ class ReviewWorkflow:
                 card = self._build_card(workflow_id, input.post, created_at)
                 
                 await workflow.execute_activity(
-                    "store_card",
+                    store_card,
                     StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:gate_fail"),
-                    start_to_close_timeout=timedelta(seconds=10),
+                    start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
                 )
                 
                 return "skipped"
@@ -287,9 +206,9 @@ class ReviewWorkflow:
             card = self._build_card(workflow_id, input.post, created_at)
             
             await workflow.execute_activity(
-                "store_card",
+                store_card,
                 StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:pending"),
-                start_to_close_timeout=timedelta(seconds=10),
+                start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
             )
             
             # Step 3: Wait for human decision and signal completion
@@ -306,7 +225,7 @@ class ReviewWorkflow:
                 workflow.logger.info(f"Review expired after {timeout_hours}h")
                 
                 await workflow.execute_activity(
-                    "update_card",
+                    update_card,
                     UpdateCardInput(
                         workflow_id=workflow_id,
                         updates={"status": ReviewStatus.EXPIRED.value},
@@ -322,7 +241,7 @@ class ReviewWorkflow:
                 workflow.logger.info(f"Skipped by founder")
                 
                 await workflow.execute_activity(
-                    "update_card",
+                    update_card,
                     UpdateCardInput(
                         workflow_id=workflow_id,
                         updates={
@@ -341,7 +260,7 @@ class ReviewWorkflow:
             
             # Update to approved status
             await workflow.execute_activity(
-                "update_card",
+                update_card,
                 UpdateCardInput(
                     workflow_id=workflow_id,
                     updates={
@@ -366,7 +285,7 @@ class ReviewWorkflow:
                 workflow.logger.info(f"Approved but not confirmed after {timeout_hours}h")
                 
                 await workflow.execute_activity(
-                    "update_card",
+                    update_card,
                     UpdateCardInput(
                         workflow_id=workflow_id,
                         updates={"status": ReviewStatus.APPROVED_NOT_CONFIRMED.value},
@@ -386,8 +305,8 @@ class ReviewWorkflow:
             # Step 6: Check for follow-up replies (capped)
             workflow.logger.info("Follow-up timer fired, checking for replies")
             
-            followup_posts_dicts = await workflow.execute_activity(
-                "check_followup",
+            followup_posts = await workflow.execute_activity(
+                x_activity_funcs.check_followup,
                 CheckFollowupInput(
                     reply_post_id=self.reply_post_id,
                     idempotency_key=f"{workflow_id}:followup",
@@ -395,8 +314,6 @@ class ReviewWorkflow:
                 start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
                 retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
             )
-            
-            followup_posts = [dict_to_post(p) for p in followup_posts_dicts]
             
             workflow.logger.info(f"Found {len(followup_posts)} follow-up replies")
             
@@ -412,7 +329,7 @@ class ReviewWorkflow:
             ]
             
             await workflow.execute_activity(
-                "update_card",
+                update_card,
                 UpdateCardInput(
                     workflow_id=workflow_id,
                     updates={
@@ -498,8 +415,8 @@ class ReviewWorkflow:
         
         # Lookup the reply post to verify it exists
         settings = get_settings()
-        reply_post_dict = await workflow.execute_activity(
-            "lookup_post",
+        reply_post = await workflow.execute_activity(
+            x_activity_funcs.lookup_post,
             LookupPostInput(
                 post_id=reply_post_id,
                 idempotency_key=f"{workflow.info().workflow_id}:confirm:{reply_post_id}",
@@ -507,7 +424,6 @@ class ReviewWorkflow:
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
             retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
         )
-        reply_post = dict_to_post(reply_post_dict) if reply_post_dict else None
         
         if not reply_post:
             raise ValueError(f"Reply post {reply_post_id} not found")
@@ -528,7 +444,7 @@ class ReviewWorkflow:
         
         # Update card with reply_post_id
         await workflow.execute_activity(
-            "update_card",
+            update_card,
             UpdateCardInput(
                 workflow_id=workflow.info().workflow_id,
                 updates={"reply_post_id": reply_post_id},
@@ -563,7 +479,7 @@ class ReviewWorkflow:
         workflow_id = workflow.info().workflow_id
         
         await workflow.execute_activity(
-            "update_card",
+            update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
                 updates={"evidence": self.evidence},
@@ -593,8 +509,8 @@ class ReviewWorkflow:
         self._processed_requests.add(client_request_id)
         
         settings = get_settings()
-        evidence_dict = await workflow.execute_activity(
-            "draft_reply",
+        self.evidence = await workflow.execute_activity(
+            reply_activity_funcs.draft_reply,
             DraftReplyInput(
                 evidence=self.evidence,
                 steer=instruction,
@@ -603,18 +519,17 @@ class ReviewWorkflow:
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
         )
-        self.evidence = dict_to_evidence(evidence_dict)
         
         workflow_id = workflow.info().workflow_id
         
         await workflow.execute_activity(
-            "update_card",
+            update_card,
             UpdateCardInput(
                 workflow_id=workflow_id,
                 updates={"evidence": self.evidence},
                 idempotency_key=f"{workflow_id}:update:nudge:{client_request_id}",
             ),
-            start_to_close_timeout=timedelta(seconds=10),
+            start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
         )
         
         return self.evidence.draft.text if self.evidence.draft else ""
