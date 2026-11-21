@@ -10,9 +10,11 @@ Provides endpoints for:
 import logging
 from typing import List, Optional
 from datetime import datetime
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from temporalio.client import Client
 
@@ -25,35 +27,57 @@ from backend.database import init_db
 from backend.budget import get_today_budget
 
 
-app = FastAPI(title="X Conversation Finder API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 logger = logging.getLogger(__name__)
 temporal_client: Optional[Client] = None
 
 
-@app.on_event("startup")
-async def startup():
-    """Connect to Temporal and initialize database on startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown."""
     global temporal_client
     settings = get_settings()
     
-    # Initialize database
+    # Startup: Initialize database
     init_db()
     logger.info("Database initialized")
     
+    # Startup: Connect to Temporal
     logger.info(f"Connecting to Temporal at {settings.temporal_host}")
-    
     temporal_client = await Client.connect(
         settings.temporal_host,
         namespace=settings.temporal_namespace,
+    )
+    logger.info("Connected to Temporal")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down")
+
+
+app = FastAPI(
+    title="X Conversation Finder API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS middleware (dev only - restrict in production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Vite dev server
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Catch unhandled exceptions and return 500."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error"},
     )
 
 
