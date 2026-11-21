@@ -141,6 +141,7 @@ class XActivities:
         """
         Check for replies to a posted reply.
         
+        Per S-2: Reserves budget for X API reads.
         Searches conversation_id:<reply_post_id> to find replies.
         Returns list of reply posts.
         """
@@ -148,14 +149,28 @@ class XActivities:
             f"Checking followup for reply {input.reply_post_id} (key: {input.idempotency_key})"
         )
         
+        settings = get_settings()
+        max_results = 10
+        
+        # Reserve budget atomically (S-2: check_followup must reserve)
+        try:
+            cost_usd = reserve_x_budget(max_results, settings.x_post_read_cost)
+        except BudgetExceeded as e:
+            activity.logger.error(f"Budget exceeded: {e}")
+            raise
+        
         # Search for posts in the conversation thread
         query = f"conversation_id:{input.reply_post_id}"
         posts, _ = await self._x_client.search_recent(
             query=query,
-            max_results=10,
+            max_results=max_results,
         )
         
-        activity.logger.info(f"Found {len(posts)} replies in conversation")
+        actual_reads = len(posts)
+        activity.logger.info(
+            f"Found {actual_reads} replies in conversation "
+            f"(reserved {max_results}, cost ${cost_usd:.4f})"
+        )
         
         return posts
     
