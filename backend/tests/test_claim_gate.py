@@ -49,6 +49,45 @@ async def test_split_sentences_handles_abbreviations():
 
 
 @pytest.mark.asyncio
+async def test_qa_r12_splitter_uppercase_after_abbreviation():
+    """
+    QA R12: Splitter splits when next word is capitalized after vs./e.g./i.e./etc.
+    
+    Abbreviation is non-boundary ONLY when next token is lowercase or digit.
+    When next word is uppercase, split there.
+    """
+    # Specified failing case: "vs. It" should split
+    text = "Retries are on the roadmap vs. It is shipped."
+    sentences = split_into_sentences(text)
+    assert len(sentences) == 2
+    assert "vs." in sentences[0]
+    assert sentences[1].startswith("It is shipped")
+    
+    # "e.g." followed by uppercase should split
+    text2 = "We support many formats e.g. JSON, XML. It scales well."
+    sentences2 = split_into_sentences(text2)
+    assert len(sentences2) == 2
+    
+    # "Acme Inc." at end of sentence should be one sentence
+    text3 = "The company is Acme Inc."
+    sentences3 = split_into_sentences(text3)
+    assert len(sentences3) == 1
+    
+    # "Inc." followed by uppercase should split (new sentence)
+    text4 = "Founded by Acme Inc. It raised $50M."
+    sentences4 = split_into_sentences(text4)
+    assert len(sentences4) == 2
+    assert "Inc." in sentences4[0]
+    assert sentences4[1].startswith("It raised")
+    
+    # Existing abbreviation tests should still pass
+    # "Ph.D." followed by lowercase continues
+    text5 = "John Smith, Ph.D. is a founder."
+    sentences5 = split_into_sentences(text5)
+    assert len(sentences5) == 1
+
+
+@pytest.mark.asyncio
 async def test_confusables_skeleton_cyrillic():
     """Confusables fold must detect Cyrillic bypasses."""
     # Cyrillic S (Ѕ) looks like ASCII S

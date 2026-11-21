@@ -35,71 +35,83 @@ def split_into_sentences(text: str) -> List[str]:
     """
     Split text into sentences.
     
+    QA R12: Rewritten with single-pass tokenizer. Abbreviation is a non-boundary
+    ONLY when next token starts lowercase or digit. When next word is capitalized
+    after vs./e.g./i.e./etc., split there.
+    
     Simple deterministic rule:
-    - Never split after a known abbreviation when the next character is lowercase, digit, or end of text
-    - When abbreviation is followed by space + uppercase, split only for sentence-final-capable
-      abbreviations (Inc., Ltd., Corp., etc., Ph.D., U.S.), not titles (Mr., Dr.) or mid-sentence
-      markers (e.g., i.e., vs.)
-    - Don't split on decimals (99.99%)
+    - Never split after a period between digits (decimals like 99.9)
+    - Split on [.!?]+ followed by whitespace
+    - UNLESS the period belongs to an abbreviation AND next token is lowercase/digit
+    
+    Over-splitting is safe (smaller quoted sentence is still verbatim).
+    Under-splitting is dangerous (merges referent into selectable).
     
     Returns non-empty sentences.
     """
-    # Sentence-final-capable abbreviations (can end a sentence)
-    final_abbrevs = ['Inc.', 'Ltd.', 'Co.', 'Corp.', 'etc.', 'Ph.D.', 'U.S.']
+    # Known abbreviations that might appear
+    abbrevs = ['Inc.', 'Ltd.', 'Co.', 'Corp.', 'etc.', 'Ph.D.', 'U.S.',
+               'e.g.', 'i.e.', 'vs.', 'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.',
+               'approx.', 'ca.']
     
-    # Mid-sentence abbreviations (never end sentences)
-    mid_abbrevs = ['e.g.', 'i.e.', 'vs.', 'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.', 'approx.', 'ca.']
-    
-    all_abbrevs = final_abbrevs + mid_abbrevs
-    
-    # Replace abbreviations with placeholders, tracking which type
-    replacements = {}
-    for i, abbrev in enumerate(all_abbrevs):
-        placeholder = f'__ABBR{i}__'
-        is_final = abbrev in final_abbrevs
-        pattern = r'\b' + re.escape(abbrev)
-        matches = list(re.finditer(pattern, text, re.IGNORECASE))
-        for match in reversed(matches):
-            actual_text = match.group(0)
-            # Check what follows
-            next_pos = match.end()
-            if next_pos < len(text):
-                next_char = text[next_pos] if next_pos < len(text) else ''
-                # If next is space + uppercase, mark for possible split
-                if next_char == ' ' and next_pos + 1 < len(text) and text[next_pos + 1].isupper():
-                    if is_final:
-                        # This abbreviation CAN end a sentence - use special marker
-                        text = text[:match.start()] + placeholder + '___SPLIT___' + text[match.end():]
-                    else:
-                        # Mid-sentence abbreviation - don't split
-                        text = text[:match.start()] + placeholder + text[match.end():]
-                else:
-                    # Next is lowercase/digit/end - never split
-                    text = text[:match.start()] + placeholder + text[match.end():]
-            else:
-                # End of text
-                text = text[:match.start()] + placeholder + text[match.end():]
-            
-            if placeholder not in replacements:
-                replacements[placeholder] = actual_text
-    
-    # Now split on:
-    # - ___SPLIT___ markers (abbreviations that can end sentences)
-    # - Regular punctuation + space (but not decimals)
-    # First handle split markers
-    text = text.replace('___SPLIT___', '.')
-    
-    # Split on sentence-ending punctuation followed by space
-    # Don't split if period is between digits (decimals)
-    sentences = re.split(r'(?<!\d)[.!?]+\s+', text)
-    
-    # Restore abbreviations
+    # Tokenize: find all sentence-ending punctuation followed by whitespace or end
+    # Also track abbreviations
     result = []
-    for sent in sentences:
-        if sent.strip():
-            for placeholder, abbrev in replacements.items():
-                sent = sent.replace(placeholder, abbrev)
-            result.append(sent.strip())
+    current = []
+    
+    # Build a regex that tokenizes text into words, punctuation, and spaces
+    tokens = re.findall(r'\S+|\s+', text)
+    
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        current.append(token)
+        
+        # Check if token ends with sentence-ending punctuation
+        if re.search(r'[.!?]+$', token):
+            # Check if it's a decimal (digit before period)
+            if re.match(r'.*\d+\.\d*$', token):
+                # It's a decimal, don't split
+                i += 1
+                continue
+            
+            # Check if it's an abbreviation
+            is_abbrev = any(token.endswith(abbr) for abbr in abbrevs)
+            
+            if is_abbrev:
+                # Look at next non-whitespace token
+                next_token = None
+                j = i + 1
+                while j < len(tokens):
+                    if tokens[j].strip():
+                        next_token = tokens[j]
+                        break
+                    j += 1
+                
+                if next_token:
+                    # If next token starts lowercase or digit, don't split
+                    if next_token[0].islower() or next_token[0].isdigit():
+                        i += 1
+                        continue
+                    # Otherwise, next token is uppercase -> split here
+            
+            # Check if next token is whitespace followed by content
+            if i + 1 < len(tokens) and tokens[i + 1].strip() == '':
+                # Next is whitespace, split here if there's content after
+                if i + 2 < len(tokens):
+                    # We have more content, commit this sentence
+                    sentence = ''.join(current).strip()
+                    if sentence:
+                        result.append(sentence)
+                    current = []
+        
+        i += 1
+    
+    # Add remaining
+    if current:
+        sentence = ''.join(current).strip()
+        if sentence:
+            result.append(sentence)
     
     return result
 
