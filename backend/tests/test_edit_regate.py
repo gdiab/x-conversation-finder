@@ -877,7 +877,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
                 ).first()
                 assert card_db is not None
                 
-                final_text = card_db.evidence["draft"]["text"]
+                final_text = card_db.evidence_data["draft"]["text"]
                 assert "FIRST" in final_text, f"Expected FIRST to win (finished last), got: {final_text}"
             finally:
                 db.close()
