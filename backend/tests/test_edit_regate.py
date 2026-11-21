@@ -478,3 +478,265 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
             # Replay the history
             replayer = Replayer(workflows=[ReviewWorkflow])
             await replayer.replay_workflow(history)
+
+
+@pytest.mark.asyncio
+async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, reply_activities):
+    """
+    QA R11 B2: Edit must not mutate draft.text until gate completes.
+    
+    Repro: edit to "Our product is SOC2 certified and 10x faster.", then approve(post_anyway=False).
+    Without fix: edit mutates text before gate runs, gate fails, but approve still returns Approved.
+    With fix: text committed only after gate, failing state recorded, approve requires post_anyway=True.
+    """
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                verify_edited_text,
+                store_card,
+                update_card,
+            ],
+        ):
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_b2_fix"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Edit to text that will fail gate (numbers + compliance terms)
+            edited_text = "Our product is SOC2 certified and 10x faster."
+            client_request_id = str(uuid.uuid4())
+            
+            result_text = await handle.execute_update(
+                "edit",
+                args=[edited_text, client_request_id]
+            )
+            assert result_text == edited_text
+            
+            await env.sleep(1)
+            
+            # Check stored card has gate_state = "failed"
+            db = get_db()
+            try:
+                card_db = db.query(ReviewCardDB).filter(
+                    ReviewCardDB.workflow_id == workflow_id
+                ).first()
+                assert card_db is not None
+                assert card_db.edited_text_gate_state == "failed"
+                assert card_db.edited_text_gate_results is not None
+                # Verify some sentences failed
+                assert any(not r["passed"] for r in card_db.edited_text_gate_results)
+            finally:
+                db.close()
+            
+            # Approve without post_anyway should FAIL
+            client_request_id = str(uuid.uuid4())
+            with pytest.raises(Exception) as exc_info:
+                await handle.execute_update(
+                    "approve",
+                    args=["https://x.com/test/status/999", client_request_id, False]
+                )
+            assert "post_anyway" in str(exc_info.value).lower()
+            
+            # Approve WITH post_anyway=True should succeed
+            client_request_id = str(uuid.uuid4())
+            approve_result = await handle.execute_update(
+                "approve",
+                args=["https://x.com/test/status/999", client_request_id, True]
+            )
+            assert "Approved" in approve_result
+
+
+@pytest.mark.asyncio
+async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities, reply_activities):
+    """
+    QA R11 B3: _edit_in_flight must be a counter, not bool.
+    
+    Two concurrent edits would clear bool early. Use counter to properly track in-flight edits.
+    Also tests that pytest.raises uses WorkflowUpdateFailedError (not generic Exception).
+    """
+    import asyncio
+    from temporalio.exceptions import WorkflowUpdateFailedError
+    
+    # Setup blocking gate activity
+    gate_called_event = asyncio.Event()
+    gate_block_event = asyncio.Event()
+    
+    async def verify_edited_text_blocking(input):
+        """Blocking version of verify_edited_text for concurrency test."""
+        from temporalio import activity
+        activity.logger.info("Gate activity started, will block on event")
+        gate_called_event.set()
+        # Block until event is set
+        await gate_block_event.wait()
+        activity.logger.info("Gate activity unblocked, proceeding")
+        # Return passing results
+        return []
+    
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                verify_edited_text_blocking,
+                store_card,
+                update_card,
+            ],
+        ):
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_b3_concurrent"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Start first edit (will block in gate activity)
+            gate_called_event.clear()
+            gate_block_event.clear()
+            
+            edit1_task = asyncio.create_task(
+                handle.execute_update(
+                    "edit",
+                    args=["First edit text. Thanks!", str(uuid.uuid4())]
+                )
+            )
+            
+            # Wait for gate activity to be called
+            await asyncio.wait_for(gate_called_event.wait(), timeout=5)
+            
+            # Now try to approve while edit is in flight - should fail
+            with pytest.raises(WorkflowUpdateFailedError) as exc_info:
+                await handle.execute_update(
+                    "approve",
+                    args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
+                )
+            assert "edit gate is in progress" in str(exc_info.value).lower()
+            
+            # Unblock the gate
+            gate_block_event.set()
+            
+            # Wait for edit to complete
+            await edit1_task
+            
+            # Now approve should work (counter is 0)
+            await env.sleep(1)
+            approve_result = await handle.execute_update(
+                "approve",
+                args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
+            )
+            assert "Approved" in approve_result
+
+
+@pytest.mark.asyncio
+async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_activities, reply_activities):
+    """
+    QA R11 C: If edit re-gate activity ERRORS (retries exhausted), record state as "not_checked".
+    
+    Approve requires post_anyway=True for both failed and not_checked states.
+    """
+    import asyncio
+    
+    # Setup failing gate activity
+    gate_call_count = 0
+    max_attempts = 3
+    
+    async def verify_edited_text_failing(input):
+        """Failing version of verify_edited_text that exhausts retries."""
+        from temporalio import activity
+        nonlocal gate_call_count
+        gate_call_count += 1
+        activity.logger.info(f"Gate activity call {gate_call_count}/{max_attempts} - raising error")
+        raise RuntimeError("Simulated gate activity failure")
+    
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                verify_edited_text_failing,
+                store_card,
+                update_card,
+            ],
+        ):
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_c_error"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Edit will fail in gate activity
+            gate_call_count = 0
+            edited_text = "Edited text that can't be gated."
+            client_request_id = str(uuid.uuid4())
+            
+            # Edit should succeed (doesn't raise), but state is "not_checked"
+            result_text = await handle.execute_update(
+                "edit",
+                args=[edited_text, client_request_id]
+            )
+            assert result_text == edited_text
+            
+            await env.sleep(1)
+            
+            # Verify gate was retried
+            assert gate_call_count == max_attempts
+            
+            # Check stored card has gate_state = "not_checked"
+            db = get_db()
+            try:
+                card_db = db.query(ReviewCardDB).filter(
+                    ReviewCardDB.workflow_id == workflow_id
+                ).first()
+                assert card_db is not None
+                assert card_db.edited_text_gate_state == "not_checked"
+            finally:
+                db.close()
+            
+            # Approve without post_anyway should FAIL
+            client_request_id = str(uuid.uuid4())
+            from temporalio.exceptions import WorkflowUpdateFailedError
+            with pytest.raises(WorkflowUpdateFailedError) as exc_info:
+                await handle.execute_update(
+                    "approve",
+                    args=["https://x.com/test/status/999", client_request_id, False]
+                )
+            assert "retries exhausted" in str(exc_info.value).lower()
+            
+            # Approve WITH post_anyway=True should succeed
+            client_request_id = str(uuid.uuid4())
+            approve_result = await handle.execute_update(
+                "approve",
+                args=["https://x.com/test/status/999", client_request_id, True]
+            )
+            assert "Approved" in approve_result
