@@ -36,24 +36,22 @@ class NonClaimPhrase:
 
 # Fixed phrase list - curated, short, generic phrases
 # Each entry has a stable readable ID
+# 22 phrases total: 5 openers, 4 thanks, 6 offers, 7 questions
 NON_CLAIM_PHRASES: List[NonClaimPhrase] = [
-    # Openers / greetings
-    NonClaimPhrase(id="opener.thanks", text="Thanks!", category="opener"),
-    NonClaimPhrase(id="opener.thank_you", text="Thank you!", category="opener"),
+    # Openers / greetings (5)
     NonClaimPhrase(id="opener.hi", text="Hi!", category="opener"),
     NonClaimPhrase(id="opener.hello", text="Hello!", category="opener"),
     NonClaimPhrase(id="opener.hey", text="Hey!", category="opener"),
+    NonClaimPhrase(id="opener.thanks", text="Thanks!", category="opener"),
+    NonClaimPhrase(id="opener.great_question", text="Great question.", category="opener"),
     
-    # Thanks / appreciation
+    # Thanks / appreciation (4)
     NonClaimPhrase(id="thanks.for_sharing", text="Thanks for sharing.", category="thanks"),
     NonClaimPhrase(id="thanks.for_asking", text="Thanks for asking.", category="thanks"),
     NonClaimPhrase(id="thanks.for_question", text="Thanks for the question.", category="thanks"),
-    NonClaimPhrase(id="thanks.great_question", text="Great question.", category="thanks"),
     NonClaimPhrase(id="thanks.interesting", text="Interesting question.", category="thanks"),
-    NonClaimPhrase(id="thanks.appreciate", text="I appreciate this.", category="thanks"),
-    NonClaimPhrase(id="thanks.love_thread", text="I love this thread.", category="thanks"),
     
-    # Offers to help/share
+    # Offers to help/share (6)
     NonClaimPhrase(id="offer.happy_to_help", text="Happy to help.", category="offer"),
     NonClaimPhrase(id="offer.happy_to_share", text="Happy to share more.", category="offer"),
     NonClaimPhrase(id="offer.share_details", text="Happy to share more details.", category="offer"),
@@ -61,7 +59,7 @@ NON_CLAIM_PHRASES: List[NonClaimPhrase] = [
     NonClaimPhrase(id="offer.love_to_hear", text="I'd love to hear more.", category="offer"),
     NonClaimPhrase(id="offer.feel_free", text="Feel free to reach out.", category="offer"),
     
-    # Questions to poster (generic, no product mentions)
+    # Questions to poster (generic, no product mentions) (7)
     NonClaimPhrase(id="q.current_tool", text="What are you using today?", category="question_to_poster"),
     NonClaimPhrase(id="q.stack", text="What stack are you on?", category="question_to_poster"),
     NonClaimPhrase(id="q.use_case", text="What's your use case?", category="question_to_poster"),

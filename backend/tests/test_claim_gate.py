@@ -198,27 +198,31 @@ async def test_claim_gate_rejects_unresolved_referent():
 
 @pytest.mark.asyncio
 async def test_is_closed_set_non_claim_questions():
-    """B5a: Pure questions (no product+claim_indicator) are non_claim."""
-    # Pure questions
+    """QA R13: v2.0.0 - Only exact phrase matches pass."""
+    # Exact phrase matches from the fixed list
     assert is_closed_set_non_claim("What stack are you on?")
-    # QA R12: "this" removed from allowlist, adjusted test
-    assert is_closed_set_non_claim("How do you approach the problem?")
+    assert is_closed_set_non_claim("What's your use case?")
+    assert is_closed_set_non_claim("Can you share more context?")
     
-    # B5a: Trailing ? doesn't make claim-bearing sentence a question non_claim
+    # NOT in the fixed phrase list - fails
+    assert not is_closed_set_non_claim("How do you approach the problem?")
     assert not is_closed_set_non_claim("Is ours 10x faster than Kafka?")
     assert not is_closed_set_non_claim("Does our product support SSO?")
 
 
 @pytest.mark.asyncio
 async def test_is_closed_set_non_claim_greetings_thanks():
-    """B5a: Greetings/thanks are non_claim, but only if remainder is non_claim."""
-    # Pure greetings/thanks
-    assert is_closed_set_non_claim("Thanks for sharing!")
-    assert is_closed_set_non_claim("Hi there!")
+    """QA R13: v2.0.0 - Only exact phrase matches pass."""
+    # Exact phrase matches from the fixed list
+    assert is_closed_set_non_claim("Thanks for sharing.")
+    assert is_closed_set_non_claim("Hi!")
     assert is_closed_set_non_claim("Happy to help.")
+    assert is_closed_set_non_claim("Thanks!")
     
-    # B5a: Greeting + claim remainder → NOT non_claim (whole sentence rule)
-    assert not is_closed_set_non_claim("Thanks! It's way cheaper.")
+    # NOT exact matches - fail (even if they contain phrases)
+    assert not is_closed_set_non_claim("Thanks for sharing!")  # Extra '!'
+    assert not is_closed_set_non_claim("Hi there!")  # "Hi there" not in list
+    assert not is_closed_set_non_claim("Thanks! It's way cheaper.")  # Multiple sentences
     assert not is_closed_set_non_claim("Hi! Ours is 10x quicker.")
     assert not is_closed_set_non_claim("Hello, many teams switched from Temporal to us.")
 
@@ -323,7 +327,7 @@ async def test_matches_backstop_pattern_compliance():
 
 @pytest.mark.asyncio
 async def test_claim_gate_valid_claim_insertion():
-    """Claims reference passage+sentence_index; code inserts exact sentence."""
+    """QA R13: Claims reference passage+sentence_index; non_claims reference phrase_id."""
     materials = [
         FounderMaterial(
             source="brief.md",
@@ -333,10 +337,11 @@ async def test_claim_gate_valid_claim_insertion():
         )
     ]
     
+    # QA R13: Non_claim segments use phrase_id (no text)
     segments = [
-        Segment(kind="non_claim", text="Thanks for the question."),
+        Segment(kind="non_claim", phrase_id="thanks.for_question"),
         Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
-        Segment(kind="non_claim", text="Happy to share more."),
+        Segment(kind="non_claim", phrase_id="offer.happy_to_share"),
     ]
     
     result = await claim_gate(ClaimGateInput(
@@ -407,63 +412,20 @@ async def test_claim_gate_out_of_range_sentence_index():
     assert "out of range" in result.failed_sentences[0][1].lower()
 
 
-@pytest.mark.asyncio
-async def test_claim_gate_non_claim_must_match_closed_set():
-    """Non-claim text must match closed-set patterns."""
-    materials = [
-        FounderMaterial(
-            source="brief.md",
-            passage="Our product helps developers.",
-            relevance="relevant",
-            passage_id="passage_0"
-        )
-    ]
-    
-    # Invalid non_claim: doesn't match closed set
-    segments = [
-        Segment(kind="non_claim", text="This is the best solution."),
-    ]
-    
-    result = await claim_gate(ClaimGateInput(
-        segments=segments,
-        founder_materials=materials,
-        idempotency_key="test4"
-    ))
-    
-    assert not result.passed
-    assert len(result.failed_sentences) > 0
+# QA R13: DELETED test_claim_gate_non_claim_must_match_closed_set
+# Reason: In v2.0.0, non_claim segments use phrase_id (no free text).
+# The model cannot author "This is the best solution." - it can only select phrase_id.
+# This test tested the OLD closed-set matching on model-authored text, removed in v2.0.0.
 
-
-@pytest.mark.asyncio
-async def test_claim_gate_backstop_overrides_non_claim():
-    """Backstop patterns (numbers, compliance) override non_claim tag."""
-    materials = [
-        FounderMaterial(
-            source="brief.md",
-            passage="Our product helps developers.",
-            relevance="relevant",
-            passage_id="passage_0"
-        )
-    ]
-    
-    # Model tagged as non_claim, but has backstop pattern (number)
-    segments = [
-        Segment(kind="non_claim", text="Handles 10k requests per second."),
-    ]
-    
-    result = await claim_gate(ClaimGateInput(
-        segments=segments,
-        founder_materials=materials,
-        idempotency_key="test5"
-    ))
-    
-    # Should fail: backstop overrides non_claim, making it a claim without citation
-    assert not result.passed
+# QA R13: DELETED test_claim_gate_backstop_overrides_non_claim
+# Reason: In v2.0.0, backstop only validates the fixed phrase list (TEST-ONLY).
+# The model cannot author "Handles 10k requests per second." - it can only select phrase_id.
+# This test tested the OLD backstop override on model-authored text, removed in v2.0.0.
 
 
 @pytest.mark.asyncio
 async def test_claim_gate_empty_segment_list_rejected():
-    """Empty segment list must be rejected."""
+    """QA R13: Empty segment list must be rejected (draft shape validation)."""
     materials = [FounderMaterial(
         source="brief.md",
         passage="Our product helps developers.",
@@ -478,7 +440,7 @@ async def test_claim_gate_empty_segment_list_rejected():
     ))
     
     assert not result.passed
-    assert "empty" in result.reasoning.lower()
+    assert "at least 1 segment" in result.reasoning
 
 
 @pytest.mark.asyncio
@@ -553,172 +515,28 @@ async def test_b5b_its_handling():
     assert not is_closed_set_non_claim("I think this is really interesting.")
 
 
-@pytest.mark.asyncio
-async def test_regression_modal_swap_rejected():
-    """Regression: Modal swap (changing can/might/will) must be rejected.
-    
-    QA r10: Passage says "can support SSO", model outputs "supports SSO".
-    This is not verbatim and must be rejected.
-    """
-    materials = [
-        FounderMaterial(
-            source="brief.md",
-            passage="Our product can support SSO authentication.",
-            relevance="relevant",
-            passage_id="passage_0"
-        )
-    ]
-    
-    # Model tries to output "supports SSO" (modal swap: can → does)
-    # This fails because it's not closed-set non_claim (has SSO backstop)
-    segments = [
-        Segment(kind="non_claim", text="Supports SSO authentication."),
-    ]
-    
-    result = await claim_gate(ClaimGateInput(
-        segments=segments,
-        founder_materials=materials,
-        idempotency_key="test_modal_swap"
-    ))
-    
-    assert not result.passed  # Backstop catches "SSO", requires verbatim citation
-    assert len(result.failed_sentences) > 0
+# QA R13: DELETED test_regression_modal_swap_rejected
+# Reason: In v2.0.0, the model cannot author "Supports SSO authentication." as non_claim text.
+# It can only select phrase_id. This test tested the OLD backstop rejection of modal swaps.
+
+# QA R13: DELETED test_regression_dropped_qualifier_rejected
+# Reason: In v2.0.0, the model cannot author "We support SSO." as non_claim text.
+# It can only select phrase_id. This test tested the OLD backstop rejection of dropped qualifiers.
 
 
-@pytest.mark.asyncio
-async def test_regression_dropped_qualifier_rejected():
-    """Regression: Dropped qualifiers (hedge words) must be rejected.
-    
-    QA r10: Passage says "might support SSO in the future", model outputs "supports SSO".
-    This drops the qualifier and must be rejected.
-    """
-    materials = [
-        FounderMaterial(
-            source="brief.md",
-            passage="We might support SSO in the future.",
-            relevance="relevant",
-            passage_id="passage_0"
-        )
-    ]
-    
-    # Model tries to output "supports SSO" (dropped qualifier: might...in the future)
-    # This fails because it's not closed-set non_claim (has SSO backstop)
-    segments = [
-        Segment(kind="non_claim", text="We support SSO."),
-    ]
-    
-    result = await claim_gate(ClaimGateInput(
-        segments=segments,
-        founder_materials=materials,
-        idempotency_key="test_dropped_qualifier"
-    ))
-    
-    assert not result.passed  # Backstop catches "SSO", requires verbatim citation
-    assert len(result.failed_sentences) > 0
+# QA R13: DELETED test_regression_paraphrase_free_text_rejected (parametrized)
+# Reason: In v2.0.0, the model cannot author free text in non_claim segments.
+# All 23 test cases here are impossible to emit - the model can only select phrase_id.
+# These tested the OLD frame-based/closed-set/backstop rejection of model-authored text.
+# The assertion examples are NOT lost - they are PORTED to edit-path rejection tests
+# (test_r13_edit_assertion_*) where they verify that verify_edited_text rejects them
+# when a founder edits the draft in the review UI.
 
 
-@pytest.mark.parametrize("test_case,expected_reason", [
-    # Numbers and quantification
-    ("Handles 10k requests per second.", "backstop"),
-    ("We process millions of events daily.", "backstop"),
-    ("Our platform has 99.99% uptime.", "backstop"),
-    ("Supports 100x faster performance.", "backstop"),
-    # Availability and SLAs
-    ("We offer 24/7 support.", "backstop"),
-    ("Guaranteed 99.9% uptime.", "backstop"),
-    ("Provides exactly-once delivery.", "backstop"),
-    # Compliance and security
-    ("We are SOC2 certified.", "backstop"),
-    ("Supports RBAC authentication.", "backstop"),
-    ("HIPAA compliant storage.", "backstop"),
-    # Competitive claims
-    ("Battle-tested in production.", "backstop"),
-    ("Beats Temporal on latency.", "backstop"),
-    ("Faster than Kafka.", "backstop"),
-    # Cost and business claims
-    ("Cuts infrastructure bills in half.", "closed-set"),
-    ("Eliminates on-call pain.", "closed-set"),
-    ("Ships twice as fast.", "closed-set"),
-    # Features and usage
-    ("Used by thousands of developers.", "backstop"),
-    ("Works on Kubernetes.", "closed-set"),
-    ("Free tier available.", "closed-set"),
-    # Negation mismatches (would swap meaning)
-    ("Does not require manual configuration.", "closed-set"),
-    ("Never needs downtime for upgrades.", "backstop"),
-    # QA r10: Order swap
-    ("Kafka is faster than our product.", "closed-set"),
-])
-@pytest.mark.asyncio
-async def test_regression_paraphrase_free_text_rejected(test_case, expected_reason):
-    """
-    Regression suite: Agent free text (not verbatim passage sentences) must be rejected.
-    
-    These are the paraphrase regression examples. With the new architecture, agent cannot
-    submit these as claims (no sentence_index), so they come as non_claim free text.
-    The backstop patterns and closed-set rules must reject them.
-    
-    QA r8-r10 examples included: backstop patterns, competitive claims, order swaps.
-    """
-    materials = [
-        FounderMaterial(
-            source="brief.md",
-            passage="Our platform is designed for reliability.",
-            relevance="relevant",
-            passage_id="passage_0"
-        )
-    ]
-    
-    # Agent tries to submit as non_claim free text (not a passage sentence)
-    segments = [
-        Segment(kind="non_claim", text=test_case),
-    ]
-    
-    result = await claim_gate(ClaimGateInput(
-        segments=segments,
-        founder_materials=materials,
-        idempotency_key=f"test_paraphrase_{test_case[:20]}"
-    ))
-    
-    assert not result.passed, f"Expected '{test_case}' to be rejected"
-    assert len(result.failed_sentences) > 0
-    # Verify the reason matches expectation (backstop or closed-set)
-    reason_lower = result.failed_sentences[0][1].lower()
-    if expected_reason == "backstop":
-        assert "closed-set" in reason_lower or "backstop" in reason_lower
-    else:  # closed-set
-        assert "closed-set" in reason_lower
-
-
-@pytest.mark.asyncio
-async def test_regression_paraphrase_rejected():
-    """Regression: Paraphrased claims (not verbatim) must be rejected.
-    
-    Agent text that paraphrases a claim is not an inserted sentence,
-    so it must fail as a non-closed-set non_claim.
-    """
-    materials = [
-        FounderMaterial(
-            source="brief.md",
-            passage="Our product might support SSO in the future.",
-            relevance="relevant",
-            passage_id="passage_0"
-        )
-    ]
-    
-    # If model tries to output non_claim text "supports SSO" (paraphrase, dropped hedge)
-    # it would fail backstop (SSO keyword) and need citation
-    segments = [
-        Segment(kind="non_claim", text="Supports SSO."),
-    ]
-    
-    result = await claim_gate(ClaimGateInput(
-        segments=segments,
-        founder_materials=materials,
-        idempotency_key="test_paraphrase"
-    ))
-    
-    assert not result.passed  # Backstop catches "SSO", requires citation
+# QA R13: DELETED test_regression_paraphrase_rejected
+# Reason: In v2.0.0, the model cannot author "Supports SSO." as non_claim text.
+# It can only select phrase_id. This test tested the OLD backstop rejection of
+# model-authored paraphrase, which is impossible in v2.0.0.
 
 
 @pytest.mark.asyncio
@@ -799,7 +617,8 @@ async def test_r13_non_claim_with_text_rejected():
         )
     ]
     
-    # Model should not provide text for non_claim, only phrase_id
+    # QA R13: Model should provide phrase_id ONLY, no text field
+    # A segment with both text and phrase_id should be rejected
     segments = [
         Segment(kind="non_claim", text="Thanks for sharing.", phrase_id="thanks.for_sharing"),
     ]
@@ -1109,9 +928,11 @@ async def test_r13_reuse_tracks_sentence_type():
     
     materials = []
     
-    # Gated question
+    # QA R13: Gated question (this would have come from an earlier gate pass)
+    # In production, this would have phrase_id, but for this test we use text
+    # to simulate a previously gated segment
     gated_segments = [
-        Segment(kind="non_claim", text="They are the same as your stack?", phrase_id=None)
+        Segment(kind="non_claim", text="They are the same as your stack?")
     ]
     
     # Test 1: Edited to statement form - should NOT reuse verdict
