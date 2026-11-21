@@ -93,12 +93,15 @@ GREETING_THANKS_PATTERNS = [
 ]
 
 OPINION_PATTERNS = [
-    r'^(?:I think|I believe|I feel|In my (?:opinion|experience|view)|I\'ve found|I found|I\'d say|personally)\b',
+    r'^(?:I think|I believe|I feel|I love|I like|I appreciate|I agree|I disagree|In my (?:opinion|experience|view)|I\'ve found|I found|I\'d say|personally)\b',
 ]
 
 # B5a: Product words (expanded to include ours/us/our/we)
+# Note: "it"/"this" with claim context (comparative, capability, number) counts as product mention
 PRODUCT_INDICATORS = [
-    r'\b(?:we|our|ours|us|my|it|this|the tool|the product|the platform|the service|the app|the system)\b',
+    r'\b(?:we|our|ours|us)\b',
+    r'\b(?:the product|the tool|the platform|the service|the app|the system)\b',
+    r'\b(?:it|it\'s|this|this is)\b',  # Ambiguous pronouns - will check for claim indicators
 ]
 
 # Claim indicators that combine with product mention to make it a claim
@@ -195,17 +198,32 @@ def is_closed_set_non_claim(text: str) -> bool:
     
     A sentence is non_claim ONLY if, after stripping a leading greeting/thanks clause,
     the REMAINDER is:
-    - Empty
+    - Empty (pure greeting/thanks like "Thanks for sharing!")
     - A pure question (ends with ?, no product+claim_indicator)
     - An explicit first-person opinion that doesn't mention product with claim indicators
     
     AND it doesn't match any backstop pattern (which overrides non_claim).
+    
+    The key is: "for sharing!", "for your help" etc. are considered empty remainders
+    in the context of greetings (they're part of the greeting phrase).
     """
     # First check backstop (overrides everything)
     if matches_backstop_pattern(text):
         return False
     
-    # Strip leading greeting/thanks
+    # Check if it's a pure greeting/thanks phrase
+    # These patterns should match the WHOLE text for pure greetings
+    pure_greeting_patterns = [
+        r'^(?:thanks|thank you)\s*(?:for\s+\w+)?[!.]*$',  # "Thanks", "Thanks for sharing!"
+        r'^(?:hi|hello|hey)\s*(?:there)?[!.]*$',  # "Hi!", "Hello there!"
+        r'^(?:happy|glad|pleased)\s+to\s+(?:help|share|chat)[!.]*$',  # "Happy to help!"
+    ]
+    
+    for pattern in pure_greeting_patterns:
+        if re.match(pattern, text, re.IGNORECASE):
+            return True
+    
+    # Strip leading greeting/thanks for compound sentences
     remainder = strip_leading_greeting_thanks(text)
     
     # Empty remainder after stripping greeting

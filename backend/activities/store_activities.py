@@ -25,7 +25,7 @@ class StoreCardInput:
 @dataclass
 class UpdateCardInput:
     """
-    Input for update_card activity.
+    B1: Input for update_card activity with proper typing.
     
     Valid update keys:
     - status: str (ReviewStatus value)
@@ -35,11 +35,54 @@ class UpdateCardInput:
     - skip_reason: str
     - followup_replies: List[Dict[str, Any]]
     - evidence: Evidence (full object with draft)
+    - edited_text_gate_results: List[Dict[str, Any]]
+    - post_anyway: bool
+    - post_anyway_failing_sentences: List[str]
     """
     
     workflow_id: str
     updates: CardUpdate
     idempotency_key: str
+
+
+@dataclass
+class CardUpdateTyped:
+    """B1: Typed alternative to dict-based updates to fix bool payload decoding."""
+    status: Optional[str] = None
+    approved_by: Optional[str] = None
+    posted_url: Optional[str] = None
+    reply_post_id: Optional[str] = None
+    skip_reason: Optional[str] = None
+    followup_replies: Optional[List[Dict[str, Any]]] = None
+    evidence: Optional[Evidence] = None
+    edited_text_gate_results: Optional[List[Dict[str, Any]]] = None
+    post_anyway: Optional[bool] = None
+    post_anyway_failing_sentences: Optional[List[str]] = None
+    
+    def to_dict(self) -> CardUpdate:
+        """Convert to dict for backward compatibility."""
+        d = {}
+        if self.status is not None:
+            d["status"] = self.status
+        if self.approved_by is not None:
+            d["approved_by"] = self.approved_by
+        if self.posted_url is not None:
+            d["posted_url"] = self.posted_url
+        if self.reply_post_id is not None:
+            d["reply_post_id"] = self.reply_post_id
+        if self.skip_reason is not None:
+            d["skip_reason"] = self.skip_reason
+        if self.followup_replies is not None:
+            d["followup_replies"] = self.followup_replies
+        if self.evidence is not None:
+            d["evidence"] = self.evidence
+        if self.edited_text_gate_results is not None:
+            d["edited_text_gate_results"] = self.edited_text_gate_results
+        if self.post_anyway is not None:
+            d["post_anyway"] = self.post_anyway
+        if self.post_anyway_failing_sentences is not None:
+            d["post_anyway_failing_sentences"] = self.post_anyway_failing_sentences
+        return d
 
 
 @dataclass
@@ -224,7 +267,7 @@ async def store_card(input: StoreCardInput) -> bool:
 
 
 def _update_card_sync(input: UpdateCardInput) -> bool:
-    """Synchronous DB work for update_card (B3)."""
+    """Synchronous DB work for update_card. B1: Properly handle bool fields."""
     db = get_db()
     try:
         card_db = db.query(ReviewCardDB).filter(
@@ -234,25 +277,26 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         if not card_db:
             return False
         
-        # Apply updates
+        # B1: Apply updates with explicit type handling for bools
         for key, value in input.updates.items():
             if key == "status":
-                card_db.status = value
+                card_db.status = str(value) if value is not None else None
             elif key == "approved_by":
-                card_db.approved_by = value
+                card_db.approved_by = str(value) if value is not None else None
             elif key == "posted_url":
-                card_db.posted_url = value
+                card_db.posted_url = str(value) if value is not None else None
             elif key == "reply_post_id":
-                card_db.reply_post_id = value
+                card_db.reply_post_id = str(value) if value is not None else None
             elif key == "skip_reason":
-                card_db.skip_reason = value
+                card_db.skip_reason = str(value) if value is not None else None
             elif key == "followup_replies":
                 card_db.followup_replies = value if value else None
             elif key == "edited_text_gate_results":
                 # Edit re-gate results (ADR-0006 Amendment E)
                 card_db.edited_text_gate_results = value if value else None
             elif key == "post_anyway":
-                card_db.post_anyway = value
+                # B1: Explicit bool conversion to handle Temporal serialization
+                card_db.post_anyway = bool(value) if value is not None else None
             elif key == "post_anyway_failing_sentences":
                 card_db.post_anyway_failing_sentences = value if value else None
             elif key == "evidence":
