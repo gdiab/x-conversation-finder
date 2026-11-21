@@ -63,6 +63,19 @@ def budget_test_db(temp_db):
             from backend.database import init_db
             init_db()
             
+            # QA R15: Clear kill-switch state to prevent test order dependency
+            from backend.database import GlobalSettingsDB, get_db
+            db = get_db()
+            try:
+                db.query(GlobalSettingsDB).filter(
+                    GlobalSettingsDB.key == "kill_switch"
+                ).delete()
+                db.commit()
+            except:
+                db.rollback()
+            finally:
+                db.close()
+            
             yield settings
     
     return _setup
@@ -87,7 +100,12 @@ def with_test_settings(temp_db, **kwargs):
 
 
 def test_reserve_x_budget_first_call_enforces_cap(temp_db):
-    """Test that cap is enforced on the very first call (NB3)."""
+    """
+    Test that cap is enforced on the very first call (NB3).
+    
+    QA R15: Fixed test isolation - explicitly clear kill-switch state
+    to prevent test order dependency (fails with pytest-randomly seeds 5, 6, 12).
+    """
     settings = Settings(
         database_url=f"sqlite:///{temp_db}",
         daily_spend_limit_usd=1.0,
@@ -100,8 +118,25 @@ def test_reserve_x_budget_first_call_enforces_cap(temp_db):
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
         
-        from backend.database import init_db
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db, GlobalSettingsDB, get_db
         init_db()
+        
+        # QA R15: Clear kill-switch state to prevent leaking from previous tests
+        db = get_db()
+        try:
+            db.query(GlobalSettingsDB).filter(
+                GlobalSettingsDB.key == "kill_switch"
+            ).delete()
+            db.commit()
+        except:
+            db.rollback()
+        finally:
+            db.close()
         
         with pytest.raises(BudgetExceeded, match="exceed daily spend limit"):
             reserve_x_budget(reads_needed=3, cost_per_read=0.5)
