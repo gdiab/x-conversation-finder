@@ -58,17 +58,19 @@ Drafts are assembled, not written. A claim segment references a founder passage 
    
    Activity payloads use plain `str` Literals, not `str`-Enums (str-Enum decodes as a char list at the Temporal activity boundary).
 
-2. **Claim sentence insertion:** Code splits the founder passage into sentences using a deterministic splitter (fixed to not break on decimals like 99.99%), validates the sentence_index is in range, and inserts that exact sentence as the segment text. The only normalization allowed is trimming trailing punctuation for flow. No partial spans. An invalid passage id or out-of-range index fails the segment.
+2. **Claim sentence insertion:** Code splits the founder passage into sentences using a deterministic splitter (fixed to not break on decimals like 99.99%; QA R14 splits after company suffixes Inc/Ltd/Co/Corp when next token is capitalized), validates the sentence_index is in range, and inserts that exact sentence as the segment text. The only normalization allowed is trimming trailing punctuation for flow (QA R14: questions preserve '?'). No partial spans. An invalid source_passage_id or out-of-range index fails the segment.
 
-3. Drafts are assembled, not written. The reply agent selects segments by reference only: a claim is {passage_id, sentence_index} and code inserts that founder sentence verbatim; a non-claim is {phrase_id} from a fixed, versioned phrase list in code (`backend/gate/non_claim_set.py`, v2.0.0, pinned here). The model authors no free text in a draft. A draft has 1-3 segments with at most one claim. Rejected: open-ended frames and frame-plus-remainder allowlists, which admitted assertions in QA r11-r13. Deferred to ADR-0003 evaluation: post-echo questions, an independent verifier, and scoping the hard gate to product-referencing sentences with founder review as the backstop. Consequence: v1 replies are templated by design; the baseline eval measures the cost in precision and naturalness.
+3. Drafts are assembled, not written. The reply agent selects segments by reference only: a claim is {source_passage_id, sentence_index} and code inserts that founder sentence verbatim; a non-claim is {phrase_id} from a fixed, versioned phrase list in code (`backend/gate/non_claim_set.py`, v2.1.0, pinned here). The model authors no free text in a draft. A draft has 1-3 segments with at most one claim. Composition rules (v2.1.0): segment order by category (opener, thanks, claim, offer/question), no phrase_id repeats, at most one segment per category, no opener-only drafts. Rejected: open-ended frames and frame-plus-remainder allowlists, which admitted assertions in QA r11-r13. Deferred to ADR-0003 evaluation: post-echo questions, an independent verifier, and scoping the hard gate to product-referencing sentences with founder review as the backstop. Consequence: v1 replies are templated by design; the baseline eval measures the cost in precision and naturalness.
 
 4. **Pattern backstop (TEST-ONLY):** The keyword and number backstop is now TEST-ONLY validation: every listed phrase must pass the backstop and contain no number. The runtime backstop is removed from the model-draft path (unreachable with phrase_id). It remains in edit paths for founder-edited free text.
 
 5. **Founder-edit re-gate:** When a founder edits the draft text, the edited text is split into sentences. Each sentence:
-   - If it exactly matches a previously gated segment (after NFKC+casefold+whitespace normalization), keeps that verdict
-   - If it's a verbatim passage sentence (normalized), passes as a claim
-   - If it's a closed-set non_claim, passes
+   - If it exactly matches a previously gated segment (after NFKC+casefold+whitespace normalization, question vs statement type), keeps that verdict
+   - If it's a verbatim passage sentence (normalized), passes as a claim IF it also passes the referent rule, abbreviation-ending rule, and selectability checks (same checks as model path, QA R14)
+   - If it's a closed-set non_claim phrase (v2.1.0 fixed phrase list), passes IF terminal punctuation type matches
    - Otherwise, fails
+   
+   Edited text is also validated against the composition rules (v2.1.0). Any violation fails the edit or requires post_anyway, same as any other failure (QA R14).
    
    Per-sentence results are stored. This is not a hard block: if the edited text fails, the `approve` Update requires `post_anyway=True`. The validator rejects approve without it when failures exist, and the card records `post_anyway` and the failing sentences.
    
@@ -79,14 +81,24 @@ Drafts are assembled, not written. A claim segment references a founder passage 
 6. **On failure:** Exactly one redraft carrying the gate's per-sentence reasons as the steer, then gate again. A second failure ends the `Review` as `skipped: not enough evidence` with the reasons recorded in the evidence trail. A failed draft never reaches a card.
 
 **Regression tests for model-draft path (must REJECT):**
-- Unknown phrase_id → REJECTED (phrase_id not in fixed list)
+- Unknown phrase_id → REJECTED (phrase_id not in v2.1.0 fixed list)
+- Invalid segment kind (not 'claim' or 'non_claim') → REJECTED (QA R14)
 - Non_claim segment with text field → REJECTED (phrase_id only, no text)
 - 0 segments → REJECTED (must have at least 1)
 - 4 segments → REJECTED (must have at most 3)
 - 2 claim segments → REJECTED (must have at most 1)
-- Invalid passage id or out-of-range sentence_index → REJECTED
+- Invalid source_passage_id or out-of-range sentence_index → REJECTED
+- Composition violations → REJECTED (QA R14 v2.1.0):
+  - Opener after claim (order violation)
+  - Repeated phrase_id
+  - Multiple segments per category
+  - Opener-only draft
 
-**Regression tests for edit path (must REJECT, QA r8-r13 examples):**
+**Regression tests for edit path (must REJECT, current bypass classes QA r8-r14):**
+- 'It supports retries.' → REJECTED (unresolved referent)
+- 'We are Acme Inc.' → REJECTED (ends with abbreviation, not selectable)
+- 'Our product helps developers build reliable systems?' → REJECTED (passage sentence, wrong punctuation type)
+- 'What stack are you on.' / 'What stack are you on!' → REJECTED (phrase, wrong punctuation type)
 - 'I think it's way cheaper.' → REJECTED (assertion not in fixed phrases or passages)
 - 'Thanks! It's way cheaper.' → REJECTED (multiple sentences, second is assertion)
 - 'Hi! Ours is 10x quicker.' → REJECTED (multiple sentences, second is assertion)
@@ -98,6 +110,7 @@ Drafts are assembled, not written. A claim segment references a founder passage 
 - 'I like the idea.' → REJECTED (assertion not in fixed phrases)
 - 'I think you are the problem.' → REJECTED (not a fixed phrase or passage sentence)
 - 'Why is the issue the same?' → REJECTED (assertion in question form)
+- 'Thanks for sharing. Our product supports SSO. Hi!' → REJECTED (composition violation: opener after claim)
 
 **Regression tests (must PASS):**
 - Valid phrase_id from fixed list → PASSES (model-draft path)
