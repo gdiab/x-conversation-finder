@@ -123,14 +123,23 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
         
         steer_text = f"\n\nAdditional instruction: {steer}" if steer else ""
         
+        # QA R13: List available phrases for the model
+        available_phrases = """OPENERS: opener.hi, opener.hello, opener.hey, opener.thanks, opener.great_question
+THANKS: thanks.for_sharing, thanks.for_asking, thanks.for_question, thanks.interesting
+OFFERS: offer.happy_to_help, offer.happy_to_share, offer.share_details, offer.glad_to_help, offer.love_to_hear, offer.feel_free
+QUESTIONS: q.current_tool, q.stack, q.use_case, q.context, q.tried, q.looking_for, q.problem"""
+        
         prompt = f"""Draft a reply to this post as structured segments.
 
-CRITICAL RULES:
+CRITICAL RULES - QA R13:
 - Claims are QUOTED, not paraphrased. You reference a passage sentence by its index (0-based).
 - For claims: output ONLY {{"kind": "claim", "source_passage_id": "passage_X", "sentence_index": N}}
-- For non-claims: output {{"kind": "non_claim", "text": "your text here"}}
-- The code will insert the exact passage sentence for claims. You do NOT write claim text.
-- All non-claim text must be: questions, greetings/thanks, or first-person opinion without product claims.
+- For non-claims: output {{"kind": "non_claim", "phrase_id": "phrase.id"}} - select from the fixed list below
+- The code will insert the exact passage sentence for claims and the phrase text for non-claims.
+- You do NOT write ANY free text. Claims are sentence indices, non-claims are phrase IDs.
+
+Available Phrase IDs (select one by exact ID):
+{available_phrases}
 
 Why this post fits: {evidence.why_it_fits}
 
@@ -139,19 +148,19 @@ Founder Materials (sentence indices shown):
 {steer_text}
 
 Return JSON with:
-- segments: list of objects:
+- segments: list of objects (1-3 segments, at most 1 claim):
   - For claims: {{"kind": "claim", "source_passage_id": "passage_X", "sentence_index": N}}
-  - For non-claims: {{"kind": "non_claim", "text": "your text"}}
+  - For non-claims: {{"kind": "non_claim", "phrase_id": "exact.phrase.id"}}
 
 Example:
 [
-  {{"kind": "non_claim", "text": "Thanks for raising this!"}},
+  {{"kind": "non_claim", "phrase_id": "opener.thanks"}},
   {{"kind": "claim", "source_passage_id": "passage_0", "sentence_index": 0}},
-  {{"kind": "non_claim", "text": "Happy to share more details."}}
+  {{"kind": "non_claim", "phrase_id": "offer.share_details"}}
 ]
 
 Be conversational and honest. Never invent features. Reference founder material by sentence index only.
-Max 280 chars total after sentence insertion."""
+Max 280 chars total after text insertion."""
 
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -166,8 +175,9 @@ Max 280 chars total after sentence insertion."""
         
         from backend.models import Segment
         from backend.activities.claim_gate_activity import split_into_sentences
+        from backend.gate.non_claim_set import get_phrase_text
         
-        # Per Architect: Claims have {kind, source_passage_id, sentence_index}, non-claims have {kind, text}
+        # QA R13: Claims have {kind, source_passage_id, sentence_index}, non-claims have {kind, phrase_id}
         segments = []
         for s in result.get("segments", []):
             if s["kind"] == "claim":
@@ -177,12 +187,13 @@ Max 280 chars total after sentence insertion."""
                     sentence_index=s.get("sentence_index")
                 ))
             else:
+                # QA R13: Non-claims use phrase_id (no text)
                 segments.append(Segment(
                     kind="non_claim",
-                    text=s.get("text")
+                    phrase_id=s.get("phrase_id")
                 ))
         
-        # Construct draft text by inserting claim sentences
+        # QA R13: Construct draft text by inserting claim sentences and phrase texts
         # (claim_gate will validate, but we need text for the draft)
         text_parts = []
         for seg in segments:
@@ -200,8 +211,11 @@ Max 280 chars total after sentence insertion."""
                         if 0 <= seg.sentence_index < len(sentences):
                             text_parts.append(sentences[seg.sentence_index].rstrip('.!?'))
             else:
-                if seg.text:
-                    text_parts.append(seg.text)
+                # QA R13: Look up phrase text by phrase_id
+                if seg.phrase_id:
+                    phrase_text = get_phrase_text(seg.phrase_id)
+                    if phrase_text:
+                        text_parts.append(phrase_text.rstrip('.!?'))
         
         draft_text = ' '.join(text_parts)
         
