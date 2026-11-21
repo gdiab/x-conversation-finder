@@ -51,30 +51,12 @@ def budget_test_db(temp_db):
         defaults.update(settings_kwargs)
         settings = Settings(**defaults)
         
-        with patch("backend.config.get_settings", return_value=settings), \
-             patch("backend.budget.get_settings", return_value=settings), \
-             patch("backend.database.get_settings", return_value=settings):
-            
-            # Clear engine cache
-            import backend.database
-            backend.database._engine = None
-            backend.database._SessionLocal = None
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
             
             from backend.database import init_db
             init_db()
-            
-            # QA R15: Clear kill-switch state to prevent test order dependency
-            from backend.database import GlobalSettingsDB, get_db
-            db = get_db()
-            try:
-                db.query(GlobalSettingsDB).filter(
-                    GlobalSettingsDB.key == "kill_switch"
-                ).delete()
-                db.commit()
-            except:
-                db.rollback()
-            finally:
-                db.close()
             
             yield settings
     
@@ -118,25 +100,8 @@ def test_reserve_x_budget_first_call_enforces_cap(temp_db):
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
         
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
-        
-        from backend.database import init_db, GlobalSettingsDB, get_db
+        from backend.database import init_db
         init_db()
-        
-        # QA R15: Clear kill-switch state to prevent leaking from previous tests
-        db = get_db()
-        try:
-            db.query(GlobalSettingsDB).filter(
-                GlobalSettingsDB.key == "kill_switch"
-            ).delete()
-            db.commit()
-        except:
-            db.rollback()
-        finally:
-            db.close()
         
         with pytest.raises(BudgetExceeded, match="exceed daily spend limit"):
             reserve_x_budget(reads_needed=3, cost_per_read=0.5)
@@ -155,11 +120,6 @@ def test_reserve_x_budget_read_cap_enforced(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()
@@ -185,11 +145,6 @@ def test_reserve_x_budget_atomic(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()
@@ -222,11 +177,6 @@ def test_reserve_x_budget_kill_switch_config(temp_db):
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
         
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
-        
         from backend.database import init_db
         init_db()
         
@@ -249,11 +199,6 @@ def test_reserve_x_budget_kill_switch_db(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()
@@ -279,11 +224,6 @@ def test_reserve_inference_budget_per_token_pricing(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()
@@ -311,11 +251,6 @@ def test_reserve_inference_budget_enforces_cap_first_call(temp_db):
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
         
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
-        
         from backend.database import init_db
         init_db()
         
@@ -338,11 +273,6 @@ def test_reserve_inference_budget_atomic(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()
@@ -375,11 +305,6 @@ def test_reserve_inference_budget_kill_switch(temp_db):
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
         
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
-        
         from backend.database import init_db
         init_db()
         
@@ -402,11 +327,6 @@ def test_get_today_budget_includes_kill_switch(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()
@@ -436,11 +356,6 @@ def test_multiple_reserves_accumulate(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()
@@ -474,11 +389,6 @@ def test_concurrent_budget_no_overspend(temp_db):
     with patch("backend.config.get_settings", return_value=settings), \
          patch("backend.budget.get_settings", return_value=settings), \
          patch("backend.database.get_settings", return_value=settings):
-        
-        # Clear engine cache
-        import backend.database
-        backend.database._engine = None
-        backend.database._SessionLocal = None
         
         from backend.database import init_db
         init_db()

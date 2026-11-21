@@ -535,6 +535,7 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     )
     
     # QA R15: Apply at-most-1-claim rule (same as model path)
+    # QA R16: This check is defense in depth and duplicates composition rule 2.1.0-rule-2.
     if all(r.passed for r in results):
         claim_count = sum(1 for r in results if r.kind == "claim")
         if claim_count > 1:

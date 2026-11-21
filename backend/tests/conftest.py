@@ -14,12 +14,40 @@ from backend.config import get_settings
 
 
 @pytest.fixture(scope="function", autouse=True)
+def reset_db_engine():
+    """
+    QA R16: Universal DB engine reset for ALL tests.
+    
+    Resets backend.database._engine and _SessionLocal before and after EVERY test,
+    including tests that use temp_db fixture. This prevents engine/session staleness
+    and kill_switch leakage between tests.
+    
+    Runs before and after each test via autouse=True.
+    """
+    import backend.database
+    
+    # Reset before test
+    if backend.database._engine is not None:
+        backend.database._engine.dispose()
+    backend.database._engine = None
+    backend.database._SessionLocal = None
+    
+    yield
+    
+    # Reset after test
+    if backend.database._engine is not None:
+        backend.database._engine.dispose()
+    backend.database._engine = None
+    backend.database._SessionLocal = None
+
+
+@pytest.fixture(scope="function", autouse=True)
 def test_db_isolation(tmp_path, monkeypatch, request):
     """Test isolation: each test gets a fresh tmp DB with kill switch off.
     
-    Skips tests that manage their own DB (like test_budget.py).
+    QA R16: No longer skips temp_db tests - reset_db_engine handles all cleanup.
     """
-    # Skip if test has its own temp_db fixture
+    # Skip if test has its own temp_db fixture (it will handle DB setup)
     if 'temp_db' in request.fixturenames:
         yield
         return
@@ -30,12 +58,7 @@ def test_db_isolation(tmp_path, monkeypatch, request):
     # Point config at tmp DB
     monkeypatch.setenv("DATABASE_URL", db_url)
     
-    # Clear engine cache so get_engine() uses new DATABASE_URL
-    import backend.database
-    backend.database._engine = None
-    backend.database._SessionLocal = None
-    
-    # Initialize fresh DB
+    # Initialize fresh DB (reset_db_engine already cleared the engine)
     init_db()
     
     # Ensure kill switch is off (per S-2: global setting, not per-day)

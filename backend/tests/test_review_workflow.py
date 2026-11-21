@@ -644,7 +644,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             result = await handle.result()
             assert result == "skipped"
             
-            # Query the card to verify final status
+            # Query the card to verify final status (workflow memory)
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
             
@@ -670,6 +670,32 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             
             # QA R15: Verify exactly 2 draft_reply calls (initial + 1 redraft)
             assert failing_agent.draft_call_count == 2
+            
+            # QA R16: Assert PERSISTED card from DB (not just workflow memory)
+            from backend.database import ReviewCardDB, get_db
+            db = get_db()
+            try:
+                persisted_card = db.query(ReviewCardDB).filter(
+                    ReviewCardDB.workflow_id == workflow_id
+                ).first()
+                
+                # Verify card was persisted
+                assert persisted_card is not None, "Card should be persisted to DB"
+                assert persisted_card.status == "skipped", "Persisted card status should be skipped"
+                
+                # Verify full evidence is in persisted card, including failed sentences
+                assert persisted_card.evidence_data is not None
+                assert persisted_card.evidence_data["draft"] is not None
+                persisted_failed_sentences = persisted_card.evidence_data["draft"]["claim_gate"]["failed_sentences"]
+                assert len(persisted_failed_sentences) == 1
+                assert persisted_failed_sentences[0]["sentence"] == "[claim segment]"
+                assert "sentence_index 99 out of range" in persisted_failed_sentences[0]["reason"]
+                
+                # Verify skip_reason is persisted
+                assert persisted_card.skip_reason is not None
+                assert "not enough evidence" in persisted_card.skip_reason.lower()
+            finally:
+                db.close()
 
 
 @pytest.mark.asyncio
