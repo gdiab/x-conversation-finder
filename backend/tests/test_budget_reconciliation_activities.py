@@ -11,6 +11,7 @@ Tests cover:
 
 import pytest
 from datetime import datetime, timedelta, timezone
+from sqlalchemy import text
 from backend.budget import (
     reserve_x_budget,
     reserve_inference_budget,
@@ -267,7 +268,7 @@ async def test_reconcile_across_midnight_hits_reservation_day():
     # Create yesterday's ledger manually with some reserved reads
     db = get_db()
     try:
-        db.execute("BEGIN IMMEDIATE")
+        db.execute(text("BEGIN IMMEDIATE"))
         
         ledger = BudgetLedgerDB(
             date=yesterday,
@@ -329,7 +330,7 @@ async def test_reconcile_never_goes_negative():
     # Create a ledger with only 1 read
     db = get_db()
     try:
-        db.execute("BEGIN IMMEDIATE")
+        db.execute(text("BEGIN IMMEDIATE"))
         
         today = get_today_utc()
         ledger = BudgetLedgerDB(
