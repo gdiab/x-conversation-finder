@@ -52,10 +52,20 @@ async def main():
     if settings.reply_agent_adapter == "fake":
         reply_agent = FakeReplyAgent()
     elif settings.reply_agent_adapter == "plain":
+        if not settings.openai_api_key:
+            logger.error("OPENAI_API_KEY is required when reply_agent_adapter=plain")
+            raise ValueError(
+                "Plain reply agent selected but OPENAI_API_KEY is not configured. "
+                "Set OPENAI_API_KEY in environment or use reply_agent_adapter=fake"
+            )
+        logger.info("Initializing plain reply agent with OpenAI API")
         reply_agent = PlainReplyAgent()
     else:
-        logger.warning(f"Unknown reply_agent_adapter: {settings.reply_agent_adapter}, using fake")
-        reply_agent = FakeReplyAgent()
+        logger.error(f"Unknown reply_agent_adapter: {settings.reply_agent_adapter}")
+        raise ValueError(
+            f"Invalid reply_agent_adapter '{settings.reply_agent_adapter}'. "
+            "Valid options: 'fake', 'plain'"
+        )
     
     # Create activity instances with injected dependencies (B5: no module globals)
     x_activities = XActivities(x_client)

@@ -50,7 +50,7 @@ class HttpXClient(XClientPort):
         Args:
             query: Search query string
             since_id: Return posts newer than this ID
-            max_results: Maximum number of results (10-100)
+            max_results: Maximum number of results (10-100, clamped)
         
         Returns:
             Tuple of (list of posts, newest_id)
@@ -58,9 +58,12 @@ class HttpXClient(XClientPort):
         Raises:
             httpx.HTTPError: On API errors
         """
+        # X API requires 10-100 range (S-7)
+        clamped_max = max(10, min(max_results, 100))
+        
         params = {
             "query": query,
-            "max_results": min(max_results, 100),
+            "max_results": clamped_max,
             "tweet.fields": "created_at,conversation_id,in_reply_to_user_id,reply_settings,public_metrics",
             "expansions": "author_id",
             "user.fields": "name,username,verified,public_metrics",
@@ -70,13 +73,22 @@ class HttpXClient(XClientPort):
             params["since_id"] = since_id
         
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/tweets/search/recent",
-                headers=self._get_headers(),
-                params=params,
-                timeout=30.0,
-            )
-            response.raise_for_status()
+            try:
+                response = await client.get(
+                    f"{self.base_url}/tweets/search/recent",
+                    headers=self._get_headers(),
+                    params=params,
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # Handle 429 rate limit (S-7)
+                if e.response.status_code == 429:
+                    retry_after = e.response.headers.get("Retry-After", "60")
+                    raise httpx.HTTPError(
+                        f"Rate limited. Retry after {retry_after} seconds"
+                    )
+                raise
             data = response.json()
         
         posts = []
@@ -101,14 +113,9 @@ class HttpXClient(XClientPort):
         for tweet in data["data"]:
             author = authors_by_id.get(tweet["author_id"])
             if not author:
-                # Fallback if author not in includes
-                author = Author(
-                    id=tweet["author_id"],
-                    username=f"user_{tweet['author_id']}",
-                    name=f"User {tweet['author_id']}",
-                    followers_count=0,
-                    verified=False,
-                )
+                # S-7: If author not in includes, skip this tweet rather than using placeholder
+                # (Real X API should always include authors when expansions=author_id)
+                continue
             
             metrics = tweet.get("public_metrics", {})
             
@@ -165,6 +172,12 @@ class HttpXClient(XClientPort):
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     return None
+                # Handle 429 rate limit (S-7)
+                if e.response.status_code == 429:
+                    retry_after = e.response.headers.get("Retry-After", "60")
+                    raise httpx.HTTPError(
+                        f"Rate limited. Retry after {retry_after} seconds"
+                    )
                 raise
             
             data = response.json()

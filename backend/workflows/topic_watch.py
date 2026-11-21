@@ -21,7 +21,6 @@ with workflow.unsafe.imports_passed_through():
     from backend.activities import SearchRecentInput, SearchRecentOutput
     from backend.workflows.review import ReviewWorkflow, ReviewInput, ReviewConfig
     from temporalio.workflow import ParentClosePolicy
-    from backend.config import get_settings
 
 
 @dataclass(frozen=True)

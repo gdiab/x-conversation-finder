@@ -39,7 +39,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from backend.activities.claim_gate_activity import ClaimGateInput, claim_gate
     from backend.activities.store_activities import store_card, update_card
-    from backend.config import get_settings
 
 
 @dataclass(frozen=True)
@@ -410,10 +409,6 @@ class ReviewWorkflow:
             )
             
             return "followup_due"
-        
-        except Exception as e:
-            workflow.logger.error(f"Review failed: {e}")
-            raise
     
     @workflow.signal
     async def approve(self, posted_url: str, client_request_id: str):
