@@ -417,13 +417,21 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
     @activity.defn(name="claim_gate")
     async def failing_claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         """Claim gate that always fails for testing."""
+        from backend.models.evidence import Claim
+        
         fail_count["count"] += 1
         activity.logger.info(f"Claim gate attempt {fail_count['count']} - returning FAIL")
+        
+        test_claim = Claim(
+            text="Test claim about our product",
+            cited_passage_ids=[],
+            quoted_spans=[]
+        )
+        
         return ClaimGateResult(
             passed=False,
-            claims_checked=["Test claim about our product"],
-            unsupported_claims=["Test claim about our product"],
-            supported_claims={},
+            claims=[test_claim],
+            failed_claims=[(test_claim, "No founder materials support this claim")],
             reasoning="No founder materials support this claim",
         )
     
