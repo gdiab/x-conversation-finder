@@ -91,8 +91,8 @@ class Settings(BaseSettings):
         - API endpoint creating TopicWatch via settings.watch_poll_interval_hours
         - Worker startup validation
         
-        Direct workflow starts that construct TopicWatchInput(config=TopicWatchConfig(poll_interval_hours=0))
-        bypass this validator and are validated in TopicWatchInput.__post_init__ instead (clamped with warning).
+        Limitation: Direct workflow starts that construct TopicWatchInput(config=TopicWatchConfig(poll_interval_hours=0))
+        bypass this validator. Production workflows should use the API or worker settings, not direct starts.
         """
         # Allow 0 only for fake adapter
         if self.watch_poll_interval_hours == 0 and self.x_client_adapter == 'fake':
