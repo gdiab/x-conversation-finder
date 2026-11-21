@@ -60,3 +60,4 @@ htmlcov/
 
 # Temporal
 .temporal/
+.venv/
