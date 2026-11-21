@@ -2,6 +2,15 @@
  * API client for the backend.
  */
 
+// R5-S5: Type status as union matching backend Literal
+export type ReviewStatus = 
+  | "pending" 
+  | "approved" 
+  | "approved_not_confirmed" 
+  | "skipped" 
+  | "expired" 
+  | "followup_due";
+
 export interface ReviewCard {
   workflow_id: string;
   post: {
@@ -40,7 +49,7 @@ export interface ReviewCard {
     } | null;
     skip_reason: string | null;
   };
-  status: string;
+  status: ReviewStatus;
   created_at: string;
   updated_at: string;
   approved_by: string | null;
