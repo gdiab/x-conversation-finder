@@ -4,7 +4,7 @@ Database setup and models for SQLite persistence.
 Per B3: Worker and API are separate processes, so in-memory store doesn't work.
 """
 
-from sqlalchemy import create_engine, Column, String, Float, JSON, DateTime, Boolean
+from sqlalchemy import create_engine, Column, String, Float, JSON, DateTime, Boolean, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone

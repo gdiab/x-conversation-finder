@@ -13,14 +13,14 @@ from temporalio.worker import Worker, Replayer
 from backend.workflows.review import ReviewWorkflow, ReviewInput
 from backend.workflows.topic_watch import TopicWatchWorkflow, TopicWatchInput
 from backend.activities import XActivities, ReplyActivities
-from backend.activities.store_activities import store_card, update_card
+from backend.activities.store_activities import store_card, update_card, delete_post_text
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
 
 
 @pytest.mark.asyncio
 async def test_review_workflow_replay(sample_post, product_brief, x_activities, reply_activities):
-    """Test Review workflow replay from recorded history."""
+    """Test Review workflow replay - full flow with approve, confirm, followup and check_followup."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
@@ -35,11 +35,12 @@ async def test_review_workflow_replay(sample_post, product_brief, x_activities, 
                 claim_gate,
                 store_card,
                 update_card,
+                delete_post_text,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_replay"
             
-            # Run workflow and record history
+            # Run workflow with short followup delay for testing
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
                 ReviewInput(
@@ -48,6 +49,7 @@ async def test_review_workflow_replay(sample_post, product_brief, x_activities, 
                     product_brief=product_brief,
                     account="test",
                     confidence_threshold=0.5,
+                    followup_delay_days=1,  # Short delay for test
                 ),
                 id=workflow_id,
                 task_queue="test",
@@ -55,7 +57,7 @@ async def test_review_workflow_replay(sample_post, product_brief, x_activities, 
             
             await env.sleep(1)
             
-            # Approve
+            # Step 1: Approve with reply URL
             import uuid
             await handle.signal(
                 "approve",
@@ -64,7 +66,7 @@ async def test_review_workflow_replay(sample_post, product_brief, x_activities, 
             
             await env.sleep(1)
             
-            # Fetch history before workflow completes
+            # Fetch history with full flow
             history = await handle.fetch_history()
             
             # Replay the history against current workflow code
@@ -91,6 +93,7 @@ async def test_topic_watch_workflow_replay(product_brief, x_activities, reply_ac
                 claim_gate,
                 store_card,
                 update_card,
+                delete_post_text,
             ],
         ):
             workflow_id = "watch:test:reliability_replay"
@@ -148,6 +151,7 @@ async def test_review_workflow_replay_with_skip(sample_post, product_brief, x_ac
                 claim_gate,
                 store_card,
                 update_card,
+                delete_post_text,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_replay_skip"
