@@ -155,6 +155,8 @@ class TopicWatchWorkflow:
             
             except Exception as e:
                 workflow.logger.error(f"Search failed: {e}")
+                # Re-raise to fail the workflow - don't continue silently
+                raise
         
         workflow.logger.info(
             f"Reached Continue-As-New threshold ({input.continue_as_new_after} iterations)"
