@@ -237,7 +237,7 @@ def ends_with_abbreviation(text: str) -> bool:
     Check if a sentence ends with a known abbreviation.
     
     QA R13: A sentence ending in a known abbreviation is NOT selectable.
-    S4 (QA R14): Case-insensitive matching.
+    S4 (QA R14): Case-insensitive matching with word boundaries.
     
     Returns True if the sentence ends with an abbreviation.
     """
@@ -248,9 +248,13 @@ def ends_with_abbreviation(text: str) -> bool:
     text_stripped = text.rstrip()
     text_lower = text_stripped.lower()
     for abbr in abbrevs:
-        # S4 (QA R14): Case-insensitive matching
-        if text_lower.endswith(abbr.lower()):
-            return True
+        # S4 (QA R14): Case-insensitive matching with word boundary check
+        # Need to check that the abbreviation is preceded by whitespace or is at the start
+        abbr_lower = abbr.lower()
+        if text_lower.endswith(abbr_lower):
+            # Check if it's a whole word (preceded by space or start of string)
+            if len(text_lower) == len(abbr_lower) or text_lower[-(len(abbr_lower)+1)].isspace():
+                return True
     return False
 
 

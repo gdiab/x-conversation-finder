@@ -10,6 +10,7 @@ from backend.activities.claim_gate_activity import (
     claim_gate,
     split_into_sentences,
     has_unresolved_referent,
+    ends_with_abbreviation,
 )
 from backend.gate.non_claim_set import (
     is_closed_set_non_claim,
