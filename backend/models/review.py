@@ -84,6 +84,7 @@ class ReviewCard:
                             "text": s.text,
                             "source_passage_id": s.source_passage_id,
                             "sentence_index": s.sentence_index,
+                            "phrase_id": s.phrase_id,
                         }
                         for s in self.evidence.draft.segments
                     ],
@@ -95,6 +96,7 @@ class ReviewCard:
                                 "text": s.text,
                                 "source_passage_id": s.source_passage_id,
                                 "sentence_index": s.sentence_index,
+                                "phrase_id": s.phrase_id,
                             }
                             for s in self.evidence.draft.claim_gate.segments
                         ],
@@ -152,6 +154,7 @@ class ReviewCard:
                     "kept_segment": r.kept_segment,
                     "source_passage_id": r.source_passage_id,
                     "sentence_index": r.sentence_index,
+                    "phrase_id": r.phrase_id,
                 }
                 for r in self.edited_text_gate_results
             ] if self.edited_text_gate_results else None,

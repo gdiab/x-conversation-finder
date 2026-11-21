@@ -70,7 +70,8 @@ async def test_review_workflow_replay(make_review_input, x_activities, reply_act
             # At least one non_claim segment should have phrase_id
             non_claims = [s for s in segments if s["kind"] == "non_claim"]
             assert len(non_claims) > 0, "Expected at least one non_claim segment"
-            assert all("phrase_id" in s for s in non_claims), "All non_claim segments must have phrase_id"
+            assert all("phrase_id" in s and s["phrase_id"] is not None for s in non_claims), \
+                f"All non_claim segments must have phrase_id. Got: {non_claims}"
             
             # Replay the history against current workflow code
             replayer = Replayer(
