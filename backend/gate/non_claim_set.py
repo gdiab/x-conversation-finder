@@ -14,9 +14,17 @@ Rules:
 - Everything else must be a quoted claim
 
 Version and provenance:
+  VERSION: 1.1.0
+  DATE: 2026-11-21
+  SOURCE: Architect decision 2 (ADR-0006 Amendment, 2026-11-21)
+  CHANGE (v1.1.0, QA R12): Tightened ALLOWLIST_WORDS to remove all product, 
+    capability, and evaluative words. Removed: works/work, has/have/had, 
+    can/could/would/will/should, setup, we, this/that/these/those, 
+    good/great/easy/well, helpful/nice/hard, really/very/quite, here/there.
+    Frame remainder is now restricted to truly empty conversational words only.
 """
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DATE = "2026-11-21"
 
 import re
