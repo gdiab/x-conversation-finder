@@ -300,7 +300,7 @@ class ReviewWorkflow:
             followup_delay = settings.followup_delay_days
             workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
             
-            await workflow.sleep(timedelta(days=followup_delay))
+            await asyncio.sleep(followup_delay * 86400)  # days to seconds
             
             # Step 6: Check for follow-up replies (capped)
             workflow.logger.info("Follow-up timer fired, checking for replies")
