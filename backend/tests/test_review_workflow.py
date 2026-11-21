@@ -473,13 +473,13 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(sample_post, prod
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activity_funcs.research_post,
-                reply_activity_funcs.draft_reply,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
                 failing_claim_gate,  # Use test-only failing claim gate
                 store_card,
                 update_card,
-                x_activity_funcs.lookup_post,
-                x_activity_funcs.check_followup,
+                x_activities.lookup_post,
+                x_activities.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_claim_fail"
