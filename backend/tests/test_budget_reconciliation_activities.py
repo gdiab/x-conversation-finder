@@ -265,22 +265,36 @@ async def test_reconcile_across_midnight_hits_reservation_day():
     # Simulate reservation from yesterday
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
     
-    # Create yesterday's ledger manually with some reserved reads
+    # Create yesterday's ledger manually with some reserved reads (or update existing)
     db = get_db()
     try:
         db.execute(text("BEGIN IMMEDIATE"))
         
-        ledger = BudgetLedgerDB(
-            date=yesterday,
-            x_reads=15.0,
-            x_cost_usd=15 * settings.x_post_read_cost,
-            inference_calls=0,
-            inference_cost_usd=0.0,
-            last_updated=datetime.now(timezone.utc).isoformat(),
-        )
-        db.add(ledger)
-        db.commit()
+        # Check if ledger exists for yesterday
+        ledger = db.query(BudgetLedgerDB).filter(
+            BudgetLedgerDB.date == yesterday
+        ).first()
         
+        if ledger:
+            # Update existing ledger
+            ledger.x_reads = 15.0
+            ledger.x_cost_usd = 15 * settings.x_post_read_cost
+            ledger.inference_calls = 0
+            ledger.inference_cost_usd = 0.0
+            ledger.last_updated = datetime.now(timezone.utc).isoformat()
+        else:
+            # Create new ledger
+            ledger = BudgetLedgerDB(
+                date=yesterday,
+                x_reads=15.0,
+                x_cost_usd=15 * settings.x_post_read_cost,
+                inference_calls=0,
+                inference_cost_usd=0.0,
+                last_updated=datetime.now(timezone.utc).isoformat(),
+            )
+            db.add(ledger)
+        
+        db.commit()
         initial_reads = ledger.x_reads
     except:
         db.rollback()
@@ -327,21 +341,37 @@ async def test_reconcile_never_goes_negative():
     """Test that reconciliation clamps at zero (never goes negative)."""
     settings = get_settings()
     
-    # Create a ledger with only 1 read
+    # Create a ledger with only 1 read (or update existing)
     db = get_db()
     try:
         db.execute(text("BEGIN IMMEDIATE"))
         
         today = get_today_utc()
-        ledger = BudgetLedgerDB(
-            date=today,
-            x_reads=1.0,
-            x_cost_usd=1 * settings.x_post_read_cost,
-            inference_calls=0,
-            inference_cost_usd=0.0,
-            last_updated=datetime.now(timezone.utc).isoformat(),
-        )
-        db.add(ledger)
+        
+        # Check if ledger exists for today
+        ledger = db.query(BudgetLedgerDB).filter(
+            BudgetLedgerDB.date == today
+        ).first()
+        
+        if ledger:
+            # Update existing ledger to have 1 read
+            ledger.x_reads = 1.0
+            ledger.x_cost_usd = 1 * settings.x_post_read_cost
+            ledger.inference_calls = 0
+            ledger.inference_cost_usd = 0.0
+            ledger.last_updated = datetime.now(timezone.utc).isoformat()
+        else:
+            # Create new ledger
+            ledger = BudgetLedgerDB(
+                date=today,
+                x_reads=1.0,
+                x_cost_usd=1 * settings.x_post_read_cost,
+                inference_calls=0,
+                inference_cost_usd=0.0,
+                last_updated=datetime.now(timezone.utc).isoformat(),
+            )
+            db.add(ledger)
+        
         db.commit()
     except:
         db.rollback()
