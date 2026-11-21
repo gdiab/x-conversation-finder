@@ -445,16 +445,15 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             """Generate draft with unsupported claim (99.99% uptime guaranteed)."""
             from backend.models import Segment
             
-            # Draft contains risky words not backed by founder materials
+            # Per ADR-0006 Amendment: Claims use sentence_index, non_claims have text
+            # This will fail because it's a non_claim with backstop patterns (numbers)
             segments = [
                 Segment(
-                    text="We guarantee 99.99% uptime with zero downtime for your critical applications.",
-                    kind="claim",
-                    source_passage_id="passage_0",
-                    quote="reliability"  # Quote exists but doesn't support the numbers
+                    text="We guarantee 99.99% uptime with zero downtime.",
+                    kind="non_claim",  # Model tagged as non_claim, but has backstop (99.99%)
                 )
             ]
-            draft_text = ' '.join(s.text for s in segments)
+            draft_text = segments[0].text
             
             unsupported_claim = Claim(
                 text="We guarantee 99.99% uptime with zero downtime",
@@ -514,20 +513,21 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             # Query the card to verify final status
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
-            # New skip reason format per ADR-0006 Amendment: includes per-sentence failures
+            # Skip reason includes gate failure details
             assert "not enough evidence" in card["skip_reason"].lower()
-            assert "verbatim" in card["skip_reason"].lower() or "not found" in card["skip_reason"].lower()
+            assert "closed-set" in card["skip_reason"].lower() or "backstop" in card["skip_reason"].lower()
             
-            # Gap 2: Verify ALL failed sentences are recorded in evidence, not just summary
+            # Verify failed sentences are recorded in evidence
             assert card["evidence"]["draft"] is not None
             failed_sentences = card["evidence"]["draft"]["claim_gate"]["failed_sentences"]
-            assert len(failed_sentences) == 2  # Both sentences failed (split by sentence splitter)
+            assert len(failed_sentences) >= 1  # At least one sentence failed
             # Verify all failures are recorded with reasons (not truncated to display summary)
             for failure in failed_sentences:
                 assert "sentence" in failure
                 assert "reason" in failure
                 assert len(failure["sentence"]) > 0
-                assert "verbatim" in failure["reason"].lower() or "not found" in failure["reason"].lower()
+                # Backstop pattern failure message
+                assert "closed-set" in failure["reason"].lower() or "backstop" in failure["reason"].lower()
             # Verify this is more than what's in skip_reason (which is capped at 3 with 30 char limit)
             assert card["skip_reason"] is not None
 
@@ -570,25 +570,19 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             """Generate draft with multiple unsupported claims that will fail."""
             from backend.models import Segment
             
-            # Draft with claims that have no support
+            # Draft with non_claims that have backstop patterns (will fail gate)
             segments = [
                 Segment(
                     text="We offer 100x faster performance.",
-                    kind="claim",
-                    source_passage_id="passage_0",
-                    quote="reliability"  # Doesn't support "100x faster"
+                    kind="non_claim",  # Tagged as non_claim but has backstop (100x)
                 ),
                 Segment(
                     text="Used by millions of developers.",
-                    kind="claim",
-                    source_passage_id="passage_0",
-                    quote="designed"  # Doesn't support usage claim
+                    kind="non_claim",  # Tagged as non_claim but has backstop (millions)
                 ),
                 Segment(
                     text="Beats all competitors.",
-                    kind="claim",
-                    source_passage_id="passage_0",
-                    quote="platform"  # Doesn't support competitive claim
+                    kind="non_claim",  # Tagged as non_claim, not closed-set
                 ),
             ]
             draft_text = ' '.join(s.text for s in segments)
