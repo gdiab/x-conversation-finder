@@ -315,9 +315,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                     <span>{segment.text}</span>
                   </div>
                 </div>
-                {isClaim && segment.quote && (
+                {isClaim && segment.sentence_index !== null && (
                   <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-                    <strong>Quote:</strong> "{segment.quote}"
+                    <strong>Source:</strong> sentence {segment.sentence_index}
                   </div>
                 )}
                 {matchedPassage && (
