@@ -18,6 +18,10 @@ import re
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+# Constants
+SECONDS_PER_DAY = 86400
+QUICK_ACTIVITY_TIMEOUT_SEC = 10
+
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
         ReviewCard,
@@ -272,7 +276,7 @@ class ReviewWorkflow:
                         updates={"status": ReviewStatus.EXPIRED.value},
                         idempotency_key=f"{workflow_id}:update:expire",
                     ),
-                    start_to_close_timeout=timedelta(seconds=10),
+                    start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
                 )
                 
                 return "expired"
@@ -291,7 +295,7 @@ class ReviewWorkflow:
                         },
                         idempotency_key=f"{workflow_id}:update:skip",
                     ),
-                    start_to_close_timeout=timedelta(seconds=10),
+                    start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
                 )
                 
                 return "skipped"
@@ -332,14 +336,14 @@ class ReviewWorkflow:
                         updates={"status": ReviewStatus.APPROVED_NOT_CONFIRMED.value},
                         idempotency_key=f"{workflow_id}:update:not_confirmed",
                     ),
-                    start_to_close_timeout=timedelta(seconds=10),
+                    start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
                 )
                 
                 return "approved_not_confirmed"
             
             # Step 5: Start follow-up timer (from config) - interruptible
             followup_delay = input.config.followup_delay_days
-            followup_seconds = followup_delay * 86400  # days to seconds
+            followup_seconds = followup_delay * SECONDS_PER_DAY
             workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
             
             # Determinism: Use wait_condition for interruptible timer
