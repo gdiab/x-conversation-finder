@@ -328,19 +328,36 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
 @pytest.mark.asyncio
 async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, x_activities, reply_activities):
     """
-    S-3: Test that _edit_in_flight flag prevents concurrent approve.
+    S-3: Test that _edit_in_flight flag prevents concurrent approve (REAL concurrency test).
     
-    The concurrency protection works because:
-    1. _edit_in_flight is set before awaiting the gate activity
-    2. Temporal runs validators at await points
-    3. A concurrent approve's validator will see the flag and reject
-    4. The flag is cleared in finally after the gate completes
-    
-    This test verifies:
-    - Sequential edit-then-approve works correctly
-    - The flag exists and is used by the validator
-    - The architecture prevents stale edited_text_gate_results
+    Uses a blocking gate activity to create actual concurrency:
+    1. Register verify_edited_text activity that blocks on asyncio.Event
+    2. Start edit Update (wait for ACCEPTED, not completed)
+    3. While gate activity is blocked, send approve
+    4. Approve validator should see _edit_in_flight=True and reject with WorkflowUpdateFailedError
+    5. Release the block, edit completes
+    6. Later approve should work
     """
+    import asyncio
+    from temporalio import activity
+    from temporalio.client import WorkflowUpdateStage
+    
+    # Create blocking event for the gate activity
+    gate_block_event = asyncio.Event()
+    gate_called_event = asyncio.Event()
+    
+    # Custom verify_edited_text that blocks on the event
+    @activity.defn(name="verify_edited_text")
+    async def verify_edited_text_blocking(input):
+        """Blocking version of verify_edited_text for concurrency test."""
+        activity.logger.info("Gate activity started, will block on event")
+        gate_called_event.set()
+        # Block until event is set
+        await gate_block_event.wait()
+        activity.logger.info("Gate activity unblocked, proceeding")
+        # Return empty list (all sentences passed) - we're testing concurrency, not gate logic
+        return []
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
@@ -350,13 +367,13 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
                 reply_activities.research_post,
                 reply_activities.draft_reply,
                 claim_gate,
-                verify_edited_text,
+                verify_edited_text_blocking,  # Use blocking version
                 store_card,
                 update_card,
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_s3_sequential"
+            workflow_id = f"review:test:{review_input.post.id}_s3_concurrent"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -367,28 +384,44 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
             
             await env.sleep(1)
             
-            # Edit with valid text
+            # Start edit Update, wait only for ACCEPTED (not completed)
             client_request_id = str(uuid.uuid4())
-            await handle.execute_update(
+            edit_handle = await handle.start_update(
                 "edit",
-                args=["Thanks! Our product helps developers build reliable systems. Happy to help.", client_request_id]
+                args=["Thanks! Our product helps developers build reliable systems. Happy to help.", client_request_id],
+                wait_for_stage=WorkflowUpdateStage.ACCEPTED,
             )
+            
+            # Wait for gate activity to actually start
+            await gate_called_event.wait()
+            await asyncio.sleep(0.1)  # Small delay to ensure activity is truly blocked
+            
+            # NOW try to approve while edit gate is in flight
+            # S-3: This should raise an exception because _edit_in_flight is True
+            # The validator checks `if self._edit_in_flight: raise ValueError("Cannot approve while edit gate is in progress...")`
+            client_request_id2 = str(uuid.uuid4())
+            with pytest.raises(Exception):
+                await handle.execute_update(
+                    "approve",
+                    args=["https://x.com/test/status/999", client_request_id2, False]
+                )
+            # Exception was raised, proving concurrent approve is rejected
+            
+            # Release the block so edit can complete
+            gate_block_event.set()
+            
+            # Wait for edit to complete
+            await edit_handle.result()
             
             await env.sleep(1)
             
-            # Approve should work now that edit completed (no failures)
-            client_request_id2 = str(uuid.uuid4())
+            # Now approve should work (no failures in the edit)
+            client_request_id3 = str(uuid.uuid4())
             approve_result = await handle.execute_update(
                 "approve",
-                args=["https://x.com/test/status/999", client_request_id2, False]
+                args=["https://x.com/test/status/999", client_request_id3, False]
             )
             assert "Approved" in approve_result
-            
-            # The validator code (validate_approve) checks:
-            # if self._edit_in_flight:
-            #     raise ValueError("Cannot approve while edit gate is in progress...")
-            # This prevents approve from seeing stale edited_text_gate_results when
-            # another client's edit is awaiting the gate activity.
 
 
 @pytest.mark.asyncio
