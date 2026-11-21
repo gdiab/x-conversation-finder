@@ -63,7 +63,6 @@ class Settings(BaseSettings):
     # Follow-up settings (ADR-0002: follow-up timer)
     # Set 2026-11-21: 3 days after confirmation
     followup_delay_days: int = 3
-    followup_check_max_results: int = 10
     
     # Activity timeouts (Temporal)
     # Set 2026-11-21: timeouts for activity execution

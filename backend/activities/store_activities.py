@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
-import json
 import asyncio
 
 from backend.models import ReviewCard, ReviewStatus, Evidence
@@ -69,7 +68,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
     
     return ReviewCardDB(
         workflow_id=card.workflow_id,
-        post_data=json.dumps({
+        post_data={
             "id": card.post.id,
             "text": card.post.text,
             "author": {
@@ -88,8 +87,8 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
             "in_reply_to_user_id": card.post.in_reply_to_user_id,
             "reply_settings": card.post.reply_settings,
             "url": card.post.url,
-        }),
-        evidence_data=json.dumps({
+        },
+        evidence_data={
             "post_id": card.evidence.post_id,
             "matched_topic": card.evidence.matched_topic,
             "why_it_fits": card.evidence.why_it_fits,
@@ -134,7 +133,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "model_used": card.evidence.draft.model_used,
             } if card.evidence.draft else None,
             "skip_reason": card.evidence.skip_reason,
-        }),
+        },
         status=status_str,
         created_at=card.created_at,
         updated_at=card.updated_at,
@@ -142,7 +141,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
         posted_url=card.posted_url,
         reply_post_id=card.reply_post_id,
         skip_reason=card.skip_reason,
-        followup_replies=json.dumps(card.followup_replies) if card.followup_replies else None,
+        followup_replies=card.followup_replies if card.followup_replies else None,
     )
 
 
@@ -204,10 +203,10 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
             elif key == "skip_reason":
                 card_db.skip_reason = value
             elif key == "followup_replies":
-                card_db.followup_replies = json.dumps(value) if value else None
+                card_db.followup_replies = value if value else None
             elif key == "evidence":
                 # Update evidence_data JSON
-                evidence_data = json.loads(card_db.evidence_data)
+                evidence_data = card_db.evidence_data
                 if hasattr(value, 'draft') and value.draft:
                     evidence_data["draft"] = {
                         "text": value.draft.text,
@@ -238,7 +237,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                         "token_count": value.draft.token_count,
                         "model_used": value.draft.model_used,
                     }
-                card_db.evidence_data = json.dumps(evidence_data)
+                card_db.evidence_data = evidence_data
         
         db.commit()
         return True
@@ -283,8 +282,8 @@ def _get_card_sync(input: GetCardInput) -> Optional[Dict]:
         # Return as dict
         return {
             "workflow_id": card_db.workflow_id,
-            "post": json.loads(card_db.post_data),
-            "evidence": json.loads(card_db.evidence_data),
+            "post": card_db.post_data,
+            "evidence": card_db.evidence_data,
             "status": card_db.status,
             "created_at": card_db.created_at,
             "updated_at": card_db.updated_at,
@@ -292,7 +291,7 @@ def _get_card_sync(input: GetCardInput) -> Optional[Dict]:
             "posted_url": card_db.posted_url,
             "reply_post_id": card_db.reply_post_id,
             "skip_reason": card_db.skip_reason,
-            "followup_replies": json.loads(card_db.followup_replies) if card_db.followup_replies else None,
+            "followup_replies": card_db.followup_replies if card_db.followup_replies else None,
         }
     finally:
         db.close()
@@ -330,9 +329,9 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
             return False
         
         # Delete post text on 404 per X API compliance, keep structure
-        post_data = json.loads(card_db.post_data)
+        post_data = card_db.post_data
         post_data["text"] = "[removed - post deleted]"
-        card_db.post_data = json.dumps(post_data)
+        card_db.post_data = post_data
         
         db.commit()
         return True
@@ -371,8 +370,8 @@ def get_all_cards() -> List[Dict]:
         return [
             {
                 "workflow_id": card.workflow_id,
-                "post": json.loads(card.post_data),
-                "evidence": json.loads(card.evidence_data),
+                "post": card.post_data,
+                "evidence": card.evidence_data,
                 "status": card.status,
                 "created_at": card.created_at,
                 "updated_at": card.updated_at,
@@ -380,7 +379,7 @@ def get_all_cards() -> List[Dict]:
                 "posted_url": card.posted_url,
                 "reply_post_id": card.reply_post_id,
                 "skip_reason": card.skip_reason,
-                "followup_replies": json.loads(card.followup_replies) if card.followup_replies else None,
+                "followup_replies": card.followup_replies if card.followup_replies else None,
             }
             for card in cards
         ]

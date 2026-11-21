@@ -77,11 +77,7 @@ def get_session_factory():
 def get_db() -> Session:
     """Get a database session."""
     SessionLocal = get_session_factory()
-    db = SessionLocal()
-    try:
-        return db
-    finally:
-        pass
+    return SessionLocal()
 
 
 def init_db():
