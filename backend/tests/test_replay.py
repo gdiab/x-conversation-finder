@@ -19,7 +19,7 @@ from backend.adapters import FakeXClient, FakeReplyAgent
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_replay(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_replay(make_review_input, x_activities, reply_activities):
     """Test Review workflow replay - full flow with approve, confirm, followup and check_followup."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -38,19 +38,13 @@ async def test_review_workflow_replay(sample_post, product_brief, x_activities, 
                 delete_post_text,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_replay"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_replay"
             
             # Run workflow with short followup delay for testing
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                    followup_delay_days=1,  # Short delay for test
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
@@ -99,6 +93,9 @@ async def test_topic_watch_workflow_replay(product_brief, x_activities, reply_ac
             workflow_id = "watch:test:reliability_replay"
             
             # Run workflow and record history
+            from backend.workflows.topic_watch import TopicWatchConfig
+            from backend.workflows.review import ReviewConfig
+            
             handle = await env.client.start_workflow(
                 TopicWatchWorkflow.run,
                 TopicWatchInput(
@@ -106,10 +103,11 @@ async def test_topic_watch_workflow_replay(product_brief, x_activities, reply_ac
                     topic="reliability",
                     query="reliability",
                     product_brief=product_brief,
-                    poll_interval_hours=1,
                     max_results=5,
                     confidence_threshold=0.5,
                     continue_as_new_after=100,
+                    config=TopicWatchConfig(poll_interval_hours=1),
+                    review_config=ReviewConfig(followup_delay_days=1),
                 ),
                 id=workflow_id,
                 task_queue="test",
@@ -135,7 +133,7 @@ async def test_topic_watch_workflow_replay(product_brief, x_activities, reply_ac
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_replay_with_skip(sample_post, product_brief, x_activities, reply_activities):
+async def test_review_workflow_replay_with_skip(make_review_input, x_activities, reply_activities):
     """Test Review workflow replay with skip signal."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -154,18 +152,13 @@ async def test_review_workflow_replay_with_skip(sample_post, product_brief, x_ac
                 delete_post_text,
             ],
         ):
-            workflow_id = f"review:test:{sample_post.id}_replay_skip"
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_replay_skip"
             
             # Run workflow and record history
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                ReviewInput(
-                    post=sample_post,
-                    topic="reliability",
-                    product_brief=product_brief,
-                    account="test",
-                    confidence_threshold=0.5,
-                ),
+                review_input,
                 id=workflow_id,
                 task_queue="test",
             )
