@@ -12,7 +12,7 @@ Per NB3 and R3-B3: Atomic reserve-then-commit in one SQLite transaction (BEGIN I
 from datetime import datetime, timezone
 from sqlalchemy import text
 from temporalio.exceptions import ApplicationError
-from backend.database import get_db, BudgetLedgerDB
+from backend.database import get_db, BudgetLedgerDB, GlobalSettingsDB
 from backend.config import get_settings
 
 
@@ -36,16 +36,19 @@ def _check_kill_switch(db):
     Check kill switch (env/config flag + DB flag).
     
     Raises BudgetExceeded if either kill switch is active.
+    Per S-2: DB kill switch persists across days until explicitly cleared.
     """
     settings = get_settings()
     
     if settings.budget_kill_switch:
         raise BudgetExceeded("Budget kill switch enabled in config")
     
-    today = get_today_utc()
-    ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
+    # Check global kill switch (persists until cleared, not per-day)
+    global_setting = db.query(GlobalSettingsDB).filter(
+        GlobalSettingsDB.key == "kill_switch"
+    ).first()
     
-    if ledger and ledger.kill_switch:
+    if global_setting and global_setting.value == "true":
         raise BudgetExceeded("Budget kill switch enabled in database")
 
 
@@ -104,7 +107,6 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> floa
                 x_cost_usd=cost,
                 inference_calls=0,
                 inference_cost_usd=0.0,
-                kill_switch=False,
                 last_updated=datetime.now(timezone.utc).isoformat(),
             )
             db.add(ledger)
@@ -174,7 +176,6 @@ def reserve_inference_budget(input_tokens: int, output_tokens: int) -> float:
                 x_cost_usd=0.0,
                 inference_calls=1,
                 inference_cost_usd=cost,
-                kill_switch=False,
                 last_updated=datetime.now(timezone.utc).isoformat(),
             )
             db.add(ledger)
@@ -205,6 +206,12 @@ def get_today_budget() -> dict:
     try:
         ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
         
+        # Check global kill switch (persists across days)
+        global_setting = db.query(GlobalSettingsDB).filter(
+            GlobalSettingsDB.key == "kill_switch"
+        ).first()
+        db_kill_switch = (global_setting.value == "true") if global_setting else False
+        
         if not ledger:
             return {
                 "date": today,
@@ -215,7 +222,7 @@ def get_today_budget() -> dict:
                 "inference_calls": 0,
                 "inference_cost_usd": 0.0,
                 "inference_limit_usd": settings.daily_inference_limit_usd,
-                "kill_switch": settings.budget_kill_switch,
+                "kill_switch": settings.budget_kill_switch or db_kill_switch,
             }
         
         return {
@@ -227,7 +234,7 @@ def get_today_budget() -> dict:
             "inference_calls": ledger.inference_calls,
             "inference_cost_usd": ledger.inference_cost_usd,
             "inference_limit_usd": settings.daily_inference_limit_usd,
-            "kill_switch": settings.budget_kill_switch or (ledger.kill_switch if ledger else False),
+            "kill_switch": settings.budget_kill_switch or db_kill_switch,
         }
     finally:
         db.close()
@@ -235,30 +242,27 @@ def get_today_budget() -> dict:
 
 def set_kill_switch(enabled: bool):
     """
-    Set the kill switch in the database for today.
+    Set the global kill switch in the database.
     
+    Per S-2: Kill switch persists across days until explicitly cleared.
     This is in addition to the env/config kill switch.
     """
-    today = get_today_utc()
-    
     db = get_db()
     try:
-        ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
+        global_setting = db.query(GlobalSettingsDB).filter(
+            GlobalSettingsDB.key == "kill_switch"
+        ).first()
         
-        if not ledger:
-            ledger = BudgetLedgerDB(
-                date=today,
-                x_reads=0,
-                x_cost_usd=0.0,
-                inference_calls=0,
-                inference_cost_usd=0.0,
-                kill_switch=enabled,
+        if not global_setting:
+            global_setting = GlobalSettingsDB(
+                key="kill_switch",
+                value="true" if enabled else "false",
                 last_updated=datetime.now(timezone.utc).isoformat(),
             )
-            db.add(ledger)
+            db.add(global_setting)
         else:
-            ledger.kill_switch = enabled
-            ledger.last_updated = datetime.now(timezone.utc).isoformat()
+            global_setting.value = "true" if enabled else "false"
+            global_setting.last_updated = datetime.now(timezone.utc).isoformat()
         
         db.commit()
     finally:

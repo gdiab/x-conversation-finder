@@ -38,14 +38,9 @@ def test_db_isolation(tmp_path, monkeypatch, request):
     # Initialize fresh DB
     init_db()
     
-    # Ensure kill switch is off
-    from sqlalchemy import text
-    db = get_db()
-    try:
-        db.execute(text("UPDATE budget_ledger SET kill_switch = 0"))
-        db.commit()
-    finally:
-        db.close()
+    # Ensure kill switch is off (per S-2: global setting, not per-day)
+    from backend.budget import set_kill_switch
+    set_kill_switch(False)
     
     yield db_path
 

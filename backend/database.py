@@ -44,7 +44,16 @@ class BudgetLedgerDB(Base):
     x_cost_usd = Column(Float, default=0.0)
     inference_calls = Column(Float, default=0.0)
     inference_cost_usd = Column(Float, default=0.0)
-    kill_switch = Column(Boolean, default=False)
+    last_updated = Column(String, nullable=False)
+
+
+class GlobalSettingsDB(Base):
+    """Global settings that persist across days."""
+    
+    __tablename__ = "global_settings"
+    
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
     last_updated = Column(String, nullable=False)
 
 
