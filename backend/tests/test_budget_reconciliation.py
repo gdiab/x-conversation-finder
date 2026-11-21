@@ -53,9 +53,9 @@ def temp_db_reconcile():
 
 
 def test_reconcile_x_reads_refunds_unused(temp_db_reconcile):
-    """R4-B2: Reconcile refunds unused X reads."""
+    """R5-B1: Reconcile refunds unused X reads (two-way)."""
     # Reserve 10, use 5
-    cost_reserved = reserve_x_budget(10, 0.005)
+    cost_reserved, reservation_date = reserve_x_budget(10, 0.005)
     assert cost_reserved == 0.05
     
     budget = get_today_budget()
@@ -63,7 +63,15 @@ def test_reconcile_x_reads_refunds_unused(temp_db_reconcile):
     assert budget["x_cost_usd"] == 0.05
     
     # Reconcile to actual
-    cost_actual = reconcile_x_reads(10, 5, 0.005)
+    cost_actual = reconcile_x_reads(
+        reserved_reads=10,
+        actual_reads=5,
+        reservation_date=reservation_date,
+        workflow_id="test-wf",
+        activity_id="test-act",
+        attempt=1,
+        cost_per_read=0.005
+    )
     assert cost_actual == 0.025
     
     # Check ledger was updated
@@ -73,10 +81,18 @@ def test_reconcile_x_reads_refunds_unused(temp_db_reconcile):
 
 
 def test_reconcile_x_reads_no_refund_when_equal(temp_db_reconcile):
-    """R4-B2: No refund when actual equals reserved."""
-    reserve_x_budget(10, 0.005)
+    """R5-B1: No change when actual equals reserved."""
+    cost, date = reserve_x_budget(10, 0.005)
     
-    cost_actual = reconcile_x_reads(10, 10, 0.005)
+    cost_actual = reconcile_x_reads(
+        reserved_reads=10,
+        actual_reads=10,
+        reservation_date=date,
+        workflow_id="test-wf",
+        activity_id="test-act",
+        attempt=1,
+        cost_per_read=0.005
+    )
     assert cost_actual == 0.05
     
     budget = get_today_budget()
@@ -85,9 +101,9 @@ def test_reconcile_x_reads_no_refund_when_equal(temp_db_reconcile):
 
 
 def test_reconcile_inference_tokens_refunds_unused(temp_db_reconcile):
-    """R4-B2: Reconcile refunds unused inference tokens."""
+    """R5-B1: Reconcile refunds unused inference tokens."""
     # Reserve 1000 input / 500 output
-    cost_reserved = reserve_inference_budget(1000, 500)
+    cost_reserved, date = reserve_inference_budget(1000, 500)
     expected_reserved = (1000 * 0.00000015) + (500 * 0.0000006)
     assert abs(cost_reserved - expected_reserved) < 1e-9
     
@@ -96,7 +112,16 @@ def test_reconcile_inference_tokens_refunds_unused(temp_db_reconcile):
     assert abs(budget["inference_cost_usd"] - expected_reserved) < 1e-9
     
     # Reconcile to actual (600 input / 300 output)
-    cost_actual = reconcile_inference_tokens(1000, 500, 600, 300)
+    cost_actual = reconcile_inference_tokens(
+        reserved_input=1000,
+        reserved_output=500,
+        actual_input=600,
+        actual_output=300,
+        reservation_date=date,
+        workflow_id="test-wf",
+        activity_id="test-act",
+        attempt=1
+    )
     expected_actual = (600 * 0.00000015) + (300 * 0.0000006)
     assert abs(cost_actual - expected_actual) < 1e-9
     
@@ -107,29 +132,37 @@ def test_reconcile_inference_tokens_refunds_unused(temp_db_reconcile):
 
 
 def test_reconcile_inference_tokens_no_refund_when_more(temp_db_reconcile):
-    """R4-B2: No refund when actual exceeds reserved."""
-    reserve_inference_budget(100, 50)
+    """R5-B1: Charge delta when actual exceeds reserved (two-way)."""
+    cost, date = reserve_inference_budget(100, 50)
     
-    # Actual exceeds reserved
-    cost_actual = reconcile_inference_tokens(100, 50, 200, 100)
+    # Actual exceeds reserved - now charges the delta
+    cost_actual = reconcile_inference_tokens(
+        reserved_input=100,
+        reserved_output=50,
+        actual_input=200,
+        actual_output=100,
+        reservation_date=date,
+        workflow_id="test-wf",
+        activity_id="test-act",
+        attempt=1
+    )
     expected = (200 * 0.00000015) + (100 * 0.0000006)
     assert abs(cost_actual - expected) < 1e-9
     
-    # Ledger should still show original reservation (no negative refund)
+    # Ledger should now show the full actual cost (charged delta)
     budget = get_today_budget()
-    original = (100 * 0.00000015) + (50 * 0.0000006)
-    assert abs(budget["inference_cost_usd"] - original) < 1e-9
+    assert abs(budget["inference_cost_usd"] - expected) < 1e-9
 
 
 def test_multiple_reconciliations_accumulate(temp_db_reconcile):
-    """R4-B2: Multiple reconciliations accumulate correctly."""
+    """R5-B1: Multiple reconciliations accumulate correctly."""
     # First operation: reserve 10, use 7
-    reserve_x_budget(10, 0.005)
-    reconcile_x_reads(10, 7, 0.005)
+    _, date1 = reserve_x_budget(10, 0.005)
+    reconcile_x_reads(10, 7, date1, "wf1", "act1", 1, 0.005)
     
     # Second operation: reserve 10, use 6
-    reserve_x_budget(10, 0.005)
-    reconcile_x_reads(10, 6, 0.005)
+    _, date2 = reserve_x_budget(10, 0.005)
+    reconcile_x_reads(10, 6, date2, "wf2", "act2", 1, 0.005)
     
     budget = get_today_budget()
     assert budget["x_reads"] == 13, "Should have 7 + 6 = 13 reads"
