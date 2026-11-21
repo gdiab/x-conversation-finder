@@ -44,6 +44,7 @@ Two shapes were sketched before choosing.
 - The review card is the one place the evidence trail is rendered, so ADR-0006's schema is its contract.
 - Many small workflows: fine for Temporal, but we need visibility via search attributes (account, topic, status).
 - A human decision after the timeout is refused with a clear message in the UI.
+- **R4-SF2:** The follow-up timer (default: 3 days after approval) is a durable Temporal timer and cannot be cancelled once the workflow reaches the approved state. To skip follow-up checking, the founder must decline approval instead.
 - **Assumption for George:** "nudge-replies" was read as steering a redraft. If he meant "remind me later" or "refresh the post's replies", it's a small change (a snooze timer, or a `refresh_thread` activity).
 - **Decided (Q3, 2026-11-20, George):** Python backend, TypeScript review app. The shapes above hold in both Temporal SDKs.
 - **Caveat:** the Temporal behaviour described here comes from background knowledge and the 2nd-brain note; docs.temporal.io was not fetched.
