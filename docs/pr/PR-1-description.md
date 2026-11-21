@@ -1,9 +1,9 @@
 # X Conversation Finder - MVP Slice 1
 
 **Status:** ✅ Ready for review  
-**HEAD:** `5eeb730` - Add complete E2E test starting from TopicWatch  
+**HEAD:** `3c4b2a4` - Fix fake client reply mapping and add test for post 1005  
 **Base:** `dfb08a6` - Initial commit (empty repository)  
-**Tests:** 62/62 passing (0 skipped, 0 xfails)  
+**Tests:** 74/74 passing (0 skipped, 0 xfails)  
 **Frontend:** ✅ Build passing
 
 ---
@@ -189,3 +189,34 @@ All E2E tests use fake adapters.
 ## Ready for Merge
 
 All QA items complete. Tests passing. Frontend builds. E2E test proves end-to-end flow with real durable Temporal timer, starting from TopicWatch naturally spawning Review workflows.
+
+---
+
+## Commit History (SHA Map)
+
+All commits from `dfb08a6` (base) to `3c4b2a4` (HEAD):
+
+```
+caddb0e - B-1: Implement two-way budget reconciliation with idempotency
+39a3fc1 - B-1: Update all activities to use two-way budget reconciliation
+e88cfb5 - B-1: Add comprehensive activity-level budget reconciliation tests
+7bdebaf - B-1: Fix test SQL text() wrapping for SQLAlchemy 2.0
+f670b09 - S-1: Extend capability detection to pronoun/implicit subjects
+4494632 - S-2: Add comprehensive tests for 429 rate limit handling
+01b9c82 - S-4, S-7, N-1, N-2: Delete dead code and fix dependencies
+3d9e2e7 - S-3: Add poll interval floor with validator
+9c3abca - S-5: Type UI status as ReviewStatus union
+ae5cdba - N-4: Add CAN test assertions for state carryover
+36ea5a6 - S-6: Add explicit check_followup verification to E2E script
+1e2bc3a - N-3: Fix PR body base SHA (dfb08a6, not 3973ae2)
+4b4a1eb - Fix N-1 cleanup: Remove ReviewStatus import, fix budget test
+4a74340 - Fix N-1 cleanup: Replace all ReviewStatus enum usages with literals
+2529f31 - Fix N-1 cleanup: Remove final .value accessor
+237bfc5 - Fix budget reconciliation tests for R5-B1 signatures
+68b624e - Fix S-2 tests: Mock httpx.AsyncClient properly
+3c72270 - Fix N-4: Remove extra sleep that caused test timeout
+31e88b5 - Fix test isolation: Use upsert for ledger setup in activity tests
+3c4b2a4 - Fix fake client reply mapping and add test for post 1005
+```
+
+Total: 20 commits addressing R5 QA (1 blocker, 7 should-fix, 5 nits) plus test fixes.

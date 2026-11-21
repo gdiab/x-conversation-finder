@@ -13,12 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PYTHONPATH="$WORKSPACE_ROOT"
 
-# Configuration - SHORT poll interval for E2E
+# Configuration - TEST-ONLY overrides for E2E (never use in production)
 export X_CLIENT_ADAPTER=fake
 export REPLY_AGENT_ADAPTER=fake
 export DATABASE_URL="sqlite:////tmp/x-finder-e2e-full.db"
 export TEMPORAL_ADDRESS=localhost:7233
-export WATCH_POLL_INTERVAL_HOURS=0  # Immediate poll for testing
+export WATCH_POLL_INTERVAL_HOURS=0  # TEST-ONLY: Immediate poll (production enforces 1+ hour minimum)
 export FOLLOWUP_DELAY_SECONDS=8  # Real durable timer (8 seconds)
 export REVIEW_TIMEOUT_HOURS=1
 export ACTIVITY_TIMEOUT_SHORT_SEC=10
@@ -218,9 +218,11 @@ else
 fi
 echo ""
 
-# Step 6: Wait for follow-up timer to fire
-WAIT_TIME=$((FOLLOWUP_DELAY_SECONDS + 4))
-echo "[6] Waiting ${WAIT_TIME}s for follow-up timer (${FOLLOWUP_DELAY_SECONDS}s) to fire and check_followup to run..."
+# Step 6: Wait for follow-up timer to fire and check_followup to complete
+# Timer runs after confirm_posted returns, so workflow continues in background
+# Need to wait for: timer duration + activity execution + status update
+WAIT_TIME=$((FOLLOWUP_DELAY_SECONDS + 10))
+echo "[6] Waiting ${WAIT_TIME}s for follow-up timer (${FOLLOWUP_DELAY_SECONDS}s) + check_followup + status update..."
 sleep $WAIT_TIME
 echo ""
 

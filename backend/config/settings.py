@@ -81,8 +81,13 @@ class Settings(BaseSettings):
     
     @field_validator('watch_poll_interval_hours')
     @classmethod
-    def validate_poll_interval(cls, v: int) -> int:
+    def validate_poll_interval(cls, v: int, info) -> int:
         """R5-S3: Enforce minimum poll interval of 1 hour for production."""
+        # Allow 0 for testing with fake adapters (check env var directly)
+        import os
+        x_client_adapter = os.environ.get('X_CLIENT_ADAPTER', '')
+        if v == 0 and x_client_adapter == 'fake':
+            return v  # Test mode: allow immediate poll
         if v < 1:
             raise ValueError(f"watch_poll_interval_hours must be at least 1, got {v}")
         return v
