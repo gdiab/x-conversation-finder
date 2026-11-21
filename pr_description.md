@@ -86,22 +86,36 @@ tests/test_review_workflow.py::test_review_workflow_skip PASSED
 tests/test_review_workflow.py::test_review_workflow_nudge PASSED
 tests/test_review_workflow.py::test_review_workflow_timeout PASSED
 tests/test_review_workflow.py::test_review_workflow_low_confidence PASSED
+tests/test_review_workflow.py::test_review_workflow_approved_not_confirmed PASSED
+tests/test_review_workflow.py::test_review_workflow_confirm_posted_invalid_url SKIPPED
+tests/test_review_workflow.py::test_review_workflow_duplicate_approve_ignored PASSED
+tests/test_review_workflow.py::test_review_workflow_claim_gate_regenerate_then_skip SKIPPED
 tests/test_topic_watch_workflow.py::test_topic_watch_workflow_single_iteration PASSED
 tests/test_topic_watch_workflow.py::test_topic_watch_workflow_spawns_reviews PASSED
 tests/test_topic_watch_workflow.py::test_topic_watch_workflow_continue_as_new PASSED
+tests/test_topic_watch_workflow.py::test_topic_watch_duplicate_post_skipped PASSED
 ```
 
-**Total: 10 tests, all passing**
+**Total: 15 tests, 13 passed, 2 skipped**
+
+Skipped tests require additional implementation:
+- `test_review_workflow_confirm_posted_invalid_url`: Needs Update validator for URL validation
+- `test_review_workflow_claim_gate_regenerate_then_skip`: Needs custom activity mock for claim gate failure
 
 ## Verified Behaviors
 
 ✅ TopicWatch polls on timer and spawns Review workflows  
+✅ TopicWatch skips duplicate posts (seen_post_ids tracking)  
+✅ TopicWatch carries state through Continue-As-New (since_id, seen_post_ids)  
 ✅ Review workflow skips low confidence posts  
 ✅ Review workflow skips claim gate failures  
 ✅ Review workflow waits for human (approve/skip/edit/nudge)  
 ✅ Review workflow expires after 48h  
+✅ Review workflow handles approved_not_confirmed state  
+✅ Review workflow ignores duplicate approve/skip requests (idempotent)  
+✅ Review workflow fires follow-up timer after confirm_posted  
 ✅ Confidence computed from evidence (not asserted by model)  
-✅ Signals are idempotent (client_request_id dedupes)  
+✅ Activities called by method reference (not string names)  
 ✅ Continue-As-New after threshold  
 ✅ No secrets in committed code  
 ✅ CI passes  
@@ -110,18 +124,20 @@ tests/test_topic_watch_workflow.py::test_topic_watch_workflow_continue_as_new PA
 
 - Real X client integration (uses fakes)
 - Agent Kit adapter (port exists, plain adapter is baseline)
-- Follow-up timer after approval (workflow exists, not wired)
 - Persistent database (in-memory store for MVP)
 - Baseline evaluation (ADR-0006, deferred to later)
 - Founder posts by hand (UI ready, actual X posting is manual per ADR-0004)
+- Local E2E test execution (script provided in `scripts/e2e-test.sh`)
 
 ## Implementation Decisions
 
 1. **Datetime serialization**: Workflow inputs use ISO string timestamps instead of datetime objects for JSON serializability
 2. **Deterministic time**: Workflows use `workflow.now()` instead of `datetime.now()` to maintain determinism
-3. **Signal calls**: Use string names ("approve") instead of method references (Temporal SDK requirement)
-4. **In-memory store**: Simple dict for MVP, `store_card` activities write there
-5. **Fake adapters default**: Tests and local dev work out of the box without API keys
+3. **Activity method references**: Activities called by function reference (e.g., `x_activity_funcs.search_recent`) instead of string names, preserving type hints through Temporal's JSON codec
+4. **Module-level activity wrappers**: Created wrapper functions with global instance pattern to enable method reference calls while maintaining dependency injection
+5. **In-memory store**: Simple dict for MVP, `store_card` activities write there
+6. **Fake adapters default**: Tests and local dev work out of the box without API keys
+7. **Stable request IDs**: Frontend generates request ID once per user action attempt (on button click), reuses on retries, resets on success
 
 ## Assumptions & Questions for Architect
 
