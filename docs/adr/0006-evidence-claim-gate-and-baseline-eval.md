@@ -58,12 +58,7 @@ Claims are quoted, not paraphrased. A claim segment references a founder passage
 
 2. **Claim sentence insertion:** Code splits the founder passage into sentences using a deterministic splitter (fixed to not break on decimals like 99.99%), validates the sentence_index is in range, and inserts that exact sentence as the segment text. The only normalization allowed is trimming trailing punctuation for flow. No partial spans. An invalid passage id or out-of-range index fails the segment.
 
-3. **Closed-set non_claim determination (WHOLE sentence, code decides):** A sentence is `non_claim` ONLY if, after stripping a leading greeting/thanks clause, the REMAINDER is:
-   - Empty
-   - A question (ends with `?`) with no product+comparative/number/capability/competitor
-   - An explicit first-person opinion (`I think`, `I believe`, `In my opinion`, `In my experience`, etc.) that doesn't mention the product with a claim indicator
-   
-   Product words include: `we`, `our`, `ours`, `us`, `it`, `this`, `the tool/product/platform/service/app/system`. A trailing `?` must not make a claim-bearing sentence a question non_claim. Confusable homoglyphs (Cyrillic, etc.) are detected via a confusables skeleton fold before matching.
+3. **Closed-set non_claim determination:** Non-claim text is a closed set defined in code (`backend/gate/non_claim_set.py`, versioned and dated): exact whole sentences after normalization (greetings, thanks, offers such as 'happy to share more details'), plus question or first-person opinion frames whose remainder contains only allowlisted words. Open-ended tails are not accepted; a frame does not make an assertion a non_claim, and numbers are never allowed. Everything else must be a quoted claim. Quoted claim sentences must stand alone: a sentence opening with an unresolved referent (it, this, that, these, they) is not selectable, and auto-joining with the previous sentence is rejected. Deferred: post-echo questions and an independent verifier, both to be evaluated under ADR-0003. Consequence: replies are deliberately conservative in v1; the baseline eval measures whether that costs too much precision.
 
 4. **Pattern backstop (overrides non_claim):** These patterns always classify text as a claim, regardless of the model's tag:
    - Any digit or unit (10k, 99%, 5 GB, 24/7, integrations count)

@@ -60,7 +60,8 @@ jobs:
     - name: Install Temporal CLI
       run: |
         VERSION="1.1.1"
-        curl -L "https://temporal.download/cli/archive/v${VERSION}/temporal_cli_${VERSION}_linux_amd64.tar.gz" -o temporal.tar.gz
+        # Use GitHub releases URL instead of temporal.download (which returns 404)
+        curl -L "https://github.com/temporalio/cli/releases/download/v${VERSION}/temporal_cli_${VERSION}_linux_amd64.tar.gz" -o temporal.tar.gz
         tar -xzf temporal.tar.gz -C /tmp
         sudo mv /tmp/temporal /usr/local/bin/
         temporal --version

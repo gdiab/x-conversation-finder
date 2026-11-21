@@ -55,7 +55,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 FounderMaterial(
                     source="product_brief.md",
                     # Per Architect: short, standalone, claim-ready sentences
-                    passage="Our product helps developers build reliable systems. It provides automatic failover. It guarantees strong consistency.",
+                    passage="Our product helps developers build reliable systems. Our product provides automatic failover. Our product guarantees strong consistency.",
                     relevance="Directly relevant to the post's discussion of reliability",
                     passage_id="passage_0",
                 )
@@ -89,10 +89,6 @@ class FakeReplyAgent(ReplyAgentPort):
         if "shorter" in (steer or "").lower():
             segments = [
                 Segment(
-                    kind="non_claim",
-                    text=f"Great point about {evidence.matched_topic}."
-                ),
-                Segment(
                     kind="claim",
                     source_passage_id="passage_0",
                     sentence_index=0  # "Our product helps developers build reliable systems."
@@ -105,17 +101,13 @@ class FakeReplyAgent(ReplyAgentPort):
         elif "technical" in (steer or "").lower():
             segments = [
                 Segment(
-                    kind="non_claim",
-                    text=f"Re: {evidence.matched_topic} - "
-                ),
-                Segment(
                     kind="claim",
                     source_passage_id="passage_0",
-                    sentence_index=2  # "It guarantees strong consistency."
+                    sentence_index=2  # "Our product guarantees strong consistency."
                 ),
                 Segment(
                     kind="non_claim",
-                    text="Details in our docs."
+                    text="Happy to share more details."
                 ),
             ]
         else:

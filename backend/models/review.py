@@ -39,8 +39,9 @@ class ReviewCard:
     skip_reason: Optional[str] = None
     client_request_id: Optional[str] = None
     followup_replies: Optional[list] = None
-    # Founder-edit re-gate fields (ADR-0006 Amendment E)
+    # Founder-edit re-gate fields (ADR-0006 Amendment E + QA R11 B2/C)
     edited_text_gate_results: Optional[list[SentenceGateResult]] = None
+    edited_text_gate_state: Optional[str] = None  # "passed", "failed", or "not_checked"
     post_anyway: Optional[bool] = None
     post_anyway_failing_sentences: Optional[list[str]] = None
     
@@ -154,6 +155,7 @@ class ReviewCard:
                 }
                 for r in self.edited_text_gate_results
             ] if self.edited_text_gate_results else None,
+            "edited_text_gate_state": self.edited_text_gate_state,
             "post_anyway": self.post_anyway,
             "post_anyway_failing_sentences": self.post_anyway_failing_sentences,
         }

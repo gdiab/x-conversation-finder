@@ -5,9 +5,11 @@ Per Architect decision 2026-11-21:
 Claims are QUOTED, not paraphrased. A claim segment references a founder passage
 and a sentence index; code inserts that sentence verbatim (trailing punctuation aside).
 The model never authors claim wording. All other text must match the closed set of
-non-claim forms (questions, greetings or thanks, explicit first-person opinion or
-experience that does not mention the product with a comparative, number, capability
-or competitor), with the keyword backstop overriding any non_claim tag.
+non-claim forms defined in backend.gate.non_claim_set, with the keyword backstop
+overriding any non_claim tag.
+
+Quoted claim sentences must stand alone: sentences starting with unresolved
+referents (It/This/That/These/They/Its/Such/"The above") are not selectable.
 """
 
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ import re
 import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
+from backend.gate.non_claim_set import is_closed_set_non_claim, normalize_for_closed_set
 
 
 @dataclass
@@ -32,23 +35,91 @@ def split_into_sentences(text: str) -> List[str]:
     """
     Split text into sentences.
     
-    S-5: Fixed to not break on decimals like 99.99%.
+    Fixed to not break on:
+    - Decimals like 99.99%
+    - Common abbreviations: Inc., Ltd., e.g., i.e., Mr., Dr., vs., etc.
+    
     Splits on sentence-ending punctuation (. ! ?) followed by space or end,
-    but not on decimals (digit before and after the period).
+    but not on decimals or abbreviations.
     Returns non-empty sentences.
     """
+    # Common abbreviations that should not trigger sentence splits
+    abbreviations = [
+        r'\bInc\.',
+        r'\bLtd\.',
+        r'\bCo\.',
+        r'\bCorp\.',
+        r'\be\.g\.',
+        r'\bi\.e\.',
+        r'\bvs\.',
+        r'\bMr\.',
+        r'\bMrs\.',
+        r'\bMs\.',
+        r'\bDr\.',
+        r'\bProf\.',
+        r'\betc\.',
+        r'\bapprox\.',
+        r'\bca\.',
+    ]
+    
+    # Replace abbreviations with placeholders temporarily
+    placeholders = {}
+    for i, abbr_pattern in enumerate(abbreviations):
+        placeholder = f'___ABBR{i}___'
+        # Find all matches and replace them
+        text = re.sub(abbr_pattern, placeholder, text, flags=re.IGNORECASE)
+        placeholders[placeholder] = re.search(abbr_pattern.replace(r'\b', '').replace(r'\.', '.'), 
+                                               abbr_pattern.replace(r'\b', '').replace(r'\.', '.'),
+                                               re.IGNORECASE)
+    
     # Use negative lookbehind and lookahead to avoid splitting decimals
     # Don't split if period is between digits
-    sentences = re.split(r'(?<!\d)[.!?]+(?!\d)\s*', text)
-    return [s.strip() for s in sentences if s.strip()]
+    sentences = re.split(r'(?<!\d)[.!?]+(?!\d)\s+', text)
+    
+    # Restore abbreviations in each sentence
+    result = []
+    for sent in sentences:
+        if sent.strip():
+            # Restore abbreviations by replacing placeholders back
+            for placeholder, _ in placeholders.items():
+                # Extract the abbreviation text from the pattern
+                # Simple approach: use mapping
+                abbr_map = {
+                    '___ABBR0___': 'Inc.',
+                    '___ABBR1___': 'Ltd.',
+                    '___ABBR2___': 'Co.',
+                    '___ABBR3___': 'Corp.',
+                    '___ABBR4___': 'e.g.',
+                    '___ABBR5___': 'i.e.',
+                    '___ABBR6___': 'vs.',
+                    '___ABBR7___': 'Mr.',
+                    '___ABBR8___': 'Mrs.',
+                    '___ABBR9___': 'Ms.',
+                    '___ABBR10___': 'Dr.',
+                    '___ABBR11___': 'Prof.',
+                    '___ABBR12___': 'etc.',
+                    '___ABBR13___': 'approx.',
+                    '___ABBR14___': 'ca.',
+                }
+                if placeholder in abbr_map:
+                    sent = sent.replace(placeholder, abbr_map[placeholder])
+            result.append(sent.strip())
+    
+    return result
 
 
 def normalize_text(text: str) -> str:
     """
-    Normalize text for comparison: NFKC, casefold, collapse whitespace.
+    Normalize text for comparison: NFKC, confusables, casefold, collapse whitespace.
+    Uses the same normalization as the closed-set module for consistency.
     """
+    # Use the closed-set normalization (but keep trailing punctuation for this usage)
     # NFKC normalization (compatibility decomposition + canonical composition)
     text = unicodedata.normalize('NFKC', text)
+    
+    # Apply confusables fold
+    from backend.gate.non_claim_set import _apply_confusables_fold
+    text = _apply_confusables_fold(text)
     
     # Normalize quote characters to standard ASCII quotes
     text = text.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
@@ -60,183 +131,38 @@ def normalize_text(text: str) -> str:
     return ' '.join(text.split())
 
 
-def apply_confusables_skeleton(text: str) -> str:
+def has_unresolved_referent(text: str) -> bool:
     """
-    B5a: Apply confusables skeleton fold to detect homoglyphs.
+    Check if a sentence starts with an unresolved referent.
     
-    Replaces common Cyrillic/Greek lookalikes with ASCII equivalents.
-    This catches bypasses like "Ѕupports ЅЅO" (Cyrillic S).
+    Per Architect decision 2026-11-21 (B):
+    Quoted claim sentences must stand alone. A passage sentence that opens
+    with an unresolved referent (It/This/That/These/They/Its/Such/"The above")
+    is NOT selectable.
+    
+    Returns True if the sentence starts with an unresolved referent.
     """
-    # Common Cyrillic confusables (this is a basic set; expand as needed)
-    confusables = {
-        'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H',
-        'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'Х': 'X', 'Ѕ': 'S',
-        'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x',
-    }
+    # Normalize for checking
+    normalized = text.strip().lower()
     
-    result = []
-    for char in text:
-        result.append(confusables.get(char, char))
-    
-    return ''.join(result)
-
-
-# B5a: Closed-set non_claim patterns (WHOLE sentence)
-# A sentence is non_claim ONLY if, after stripping leading greeting/thanks,
-# the REMAINDER is:
-# - Empty
-# - A question with no product+comparative/number/capability/competitor
-# - An explicit first-person opinion that doesn't launder a claim
-
-GREETING_THANKS_PATTERNS = [
-    r'^(?:thanks|thank you|hi|hello|hey|greetings|appreciate|happy to|glad to|pleased to)[,!.\s]*',
-]
-
-OPINION_PATTERNS = [
-    r'^(?:I think|I believe|I feel|I love|I like|I appreciate|I agree|I disagree|In my (?:opinion|experience|view)|I\'ve found|I found|I\'d say|personally)\b',
-]
-
-# B5a: Product words (expanded to include ours/us/our/we)
-# Be explicit: "we/our/ours/us" and "it's/it is" (but not "this" alone)
-PRODUCT_INDICATORS = [
-    r'\b(?:we|our|ours|us)\b',
-    r'\b(?:my|the)\s+(?:product|tool|platform|service|app|system)\b',
-    r'\bit\'?s?\b',  # "it's" or "it" or "its"
-]
-
-# Claim indicators that combine with product mention to make it a claim
-CLAIM_INDICATORS = [
-    # Comparatives and superlatives
-    r'\b(?:better|worse|faster|slower|more|less|best|worst|fastest|slowest|most|least|than|compared to|cheaper|quicker|way cheaper)\b',
-    # Numbers and quantifications (including "10x", "twenty")
-    r'\b(?:\d+\.?\d*\s*(?:%|percent|pct|times|x|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)?|ten|twenty|thirty|hundred|thousand)\b',
-    # Capability verbs
-    r'\b(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|has|have|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates|cut|cuts|reduce|reduces|eliminate|eliminates|beat|beats|work|works|ship|ships|come|comes|switch|switched)\b',
-    # Competitor/alternative mentions
-    r'\b(?:Temporal|Kubernetes|Kafka|AWS|Azure|GCP|Docker|Jenkins|CircleCI|GitHub Actions|Slack|Teams|Jira|Confluence)\b',
-]
-
-# Pattern backstop: these patterns always classify a segment as a claim
-# (overriding any non_claim tag from the model)
-BACKSTOP_PATTERNS = [
-    # Any digit or unit (including word numbers like "twenty")
-    r'\b(?:\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)?|ten|twenty|thirty|forty|fifty|hundred|thousand|million|billion)\b',
-    # Compliance/security terms
-    r'\b(?:SOC2|SSO|RBAC|HIPAA|GDPR|encrypted|encryption|compliance|compliant|certified|certification|audit|auditing|audit logs|role-based access control)\b',
-    # Availability terms
-    r'\b(?:24/7|uptime|availability|downtime|SLA|99\.?\d*%)\b',
-    # Risky absolutes
-    r'\b(?:always|never|guarantee[sd]?|best|fastest|most|only|all|every|unlimited|instant(?:ly)?|zero|exactly-once)\b',
-]
-
-
-def strip_leading_greeting_thanks(text: str) -> str:
-    """
-    B5a: Strip leading greeting/thanks clause from text.
-    Returns the remainder.
-    """
-    for pattern in GREETING_THANKS_PATTERNS:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-    return text.strip()
-
-
-def is_pure_question(text: str) -> bool:
-    """
-    B5a: Check if text is a pure question (ends with ?) with no claim indicators.
-    A trailing '?' must not make a claim-bearing sentence a question non_claim.
-    """
-    if not text.endswith('?'):
-        return False
-    
-    # Check if it has product + claim indicator (makes it a claim, not a non_claim question)
-    has_product = any(re.search(p, text, re.IGNORECASE) for p in PRODUCT_INDICATORS)
-    if not has_product:
-        return True  # No product mention, pure question
-    
-    # Has product - check for claim indicators
-    has_claim_indicator = any(re.search(p, text, re.IGNORECASE) for p in CLAIM_INDICATORS)
-    return not has_claim_indicator  # Pure question only if no claim indicators
-
-
-def is_opinion_without_product_claim(text: str) -> bool:
-    """
-    B5a: Check if text is an explicit first-person opinion that doesn't launder a claim.
-    Opinion frames that mention product with comparatives/numbers/capabilities are claims.
-    """
-    # Check for opinion pattern
-    has_opinion = any(re.search(p, text, re.IGNORECASE) for p in OPINION_PATTERNS)
-    if not has_opinion:
-        return False
-    
-    # Check if it mentions product with claim indicator (makes it a claim)
-    has_product = any(re.search(p, text, re.IGNORECASE) for p in PRODUCT_INDICATORS)
-    if not has_product:
-        return True  # Opinion without product mention
-    
-    # Has product - check for claim indicators
-    has_claim_indicator = any(re.search(p, text, re.IGNORECASE) for p in CLAIM_INDICATORS)
-    return not has_claim_indicator  # Opinion non_claim only if no claim indicators
-
-
-def matches_backstop_pattern(text: str) -> bool:
-    """
-    Check if text matches any backstop pattern.
-    These patterns always indicate a claim, overriding any non_claim tag.
-    """
-    # B5a: Apply confusables skeleton before matching
-    text_skeleton = apply_confusables_skeleton(text)
-    
-    for pattern in BACKSTOP_PATTERNS:
-        if re.search(pattern, text_skeleton, re.IGNORECASE):
-            return True
-    return False
-
-
-def is_closed_set_non_claim(text: str) -> bool:
-    """
-    B5a: Check if text is a closed-set non_claim (WHOLE sentence).
-    
-    A sentence is non_claim ONLY if, after stripping a leading greeting/thanks clause,
-    the REMAINDER is:
-    - Empty (pure greeting/thanks like "Thanks for sharing!")
-    - A pure question (ends with ?, no product+claim_indicator)
-    - An explicit first-person opinion that doesn't mention product with claim indicators
-    
-    AND it doesn't match any backstop pattern (which overrides non_claim).
-    
-    The key is: "for sharing!", "for your help" etc. are considered empty remainders
-    in the context of greetings (they're part of the greeting phrase).
-    """
-    # First check backstop (overrides everything)
-    if matches_backstop_pattern(text):
-        return False
-    
-    # Check if it's a pure greeting/thanks phrase
-    # These patterns should match the WHOLE text for pure greetings
-    pure_greeting_patterns = [
-        r'^(?:thanks|thank you)(?:\s+for\s+[\w\s]+)?[!.]*$',  # "Thanks", "Thanks for the question!"
-        r'^(?:hi|hello|hey)(?:\s+there)?[!.]*$',  # "Hi!", "Hello there!"
-        r'^(?:would be\s+)?(?:happy|glad|pleased)\s+to\s+(?:help|share|chat)[\w\s]*[!.]*$',  # "Happy to help!", "Would be happy to share more details if useful!"
+    # Unresolved referent patterns at the start of a sentence
+    unresolved_patterns = [
+        r'^it\b',
+        r'^its\b',
+        r'^this\b',
+        r'^that\b',
+        r'^these\b',
+        r'^those\b',
+        r'^they\b',
+        r'^them\b',
+        r'^their\b',
+        r'^such\b',
+        r'^the above\b',
     ]
     
-    for pattern in pure_greeting_patterns:
-        if re.match(pattern, text, re.IGNORECASE):
+    for pattern in unresolved_patterns:
+        if re.match(pattern, normalized):
             return True
-    
-    # Strip leading greeting/thanks for compound sentences
-    remainder = strip_leading_greeting_thanks(text)
-    
-    # Empty remainder after stripping greeting
-    if not remainder:
-        return True
-    
-    # Pure question (no product+claim_indicator)
-    if is_pure_question(remainder):
-        return True
-    
-    # Opinion without product claim
-    if is_opinion_without_product_claim(remainder):
-        return True
     
     return False
 
@@ -247,6 +173,10 @@ def insert_claim_sentence(
 ) -> tuple[bool, str, str]:
     """
     Insert the claim sentence from the founder passage.
+    
+    Per Architect decision 2026-11-21 (B):
+    Quoted claim sentences must stand alone. Sentences starting with
+    unresolved referents are not selectable.
     
     Returns (success, inserted_text, error_reason).
     """
@@ -266,6 +196,10 @@ def insert_claim_sentence(
         return False, "", f"sentence_index {segment.sentence_index} out of range (0-{len(sentences)-1})"
     
     sentence = sentences[segment.sentence_index]
+    
+    # (B) Check for unresolved referents - sentence must stand alone
+    if has_unresolved_referent(sentence):
+        return False, "", "Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above)"
     
     # Only normalization: trim trailing punctuation for flow
     sentence = sentence.rstrip('.!?')
@@ -512,8 +446,8 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         for seg in processed_segments:
             if seg.text:
                 norm_seg = normalize_text(seg.text)
-                # Sentence maps to segment if either contains the other
-                if norm_sentence in norm_seg or norm_seg in norm_sentence:
+                # Exact normalized match only (not substring containment)
+                if norm_sentence == norm_seg:
                     found = True
                     break
         

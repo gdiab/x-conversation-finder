@@ -35,8 +35,9 @@ class ReviewCardDB(Base):
     reply_post_id = Column(String, nullable=True)
     skip_reason = Column(String, nullable=True)
     followup_replies = Column(JSON, nullable=True)
-    # Edit re-gate fields (ADR-0006 Amendment E)
+    # Edit re-gate fields (ADR-0006 Amendment E + QA R11 B2/C)
     edited_text_gate_results = Column(JSON, nullable=True)
+    edited_text_gate_state = Column(String, nullable=True)  # "passed", "failed", or "not_checked"
     post_anyway = Column(Boolean, nullable=True)
     post_anyway_failing_sentences = Column(JSON, nullable=True)
 

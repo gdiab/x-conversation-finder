@@ -37,6 +37,7 @@ class UpdateCardInput:
     followup_replies: Optional[List[Dict[str, Any]]] = None
     evidence: Optional[Evidence] = None
     edited_text_gate_results: Optional[List[Dict[str, Any]]] = None
+    edited_text_gate_state: Optional[str] = None  # QA R11 B2/C: "passed", "failed", or "not_checked"
     post_anyway: Optional[bool] = None
     post_anyway_failing_sentences: Optional[List[str]] = None
 
@@ -248,6 +249,8 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
             card_db.followup_replies = input.followup_replies
         if input.edited_text_gate_results is not None:
             card_db.edited_text_gate_results = input.edited_text_gate_results
+        if input.edited_text_gate_state is not None:
+            card_db.edited_text_gate_state = input.edited_text_gate_state
         if input.post_anyway is not None:
             # B1: Direct assignment of bool - Temporal now handles it correctly
             card_db.post_anyway = input.post_anyway

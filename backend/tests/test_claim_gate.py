@@ -8,10 +8,15 @@ import pytest
 from backend.activities.claim_gate_activity import (
     ClaimGateInput,
     claim_gate,
-    matches_backstop_pattern,
     split_into_sentences,
+    has_unresolved_referent,
+)
+from backend.gate.non_claim_set import (
     is_closed_set_non_claim,
-    apply_confusables_skeleton,
+    normalize_for_closed_set,
+    _apply_confusables_fold,
+    _contains_number,
+    _matches_backstop_pattern,
 )
 from backend.models import FounderMaterial, Segment
 
@@ -29,12 +34,83 @@ async def test_split_sentences_handles_decimals():
 
 
 @pytest.mark.asyncio
+async def test_split_sentences_handles_abbreviations():
+    """QA R11: Sentence splitter must not break on common abbreviations."""
+    text = "Founded by John Smith, Ph.D. The company, Acme Inc., raised $50M. They built e.g. a great product vs. competitors etc."
+    sentences = split_into_sentences(text)
+    
+    # Should be 3 sentences, not split on Ph.D., Inc., e.g., vs., etc.
+    assert len(sentences) == 3
+    assert "Ph.D." in sentences[0]
+    assert "Inc." in sentences[1]
+    assert "e.g." in sentences[2]
+    assert "vs." in sentences[2]
+    assert "etc." in sentences[2]
+
+
+@pytest.mark.asyncio
 async def test_confusables_skeleton_cyrillic():
-    """B5a: Confusables skeleton must detect Cyrillic bypasses."""
+    """Confusables fold must detect Cyrillic bypasses."""
     # Cyrillic S (Ѕ) looks like ASCII S
     text = "Ѕupports ЅЅO"  # Cyrillic
-    folded = apply_confusables_skeleton(text)
+    folded = _apply_confusables_fold(text)
     assert "Supports SSO" == folded or "S" in folded
+
+
+@pytest.mark.asyncio
+async def test_confusables_greek():
+    """Confusables fold must detect Greek bypasses."""
+    # Greek Α (Alpha) looks like ASCII A
+    text = "Αlpha Beta"  # Greek Alpha
+    folded = _apply_confusables_fold(text)
+    assert "Alpha" in folded or "A" in folded
+
+
+@pytest.mark.asyncio
+async def test_has_unresolved_referent():
+    """QA R11 B: Sentences starting with unresolved referents must be detected."""
+    # Unresolved referents
+    assert has_unresolved_referent("It provides automatic failover.")
+    assert has_unresolved_referent("This is a great solution.")
+    assert has_unresolved_referent("That handles all cases.")
+    assert has_unresolved_referent("These work well together.")
+    assert has_unresolved_referent("They scale automatically.")
+    assert has_unresolved_referent("Its performance is excellent.")
+    assert has_unresolved_referent("Such solutions are common.")
+    assert has_unresolved_referent("The above approach is best.")
+    
+    # Not unresolved referents
+    assert not has_unresolved_referent("Our product provides automatic failover.")
+    assert not has_unresolved_referent("The platform handles all cases.")
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_rejects_unresolved_referent():
+    """QA R11 B: Claim gate must reject sentences starting with unresolved referents."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="It provides automatic failover. Our product guarantees strong consistency.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Try to use sentence_index=0 which is "It provides automatic failover."
+    segments = [
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_unresolved"
+    ))
+    
+    # Should fail because sentence starts with "It"
+    assert not result.passed
+    assert len(result.failed_sentences) > 0
+    assert "unresolved referent" in result.failed_sentences[0][1].lower()
 
 
 @pytest.mark.asyncio
@@ -78,20 +154,74 @@ async def test_is_closed_set_non_claim_opinion_frames():
 
 
 @pytest.mark.asyncio
+async def test_qa_r11_b1_rejected_examples():
+    """
+    QA R11 B1: All specified examples must be REJECTED.
+    
+    These are all violations of the closed-set non_claim rules:
+    - Numbers (digits or words) are never allowed
+    - Open-ended tails are not accepted
+    - Frames don't make assertions non_claims
+    """
+    # Number words in various contexts
+    assert not is_closed_set_non_claim("Happy to share that setup takes five minutes.")
+    assert not is_closed_set_non_claim("Happy to share our free forever plan.")
+    assert not is_closed_set_non_claim("Thanks for asking about whether our product is the cheapest")
+    assert not is_closed_set_non_claim("I love that there's no vendor lock-in.")
+    assert not is_closed_set_non_claim("I think setup takes five minutes.")
+    assert not is_closed_set_non_claim("Did you know setup takes five minutes?")
+    assert not is_closed_set_non_claim("Personally I'd pick the one used by thousands.")
+    assert not is_closed_set_non_claim("I think this is free for startups.")
+    assert not is_closed_set_non_claim("I believe the platform is hugely scalable.")
+
+
+@pytest.mark.asyncio
+async def test_qa_r11_b1_passing_examples():
+    """
+    QA R11 B1: Genuine non_claims must PASS.
+    
+    These are valid closed-set non_claims.
+    """
+    assert is_closed_set_non_claim("Thanks!")
+    assert is_closed_set_non_claim("Happy to share more details.")
+    assert is_closed_set_non_claim("What stack are you on?")
+    assert is_closed_set_non_claim("Love this thread.")
+
+
+@pytest.mark.asyncio
+async def test_contains_number():
+    """Numbers (digits and words) must be detected."""
+    # Digits
+    assert _contains_number("5 minutes")
+    assert _contains_number("99.9% uptime")
+    assert _contains_number("10k requests")
+    
+    # Number words
+    assert _contains_number("five minutes")
+    assert _contains_number("twenty integrations")
+    assert _contains_number("thousands of users")
+    assert _contains_number("hundreds of customers")
+    
+    # No numbers
+    assert not _contains_number("Thanks for sharing")
+    assert not _contains_number("What stack are you on?")
+
+
+@pytest.mark.asyncio
 async def test_matches_backstop_pattern_numbers():
-    """B5a: Backstop patterns (numbers) override non_claim tags."""
-    assert matches_backstop_pattern("10k requests")
-    assert matches_backstop_pattern("99.9% uptime")
-    assert matches_backstop_pattern("The product has twenty integrations.")
-    assert matches_backstop_pattern("5 GB storage")
+    """Backstop patterns (numbers) override non_claim tags."""
+    assert _matches_backstop_pattern("10k requests")
+    assert _matches_backstop_pattern("99.9% uptime")
+    assert _matches_backstop_pattern("The product has twenty integrations.")
+    assert _matches_backstop_pattern("5 GB storage")
 
 
 @pytest.mark.asyncio
 async def test_matches_backstop_pattern_compliance():
-    """B5a: Backstop patterns (compliance terms) override non_claim tags."""
-    assert matches_backstop_pattern("SOC2 certified")
-    assert matches_backstop_pattern("SSO authentication")
-    assert matches_backstop_pattern("Thanks. Ѕupports ЅЅO.")  # Cyrillic bypass caught
+    """Backstop patterns (compliance terms) override non_claim tags."""
+    assert _matches_backstop_pattern("SOC2 certified")
+    assert _matches_backstop_pattern("SSO authentication")
+    assert _matches_backstop_pattern("Thanks. Ѕupports ЅЅO.")  # Cyrillic bypass caught
 
 
 @pytest.mark.asyncio
@@ -281,7 +411,7 @@ async def test_b5a_regression_trailing_question_mark():
 async def test_b5a_regression_confusables():
     """B5a: Confusables (Cyrillic) must be detected."""
     # Cyrillic S in "Supports SSO"
-    assert matches_backstop_pattern("Thanks. Ѕupports ЅЅO.")
+    assert _matches_backstop_pattern("Thanks. Ѕupports ЅЅO.")
 
 
 @pytest.mark.asyncio
