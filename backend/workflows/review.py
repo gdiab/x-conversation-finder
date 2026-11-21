@@ -26,12 +26,6 @@ with workflow.unsafe.imports_passed_through():
         Evidence,
     )
     from backend.activities import (
-        research_post,
-        draft_reply,
-        store_card,
-        update_card,
-        lookup_post,
-        check_followup,
         ResearchPostInput,
         DraftReplyInput,
         StoreCardInput,
@@ -39,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         LookupPostInput,
         CheckFollowupInput,
     )
+    from backend.activities.claim_gate_activity import ClaimGateInput
     from backend.config import get_settings
 
 
@@ -93,7 +88,7 @@ class ReviewWorkflow:
         try:
             # Step 1: Research
             evidence = await workflow.execute_activity(
-                research_post,
+                "research_post",
                 ResearchPostInput(
                     post=input.post,
                     topic=input.topic,
@@ -123,28 +118,64 @@ class ReviewWorkflow:
                 )
                 
                 await workflow.execute_activity(
-                    store_card,
+                    "store_card",
                     StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:skip"),
                     start_to_close_timeout=timedelta(seconds=10),
                 )
                 
                 return "skipped"
             
-            # Step 2: Draft
-            evidence = await workflow.execute_activity(
-                draft_reply,
-                DraftReplyInput(
-                    evidence=evidence,
-                    idempotency_key=f"{input.post.id}:draft:initial",
-                ),
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+            # Step 2: Draft (with claim gate retry logic)
+            claim_gate_attempts = 0
+            max_claim_gate_attempts = 2
             
-            # Skip if claim gate failed
+            while claim_gate_attempts < max_claim_gate_attempts:
+                claim_gate_attempts += 1
+                
+                # Draft reply
+                steer = "Try again with only supported claims" if claim_gate_attempts > 1 else None
+                evidence = await workflow.execute_activity(
+                    "draft_reply",
+                    DraftReplyInput(
+                        evidence=evidence,
+                        steer=steer,
+                        idempotency_key=f"{input.post.id}:draft:attempt{claim_gate_attempts}",
+                    ),
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                
+                # Run deterministic claim gate
+                if evidence.draft:
+                    claim_gate_result = await workflow.execute_activity(
+                        "claim_gate",
+                        ClaimGateInput(
+                            draft_text=evidence.draft.text,
+                            founder_materials=evidence.founder_materials,
+                            idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
+                        ),
+                        start_to_close_timeout=timedelta(seconds=10),
+                    )
+                    
+                    # Update evidence with gate result
+                    evidence.draft.claim_gate = claim_gate_result
+                    
+                    if claim_gate_result.passed:
+                        workflow.logger.info(f"Claim gate passed on attempt {claim_gate_attempts}")
+                        break
+                    else:
+                        workflow.logger.warning(
+                            f"Claim gate failed on attempt {claim_gate_attempts}: "
+                            f"{len(claim_gate_result.unsupported_claims)} unsupported claims"
+                        )
+                else:
+                    workflow.logger.error("No draft generated")
+                    break
+            
+            # Skip if claim gate failed after retries
             if not evidence.draft or not evidence.draft.claim_gate.passed:
                 self.status = ReviewStatus.SKIPPED
-                self.skip_reason = "Claim gate failed"
+                self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
                 workflow.logger.info(f"Skipped: {self.skip_reason}")
                 
                 card = ReviewCard(
@@ -158,7 +189,7 @@ class ReviewWorkflow:
                 )
                 
                 await workflow.execute_activity(
-                    store_card,
+                    "store_card",
                     StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:gate_fail"),
                     start_to_close_timeout=timedelta(seconds=10),
                 )
@@ -168,6 +199,7 @@ class ReviewWorkflow:
             self.evidence = evidence
             
             # Store pending card
+            self.evidence = evidence
             card = ReviewCard(
                 workflow_id=workflow_id,
                 post=input.post,
@@ -178,25 +210,26 @@ class ReviewWorkflow:
             )
             
             await workflow.execute_activity(
-                store_card,
+                "store_card",
                 StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:pending"),
                 start_to_close_timeout=timedelta(seconds=10),
             )
             
-            # Step 3: Wait for human decision (48h timeout)
-            workflow.logger.info("Waiting for human decision (48h timeout)")
+            # Step 3: Wait for human decision
+            timeout_hours = settings.review_timeout_hours
+            workflow.logger.info(f"Waiting for human decision ({timeout_hours}h timeout)")
             
             try:
                 await workflow.wait_condition(
                     lambda: self.approved or self.skipped,
-                    timeout=timedelta(hours=48),
+                    timeout=timedelta(hours=timeout_hours),
                 )
             except asyncio.TimeoutError:
                 self.status = ReviewStatus.EXPIRED
-                workflow.logger.info("Review expired after 48h")
+                workflow.logger.info(f"Review expired after {timeout_hours}h")
                 
                 await workflow.execute_activity(
-                    update_card,
+                    "update_card",
                     UpdateCardInput(
                         workflow_id=workflow_id,
                         updates={"status": ReviewStatus.EXPIRED.value},
@@ -209,10 +242,10 @@ class ReviewWorkflow:
             
             # Handle skip
             if self.skipped:
-                workflow.logger.info(f"Skipped by founder: {self.skip_reason}")
+                workflow.logger.info(f"Skipped by founder")
                 
                 await workflow.execute_activity(
-                    update_card,
+                    "update_card",
                     UpdateCardInput(
                         workflow_id=workflow_id,
                         updates={
@@ -227,11 +260,11 @@ class ReviewWorkflow:
                 return "skipped"
             
             # Handle approve - wait for confirmation
-            workflow.logger.info(f"Approved by founder, posted_url={self.posted_url}")
+            workflow.logger.info(f"Approved by founder")
             
             # Update to approved status
             await workflow.execute_activity(
-                update_card,
+                "update_card",
                 UpdateCardInput(
                     workflow_id=workflow_id,
                     updates={
@@ -243,20 +276,20 @@ class ReviewWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
             
-            # Step 4: Wait for confirm_posted (48h timeout from approve)
-            workflow.logger.info("Waiting for reply URL confirmation (48h timeout)")
+            # Step 4: Wait for confirm_posted
+            workflow.logger.info(f"Waiting for reply URL confirmation ({timeout_hours}h timeout)")
             
             try:
                 await workflow.wait_condition(
                     lambda: self.confirmed,
-                    timeout=timedelta(hours=48),
+                    timeout=timedelta(hours=timeout_hours),
                 )
             except asyncio.TimeoutError:
                 self.status = ReviewStatus.APPROVED_NOT_CONFIRMED
-                workflow.logger.info("Approved but not confirmed after 48h")
+                workflow.logger.info(f"Approved but not confirmed after {timeout_hours}h")
                 
                 await workflow.execute_activity(
-                    update_card,
+                    "update_card",
                     UpdateCardInput(
                         workflow_id=workflow_id,
                         updates={"status": ReviewStatus.APPROVED_NOT_CONFIRMED.value},
@@ -267,16 +300,17 @@ class ReviewWorkflow:
                 
                 return "approved_not_confirmed"
             
-            # Step 5: Start follow-up timer
-            workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {settings.followup_delay_days}d follow-up timer")
+            # Step 5: Start follow-up timer (from config)
+            followup_delay = settings.followup_delay_days
+            workflow.logger.info(f"Confirmed reply {self.reply_post_id}, starting {followup_delay}d follow-up timer")
             
-            await workflow.sleep(timedelta(days=settings.followup_delay_days))
+            await workflow.sleep(timedelta(days=followup_delay))
             
-            # Step 6: Check for follow-up replies
+            # Step 6: Check for follow-up replies (capped)
             workflow.logger.info("Follow-up timer fired, checking for replies")
             
             followup_posts = await workflow.execute_activity(
-                check_followup,
+                "check_followup",
                 CheckFollowupInput(
                     reply_post_id=self.reply_post_id,
                     idempotency_key=f"{workflow_id}:followup",
@@ -287,7 +321,7 @@ class ReviewWorkflow:
             
             workflow.logger.info(f"Found {len(followup_posts)} follow-up replies")
             
-            # Update card with followup_due status and replies
+            # Update card with followup_due status and replies (no auto-draft)
             followup_replies = [
                 {
                     "id": p.id,
@@ -299,7 +333,7 @@ class ReviewWorkflow:
             ]
             
             await workflow.execute_activity(
-                update_card,
+                "update_card",
                 UpdateCardInput(
                     workflow_id=workflow_id,
                     updates={
@@ -364,9 +398,9 @@ class ReviewWorkflow:
         
         reply_post_id = match.group(1)
         
-        # Lookup the reply post
+        # Lookup the reply post to verify it exists
         reply_post = await workflow.execute_activity(
-            lookup_post,
+            "lookup_post",
             LookupPostInput(
                 post_id=reply_post_id,
                 idempotency_key=f"{workflow.info().workflow_id}:confirm:{reply_post_id}",
@@ -379,12 +413,13 @@ class ReviewWorkflow:
             raise ValueError(f"Reply post {reply_post_id} not found")
         
         # Verify it's a reply to our target post
-        if reply_post.in_reply_to_user_id is None:
-            # For fake client, check conversation_id matches
-            if reply_post.conversation_id != self.evidence.post_id:
-                raise ValueError(
-                    f"Post {reply_post_id} is not a reply to target post {self.evidence.post_id}"
-                )
+        # For real X API, check in_reply_to_user_id or conversation_id
+        # For fake client, check conversation_id matches
+        if reply_post.conversation_id != self.evidence.post_id:
+            raise ValueError(
+                f"Post {reply_post_id} (conversation_id={reply_post.conversation_id}) "
+                f"is not a reply to target post {self.evidence.post_id}"
+            )
         
         workflow.logger.info(f"Confirmed reply {reply_post_id} is valid")
         
@@ -393,7 +428,7 @@ class ReviewWorkflow:
         
         # Update card with reply_post_id
         await workflow.execute_activity(
-            update_card,
+            "update_card",
             UpdateCardInput(
                 workflow_id=workflow.info().workflow_id,
                 updates={"reply_post_id": reply_post_id},
@@ -418,7 +453,7 @@ class ReviewWorkflow:
         workflow_id = workflow.info().workflow_id
         
         await workflow.execute_activity(
-            update_card,
+            "update_card",
             UpdateCardInput(
                 workflow_id=workflow_id,
                 updates={"evidence": self.evidence},
@@ -438,7 +473,7 @@ class ReviewWorkflow:
             raise ValueError("No evidence to nudge")
         
         self.evidence = await workflow.execute_activity(
-            draft_reply,
+            "draft_reply",
             DraftReplyInput(
                 evidence=self.evidence,
                 steer=instruction,
@@ -451,7 +486,7 @@ class ReviewWorkflow:
         workflow_id = workflow.info().workflow_id
         
         await workflow.execute_activity(
-            update_card,
+            "update_card",
             UpdateCardInput(
                 workflow_id=workflow_id,
                 updates={"evidence": self.evidence},
