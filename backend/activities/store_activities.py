@@ -49,6 +49,14 @@ class GetCardInput:
     workflow_id: str
 
 
+@dataclass
+class DeletePostTextInput:
+    """Input for delete_post_text activity (B8 - 404 handling)."""
+    
+    workflow_id: str
+    idempotency_key: str
+
+
 def _card_to_db(card: ReviewCard) -> ReviewCardDB:
     """Convert ReviewCard to database model."""
     # Handle status - it might be an enum or a string due to serialization
@@ -306,6 +314,50 @@ async def get_card(input: GetCardInput) -> Optional[Dict]:
         activity.logger.info(f"Found card {input.workflow_id}")
     else:
         activity.logger.info(f"Card {input.workflow_id} not found")
+    
+    return result
+
+
+def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
+    """Synchronous DB work for delete_post_text (B8)."""
+    db = get_db()
+    try:
+        card_db = db.query(ReviewCardDB).filter(
+            ReviewCardDB.workflow_id == input.workflow_id
+        ).first()
+        
+        if not card_db:
+            return False
+        
+        # Per ADR-0086: delete post text on 404, keep structure
+        post_data = json.loads(card_db.post_data)
+        post_data["text"] = "[removed - post deleted]"
+        card_db.post_data = json.dumps(post_data)
+        
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+@activity.defn(name="delete_post_text")
+async def delete_post_text(input: DeletePostTextInput) -> bool:
+    """
+    Delete post text from card after 404 (B8 - ADR-0086 removal duty).
+    
+    Keeps the card structure but removes the post text.
+    """
+    activity.logger.info(
+        f"Deleting post text for {input.workflow_id} (key: {input.idempotency_key})"
+    )
+    
+    # B3: Run sync DB work in thread pool
+    result = await asyncio.to_thread(_delete_post_text_sync, input)
+    
+    if result:
+        activity.logger.info(f"Deleted post text for {input.workflow_id}")
+    else:
+        activity.logger.warning(f"Card {input.workflow_id} not found")
     
     return result
 

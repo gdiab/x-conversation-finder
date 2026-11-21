@@ -424,7 +424,21 @@ class ReviewWorkflow:
         )
         
         if not reply_post:
-            raise ValueError(f"Reply post {reply_post_id} not found")
+            # B8: 404 handling per ADR-0086 - delete post text
+            workflow.logger.warning(f"Reply post {reply_post_id} not found (404), deleting post text")
+            
+            from backend.activities import DeletePostTextInput, delete_post_text
+            
+            await workflow.execute_activity(
+                delete_post_text,
+                DeletePostTextInput(
+                    workflow_id=workflow.info().workflow_id,
+                    idempotency_key=f"{workflow.info().workflow_id}:delete_text:{reply_post_id}",
+                ),
+                start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
+            )
+            
+            raise ValueError(f"Reply post {reply_post_id} not found (deleted or 404)")
         
         # Verify it's a reply to our target post
         # For real X API, check in_reply_to_user_id or conversation_id

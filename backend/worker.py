@@ -13,7 +13,7 @@ from backend.config import get_settings
 from backend.workflows import ReviewWorkflow, TopicWatchWorkflow
 from backend.activities.x_activities import XActivities
 from backend.activities.reply_activities import ReplyActivities
-from backend.activities.store_activities import store_card, update_card, get_card
+from backend.activities.store_activities import store_card, update_card, get_card, delete_post_text
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, HttpXClient, FakeReplyAgent, PlainReplyAgent
 
@@ -82,6 +82,7 @@ async def main():
             store_card,
             update_card,
             get_card,
+            delete_post_text,
             claim_gate,
         ],
     )

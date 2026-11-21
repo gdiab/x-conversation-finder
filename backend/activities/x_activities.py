@@ -45,6 +45,14 @@ class CheckFollowupInput:
     idempotency_key: str
 
 
+@dataclass
+class NotifyInput:
+    """Input for notify activity (B8)."""
+    
+    message: str
+    idempotency_key: str
+
+
 class XActivities:
     """X API activities with injected client."""
     
@@ -150,3 +158,18 @@ class XActivities:
         activity.logger.info(f"Found {len(posts)} replies in conversation")
         
         return posts
+    
+    @activity.defn(name="notify")
+    async def notify(self, input: NotifyInput) -> None:
+        """
+        Notify activity for alerting about events (B8).
+        
+        Currently logs the message. In production this could send to:
+        - Slack/email
+        - Push notification service
+        - Monitoring system
+        """
+        activity.logger.info(f"NOTIFY: {input.message} (key: {input.idempotency_key})")
+        
+        # Future: Add actual notification mechanism here
+        # e.g., slack webhook, email, etc.
