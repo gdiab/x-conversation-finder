@@ -647,6 +647,10 @@ class ReviewWorkflow:
         - B3: Use counter for edit-in-flight (two concurrent edits)
         - C: Handle activity errors → record "not_checked" state
         Results stored for evidence trail; not a hard block (approve requires post_anyway if fails/not_checked).
+        
+        QA R12: Concurrent edits resolve as last-writer-wins by finish order. Each edit
+        runs its gate independently; the last to complete sets the final draft.text and
+        gate state. This is documented in ADR-0006.
         """
         # Deduplicate (B9: per-handler set)
         if client_request_id in self._edit_requests:

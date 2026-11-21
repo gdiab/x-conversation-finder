@@ -770,3 +770,114 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
                 args=["https://x.com/test/status/999", client_request_id, True]
             )
             assert "Approved" in approve_result
+
+
+@pytest.mark.asyncio
+async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_activities, reply_activities):
+    """
+    QA R12: Concurrent edits resolve as last-writer-wins by finish order.
+    
+    Start two edits with different texts. Control gate timing so they finish in
+    a known order. Verify the last to complete sets the final draft.text.
+    """
+    import asyncio
+    from temporalio import activity as activity_module
+    
+    # State to control gate timing
+    edit1_gate_event = asyncio.Event()
+    edit2_gate_event = asyncio.Event()
+    edit1_release_event = asyncio.Event()
+    edit2_release_event = asyncio.Event()
+    
+    @activity_module.defn(name="verify_edited_text")
+    async def verify_edited_text_controlled(input):
+        """Gate activity that blocks per-edit to control finish order."""
+        from temporalio import activity
+        text = input["edited_text"]
+        activity.logger.info(f"Gate for: {text[:20]}")
+        
+        if "FIRST" in text:
+            activity.logger.info("FIRST edit gate, signaling and blocking")
+            edit1_gate_event.set()
+            await edit1_release_event.wait()
+            activity.logger.info("FIRST edit gate released")
+        elif "SECOND" in text:
+            activity.logger.info("SECOND edit gate, signaling and blocking")
+            edit2_gate_event.set()
+            await edit2_release_event.wait()
+            activity.logger.info("SECOND edit gate released")
+        
+        # Both pass
+        return []
+    
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                verify_edited_text_controlled,
+                store_card,
+                update_card,
+            ],
+        ):
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_r12_lww"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Start FIRST edit (will block in gate)
+            edit1_task = asyncio.create_task(
+                handle.execute_update(
+                    "edit",
+                    args=["FIRST edit text. Thanks!", str(uuid.uuid4())]
+                )
+            )
+            
+            # Wait for first gate to be called
+            await asyncio.wait_for(edit1_gate_event.wait(), timeout=5)
+            
+            # Start SECOND edit (will block in gate)
+            edit2_task = asyncio.create_task(
+                handle.execute_update(
+                    "edit",
+                    args=["SECOND edit text. Thanks!", str(uuid.uuid4())]
+                )
+            )
+            
+            # Wait for second gate to be called
+            await asyncio.wait_for(edit2_gate_event.wait(), timeout=5)
+            
+            # Now both edits are blocked in their gates
+            # Release SECOND first (so FIRST finishes last and wins)
+            edit2_release_event.set()
+            await edit2_task
+            
+            # Then release FIRST (finishes last)
+            edit1_release_event.set()
+            await edit1_task
+            
+            await env.sleep(1)
+            
+            # Check the card - last to finish (FIRST) should be the final text
+            db = get_db()
+            try:
+                card_db = db.query(ReviewCardDB).filter(
+                    ReviewCardDB.workflow_id == workflow_id
+                ).first()
+                assert card_db is not None
+                
+                final_text = card_db.evidence["draft"]["text"]
+                assert "FIRST" in final_text, f"Expected FIRST to win (finished last), got: {final_text}"
+            finally:
+                db.close()

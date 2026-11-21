@@ -73,6 +73,8 @@ Claims are quoted, not paraphrased. A claim segment references a founder passage
    - Otherwise, fails
    
    Per-sentence results are stored. This is not a hard block: if the edited text fails, the `approve` Update requires `post_anyway=True`. The validator rejects approve without it when failures exist, and the card records `post_anyway` and the failing sentences.
+   
+   **Concurrent edits** (QA R12): Resolve as last-writer-wins by finish order. Each edit runs its gate independently; the last to complete sets the final draft.text and gate state. The _edit_in_flight_count counter prevents approve while any edit is running, but does not serialize edits themselves.
 
 6. **On failure:** Exactly one redraft carrying the gate's per-sentence reasons as the steer, then gate again. A second failure ends the `Review` as `skipped: not enough evidence` with the reasons recorded in the evidence trail. A failed draft never reaches a card.
 
