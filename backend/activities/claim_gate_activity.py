@@ -373,6 +373,27 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     sentences = split_into_sentences(input.edited_text)
     activity.logger.info(f"Split edited text into {len(sentences)} sentences")
     
+    # QA R15: Apply same 1-3 segment cap as model path
+    if len(sentences) < 1:
+        # Empty text - return single failure result
+        return [SentenceGateResult(
+            sentence="[edited text]",
+            passed=False,
+            kind="claim",
+            reason="Edited text must have at least 1 sentence",
+            kept_segment=False
+        )]
+    
+    if len(sentences) > 3:
+        # Too many segments - mark all as failed with specific reason
+        return [SentenceGateResult(
+            sentence=sent,
+            passed=False,
+            kind="claim",
+            reason=f"Edited text must have at most 3 sentences (got {len(sentences)})",
+            kept_segment=False
+        ) for sent in sentences]
+    
     results = []
     
     for sentence in sentences:
@@ -512,6 +533,17 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     activity.logger.info(
         f"Edited text gate: {passed_count}/{len(results)} sentences passed"
     )
+    
+    # QA R15: Apply at-most-1-claim rule (same as model path)
+    if all(r.passed for r in results):
+        claim_count = sum(1 for r in results if r.kind == "claim")
+        if claim_count > 1:
+            # Mark all results as failed with specific reason
+            for r in results:
+                r.passed = False
+                r.reason = f"Edited text must have at most 1 claim (got {claim_count})"
+            activity.logger.warning(f"Edited text has {claim_count} claims (max 1)")
+            return results
     
     # S2 (QA R14): Apply composition rules to edited text
     # Build segments from results to check composition

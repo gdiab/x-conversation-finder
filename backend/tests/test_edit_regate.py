@@ -949,6 +949,96 @@ async def test_r14_s5_store_ignores_lower_edit_seq():
 
 
 @pytest.mark.asyncio
+async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activities, reply_activities):
+    """
+    QA R15: Edit path must reject 4+ segments (same 1-3 cap as model path).
+    
+    Example: 'Hi! Our product helps developers build reliable systems. Happy to help. What stack are you on?'
+    This has 4 sentences and should fail with specific reason.
+    """
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                verify_edited_text,
+                store_card,
+                update_card,
+            ],
+        ):
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_r15_four_segments"
+            
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                review_input,
+                id=workflow_id,
+                task_queue="test",
+            )
+            
+            await env.sleep(1)
+            
+            # Edit to exactly the example text with 4 sentences
+            edited_text = "Hi! Our product helps developers build reliable systems. Happy to help. What stack are you on?"
+            client_request_id = str(uuid.uuid4())
+            
+            result_text = await handle.execute_update(
+                "edit",
+                args=[edited_text, client_request_id]
+            )
+            assert result_text == edited_text
+            
+            await env.sleep(1)
+            
+            # QA R15: Verify gate results show all 4 sentences failed with specific reason
+            card = await handle.query("get_card")
+            gate_results = card["edited_text_gate_results"]
+            
+            # Should have 4 results (one per sentence)
+            assert len(gate_results) == 4, f"Expected 4 results, got {len(gate_results)}"
+            
+            # All should fail with the segment cap reason
+            for result in gate_results:
+                assert not result["passed"], f"Expected all sentences to fail, but {result['sentence']} passed"
+                assert "at most 3 sentences" in result["reason"], f"Expected segment cap reason, got: {result['reason']}"
+                assert "(got 4)" in result["reason"], f"Expected count in reason, got: {result['reason']}"
+            
+            # Verify stored card has failures
+            db = get_db()
+            try:
+                card_db = db.query(ReviewCardDB).filter(
+                    ReviewCardDB.workflow_id == workflow_id
+                ).first()
+                assert card_db is not None
+                assert card_db.edited_text_gate_results is not None
+                assert len(card_db.edited_text_gate_results) == 4
+                assert all(not r["passed"] for r in card_db.edited_text_gate_results)
+            finally:
+                db.close()
+            
+            # Approve without post_anyway should fail
+            from temporalio.client import WorkflowUpdateFailedError
+            client_request_id = str(uuid.uuid4())
+            with pytest.raises(WorkflowUpdateFailedError):
+                await handle.execute_update(
+                    "approve",
+                    args=["https://x.com/test/status/999", client_request_id, False]
+                )
+            
+            # Approve WITH post_anyway should succeed
+            client_request_id = str(uuid.uuid4())
+            approve_result = await handle.execute_update(
+                "approve",
+                args=["https://x.com/test/status/999", client_request_id, True]
+            )
+            assert "Approved" in approve_result
+
+
+@pytest.mark.asyncio
 async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, reply_activities):
     """
     S5 (QA R14): Workflow-level race with edit_seq.

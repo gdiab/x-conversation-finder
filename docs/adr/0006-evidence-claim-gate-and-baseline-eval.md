@@ -72,6 +72,8 @@ Drafts are assembled, not written. A claim segment references a founder passage 
    
    Edited text is also validated against the composition rules (v2.1.0). Any violation fails the edit or requires post_anyway, same as any other failure (QA R14).
    
+   QA R15: Edits are capped at 1-3 sentences (same as model path) and must have at most 1 claim. A 4-sentence edit or an edit with 2+ claims fails with a specific reason recorded.
+   
    Per-sentence results are stored. This is not a hard block: if the edited text fails, the `approve` Update requires `post_anyway=True`. The validator rejects approve without it when failures exist, and the card records `post_anyway` and the failing sentences.
    
    **Concurrent edits** (QA R12): Resolve as last-writer-wins by finish order. Each edit runs its gate independently; the last to complete sets the final draft.text and gate state. The _edit_in_flight_count counter prevents approve while any edit is running, but does not serialize edits themselves.
