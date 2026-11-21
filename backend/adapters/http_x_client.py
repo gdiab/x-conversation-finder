@@ -187,7 +187,7 @@ class HttpXClient(XClientPort):
         
         tweet = data["data"]
         
-        # Parse author
+        # Parse author (R4-SF3: no placeholder usernames)
         author = None
         if "includes" in data and "users" in data["includes"] and data["includes"]["users"]:
             user_data = data["includes"]["users"][0]
@@ -199,14 +199,9 @@ class HttpXClient(XClientPort):
                 verified=user_data.get("verified", False),
             )
         else:
-            # Fallback
-            author = Author(
-                id=tweet["author_id"],
-                username=f"user_{tweet['author_id']}",
-                name=f"User {tweet['author_id']}",
-                followers_count=0,
-                verified=False,
-            )
+            # R4-SF3: Real X API should always include author when expansions=author_id
+            # If missing, return None rather than using placeholder data
+            return None
         
         metrics = tweet.get("public_metrics", {})
         
