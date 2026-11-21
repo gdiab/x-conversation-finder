@@ -40,7 +40,7 @@ class TopicWatchInput:
     continue_as_new_after: int = 100
     since_id: Optional[str] = None
     iteration: int = 0
-    seen_post_ids: Optional[Set[str]] = None
+    seen_post_ids: Optional[List[str]] = None
 
 
 @workflow.defn(name="TopicWatch")
@@ -69,7 +69,7 @@ class TopicWatchWorkflow:
             f"iteration={input.iteration}"
         )
         
-        seen_post_ids = input.seen_post_ids or set()
+        seen_post_ids = input.seen_post_ids or []
         since_id = input.since_id
         
         for iteration in range(input.iteration, input.continue_as_new_after):
@@ -149,7 +149,9 @@ class TopicWatchWorkflow:
                 if search_result.newest_id:
                     since_id = search_result.newest_id
                 
-                seen_post_ids = set(list(seen_post_ids)[-1000:])
+                # Keep last 1000 IDs (deterministic truncation)
+                if len(seen_post_ids) > 1000:
+                    seen_post_ids = seen_post_ids[-1000:]
             
             except Exception as e:
                 workflow.logger.error(f"Search failed: {e}")
