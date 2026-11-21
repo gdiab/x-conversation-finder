@@ -54,9 +54,10 @@ class ClaimGateResult:
     """Result of claim gate validation."""
     
     passed: bool
-    segments: List[Segment]  # New segment-based structure
+    segments: List[Segment]  # New segment-based structure (processed, with text filled in)
     failed_sentences: List[tuple[str, str]]  # (sentence, reason)
     reasoning: str
+    draft_text: str = ""  # Constructed draft text from joined segments (properly punctuated)
     # Legacy fields for backwards compatibility
     claims: List[Claim] = field(default_factory=list)
     failed_claims: List[tuple[Claim, str]] = field(default_factory=list)

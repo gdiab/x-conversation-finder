@@ -238,6 +238,11 @@ class ReviewWorkflow:
                 
                 # Update evidence with gate result
                 evidence.draft.claim_gate = claim_gate_result
+                # Update draft text with properly constructed version from claim_gate
+                if claim_gate_result.draft_text:
+                    evidence.draft.text = claim_gate_result.draft_text
+                # Update segments with processed versions (text filled in)
+                evidence.draft.segments = claim_gate_result.segments
                 last_gate_result = claim_gate_result
                 
                 if claim_gate_result.passed:

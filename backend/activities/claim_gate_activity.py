@@ -536,4 +536,5 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         segments=processed_segments,  # Return processed segments with inserted text
         failed_sentences=failed_sentences,
         reasoning=reasoning,
+        draft_text=draft_text,  # Constructed draft with proper punctuation
     )
