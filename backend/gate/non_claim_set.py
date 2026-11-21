@@ -222,10 +222,12 @@ def _matches_backstop_pattern(text: str) -> bool:
     - Availability terms
     - Risky absolutes
     
-    Applies confusables fold before matching.
+    Applies NFKC (for fullwidth/mathematical) and confusables fold before matching.
     """
+    # Apply NFKC normalization (handles fullwidth, mathematical alphanumerics)
+    text_folded = unicodedata.normalize('NFKC', text)
     # Apply confusables fold to catch homoglyphs
-    text_folded = _apply_confusables_fold(text)
+    text_folded = _apply_confusables_fold(text_folded)
     
     backstop_patterns = [
         # Compliance/security terms
