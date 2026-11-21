@@ -406,34 +406,68 @@ async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_ac
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input, x_activities, reply_activities):
-    """Test claim gate failure triggers regenerate, then skip after max attempts."""
-    from backend.activities.claim_gate_activity import ClaimGateInput, ClaimGateResult
-    from temporalio import activity
+async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input, x_activities):
+    """
+    Test claim gate failure triggers regenerate, then skip after max attempts.
     
-    # Test-only claim gate activity that always fails
-    fail_count = {"count": 0}
+    Per R3-B2: This test uses the REAL gate activity with a fake reply agent 
+    that generates unsupported claims (not a stub gate).
+    """
+    from backend.activities.claim_gate_activity import claim_gate
+    from backend.adapters.reply_agent_port import ReplyAgentPort
+    from backend.activities.reply_activities import ReplyActivities
+    from backend.models import Evidence, FounderMaterial, Claim, ClaimGateResult, Draft
+    from typing import Optional
     
-    @activity.defn(name="claim_gate")
-    async def failing_claim_gate(input: ClaimGateInput) -> ClaimGateResult:
-        """Claim gate that always fails for testing."""
-        from backend.models.evidence import Claim
+    class BadClaimReplyAgent(ReplyAgentPort):
+        """Fake agent that generates unsupported claims for testing."""
         
-        fail_count["count"] += 1
-        activity.logger.info(f"Claim gate attempt {fail_count['count']} - returning FAIL")
+        async def research(self, post, topic, product_brief, idempotency_key) -> Evidence:
+            """Generate fake evidence."""
+            evidence = Evidence(
+                post_id=post.id,
+                matched_topic=topic,
+                why_it_fits="Post discusses relevant topics.",
+                confidence_score=0.85,
+                confidence_inputs={"topic_match_strength": 0.9},
+                founder_materials=[
+                    FounderMaterial(
+                        source="product_brief",
+                        passage="Our platform is designed for reliability.",
+                        relevance="high",
+                        passage_id="passage_0",
+                    )
+                ],
+            )
+            return evidence
         
-        test_claim = Claim(
-            text="Test claim about our product",
-            cited_passage_ids=[],
-            quoted_spans=[]
-        )
-        
-        return ClaimGateResult(
-            passed=False,
-            claims=[test_claim],
-            failed_claims=[(test_claim, "No founder materials support this claim")],
-            reasoning="No founder materials support this claim",
-        )
+        async def draft(self, evidence, steer=None, idempotency_key=None) -> Evidence:
+            """Generate draft with unsupported claim (99.99% uptime guaranteed)."""
+            # Draft contains risky words not backed by founder materials
+            draft_text = "We guarantee 99.99% uptime with zero downtime for your critical applications."
+            
+            unsupported_claim = Claim(
+                text="We guarantee 99.99% uptime with zero downtime",
+                cited_passage_ids=["passage_0"],
+                quoted_spans=["reliability"],  # Spans exist but don't support the numbers
+            )
+            
+            evidence.draft = Draft(
+                text=draft_text,
+                claim_gate=ClaimGateResult(
+                    passed=True,
+                    claims=[unsupported_claim],
+                    failed_claims=[],
+                    reasoning="Gate not yet run",
+                ),
+                steers_applied=[steer] if steer else [],
+                token_count=len(draft_text.split()),
+                model_used="bad-claim-agent",
+            )
+            return evidence
+    
+    bad_agent = BadClaimReplyAgent()
+    bad_reply_activities = ReplyActivities(bad_agent)
     
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -441,9 +475,9 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
-                failing_claim_gate,  # Use test-only failing claim gate
+                bad_reply_activities.research_post,
+                bad_reply_activities.draft_reply,
+                claim_gate,  # Use REAL claim gate (R3-B2)
                 store_card,
                 update_card,
                 x_activities.lookup_post,
@@ -463,9 +497,6 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             # Wait for workflow to complete (should skip after 2 failed attempts)
             result = await handle.result()
             assert result == "skipped"
-            
-            # Verify claim gate was called 2 times (max attempts)
-            assert fail_count["count"] == 2
             
             # Query the card to verify final status
             card = await handle.query("get_card")
