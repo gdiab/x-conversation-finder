@@ -415,3 +415,70 @@ def test_multiple_reserves_accumulate(temp_db):
         budget = get_today_budget()
         assert budget["x_reads"] == 30
         assert abs(budget["x_cost_usd"] - 3.0) < 0.01
+
+
+def test_concurrent_budget_no_overspend(temp_db):
+    """
+    Test R3-B3: Truly concurrent budget access proves no overspend.
+    
+    Multiple threads try to reserve budget concurrently. The atomic 
+    BEGIN IMMEDIATE transaction ensures cap is enforced even under concurrency.
+    """
+    import threading
+    import time
+    
+    settings = Settings(
+        database_url=f"sqlite:///{temp_db}",
+        daily_spend_limit_usd=1.0,  # Very low limit
+        daily_post_read_cap=100,
+        x_post_read_cost=0.5,  # Each read costs 0.5, so 2 reads = 1.0 = cap
+        budget_kill_switch=False,
+    )
+    
+    with patch("backend.config.get_settings", return_value=settings), \
+         patch("backend.budget.get_settings", return_value=settings), \
+         patch("backend.database.get_settings", return_value=settings):
+        
+        # Clear engine cache
+        import backend.database
+        backend.database._engine = None
+        backend.database._SessionLocal = None
+        
+        from backend.database import init_db
+        init_db()
+        
+        # Track successes and failures
+        results = {"succeeded": 0, "exceeded": 0, "lock": threading.Lock()}
+        
+        def try_reserve():
+            """Attempt to reserve 1 read (0.5 USD)."""
+            try:
+                reserve_x_budget(1, 0.5)
+                with results["lock"]:
+                    results["succeeded"] += 1
+            except BudgetExceeded:
+                with results["lock"]:
+                    results["exceeded"] += 1
+        
+        # Launch 10 threads all trying to reserve at once
+        threads = []
+        for _ in range(10):
+            t = threading.Thread(target=try_reserve)
+            threads.append(t)
+        
+        # Start all threads nearly simultaneously
+        for t in threads:
+            t.start()
+        
+        # Wait for all to complete
+        for t in threads:
+            t.join()
+        
+        # With cap of 1.0 USD and cost 0.5 per read, only 2 should succeed
+        assert results["succeeded"] == 2, f"Expected 2 successes, got {results['succeeded']}"
+        assert results["exceeded"] == 8, f"Expected 8 exceeded, got {results['exceeded']}"
+        
+        # Verify final budget doesn't exceed cap
+        budget = get_today_budget()
+        assert budget["x_reads"] == 2
+        assert budget["x_cost_usd"] <= settings.daily_spend_limit_usd

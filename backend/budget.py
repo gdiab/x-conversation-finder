@@ -1,9 +1,9 @@
 """
 Budget tracking and enforcement.
 
-Per NB3: Atomic reserve-then-commit in one SQLite transaction (BEGIN IMMEDIATE).
+Per NB3 and R3-B3: Atomic reserve-then-commit in one SQLite transaction (BEGIN IMMEDIATE).
 - Cap enforced on first call too
-- Raise non-retryable BudgetExceeded instead of returning empty success
+- Raise non-retryable BudgetExceeded ApplicationError
 - Per-token inference pricing from config
 - Kill switch (env/config flag + DB flag checked before every X/LLM call)
 - lookup_post over budget must raise, never report not-found
@@ -11,17 +11,19 @@ Per NB3: Atomic reserve-then-commit in one SQLite transaction (BEGIN IMMEDIATE).
 
 from datetime import datetime, timezone
 from sqlalchemy import text
+from temporalio.exceptions import ApplicationError
 from backend.database import get_db, BudgetLedgerDB
 from backend.config import get_settings
 
 
-class BudgetExceeded(Exception):
+class BudgetExceeded(ApplicationError):
     """
     Raised when budget is exceeded.
     
-    Non-retryable exception per NB3.
+    Non-retryable exception per NB3 and R3-B3.
     """
-    pass
+    def __init__(self, message: str):
+        super().__init__(message, non_retryable=True, type='BudgetExceeded')
 
 
 def get_today_utc() -> str:
