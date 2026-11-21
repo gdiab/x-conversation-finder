@@ -91,7 +91,7 @@ export async function approveReview(workflowId: string, postedUrl: string): Prom
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       posted_url: postedUrl,
-      client_request_id: generateRequestId(),
+      client_request_id: generateRequestId('approve', workflowId),
     }),
   });
   
@@ -106,7 +106,7 @@ export async function skipReview(workflowId: string, reason: string): Promise<vo
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       reason,
-      client_request_id: generateRequestId(),
+      client_request_id: generateRequestId('skip', workflowId),
     }),
   });
   
@@ -139,7 +139,7 @@ export async function nudgeReview(workflowId: string, instruction: string): Prom
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       instruction,
-      client_request_id: generateRequestId(),
+      client_request_id: generateRequestId('nudge', workflowId),
     }),
   });
   
@@ -157,7 +157,7 @@ export async function confirmPostedReview(workflowId: string, replyUrl: string):
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       reply_url: replyUrl,
-      client_request_id: generateRequestId(),
+      client_request_id: generateRequestId('confirm_posted', workflowId),
     }),
   });
   

@@ -215,7 +215,7 @@ class ReviewWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
             
-            # Step 3: Wait for human decision
+            # Step 3: Wait for human decision and signal completion
             timeout_hours = settings.review_timeout_hours
             workflow.logger.info(f"Waiting for human decision ({timeout_hours}h timeout)")
             
@@ -224,6 +224,9 @@ class ReviewWorkflow:
                     lambda: self.approved or self.skipped,
                     timeout=timedelta(hours=timeout_hours),
                 )
+                
+                # Wait for signal handler to complete
+                await workflow.wait_condition(lambda: True)
             except asyncio.TimeoutError:
                 self.status = ReviewStatus.EXPIRED
                 workflow.logger.info(f"Review expired after {timeout_hours}h")
@@ -276,7 +279,7 @@ class ReviewWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
             
-            # Step 4: Wait for confirm_posted
+            # Step 4: Wait for confirm_posted and update completion
             workflow.logger.info(f"Waiting for reply URL confirmation ({timeout_hours}h timeout)")
             
             try:
@@ -284,6 +287,9 @@ class ReviewWorkflow:
                     lambda: self.confirmed,
                     timeout=timedelta(hours=timeout_hours),
                 )
+                
+                # Wait for update handler to complete
+                await workflow.wait_condition(lambda: True)
             except asyncio.TimeoutError:
                 self.status = ReviewStatus.APPROVED_NOT_CONFIRMED
                 workflow.logger.info(f"Approved but not confirmed after {timeout_hours}h")
