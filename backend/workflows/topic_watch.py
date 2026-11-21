@@ -20,11 +20,10 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from backend.activities import (
         search_recent,
-        lookup_post,
         SearchRecentInput,
-        LookupPostInput,
     )
     from backend.workflows.review import ReviewWorkflow, ReviewInput
+    from temporalio.workflow import ParentClosePolicy
 
 
 @dataclass
@@ -125,8 +124,10 @@ class TopicWatchWorkflow:
                     workflow.logger.info(f"Starting Review for post {post.id}")
                     
                     try:
-                        await workflow.execute_child_workflow(
-                            ReviewWorkflow,
+                        # Start child without awaiting (non-blocking)
+                        # Use ABANDON so reviews continue if watch stops
+                        await workflow.start_child_workflow(
+                            ReviewWorkflow.run,
                             ReviewInput(
                                 post=post,
                                 topic=input.topic,
@@ -135,13 +136,13 @@ class TopicWatchWorkflow:
                                 confidence_threshold=input.confidence_threshold,
                             ),
                             id=review_id,
-                            retry_policy=RetryPolicy(maximum_attempts=1),
+                            parent_close_policy=ParentClosePolicy.ABANDON,
                         )
+                        workflow.logger.info(f"Started Review {review_id}")
+                    except workflow.exceptions.WorkflowAlreadyStartedError:
+                        workflow.logger.info(f"Review {review_id} already exists, skipping")
                     except workflow.exceptions.ChildWorkflowError as e:
-                        if "already exists" in str(e).lower():
-                            workflow.logger.info(f"Review {review_id} already exists, skipping")
-                        else:
-                            workflow.logger.error(f"Failed to start Review: {e}")
+                        workflow.logger.error(f"Failed to start Review: {e}")
                     
                     seen_post_ids.add(post.id)
                 

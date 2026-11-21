@@ -21,6 +21,8 @@ from backend.workflows import TopicWatchInput, ReviewInput
 from backend.workflows.topic_watch import TopicWatchWorkflow
 from backend.workflows.review import ReviewWorkflow
 from backend.activities.store_activities import get_all_cards
+from backend.database import init_db
+from backend.budget import get_today_budget
 
 
 app = FastAPI(title="X Conversation Finder API")
@@ -39,9 +41,13 @@ temporal_client: Optional[Client] = None
 
 @app.on_event("startup")
 async def startup():
-    """Connect to Temporal on startup."""
+    """Connect to Temporal and initialize database on startup."""
     global temporal_client
     settings = get_settings()
+    
+    # Initialize database
+    init_db()
+    logger.info("Database initialized")
     
     logger.info(f"Connecting to Temporal at {settings.temporal_host}")
     
@@ -229,6 +235,12 @@ async def get_review(workflow_id: str):
     
     except Exception as e:
         raise HTTPException(status_code=404, detail="Review not found")
+
+
+@app.get("/api/budget")
+async def get_budget():
+    """Get today's budget usage for the spend meter."""
+    return get_today_budget()
 
 
 if __name__ == "__main__":

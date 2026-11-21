@@ -6,6 +6,8 @@ from temporalio import activity
 
 from backend.models import Post
 from backend.adapters import FakeXClient
+from backend.budget import check_x_budget, record_x_reads
+from backend.config import get_settings
 
 
 @dataclass
@@ -42,11 +44,23 @@ async def search_recent(input: SearchRecentInput) -> SearchRecentOutput:
     
     Idempotent: same query + since_id returns cached results within 24h UTC.
     Cost tracking: updates the daily spend ledger.
+    Budget enforcement: checks daily cap before calling.
     """
     activity.logger.info(
         f"Searching X for '{input.query}' since_id={input.since_id} "
         f"(key: {input.idempotency_key})"
     )
+    
+    settings = get_settings()
+    
+    # Check budget before making the call
+    if not check_x_budget(input.max_results):
+        activity.logger.warning(f"Daily X budget cap reached, returning empty results")
+        return SearchRecentOutput(
+            posts=[],
+            newest_id=input.since_id,
+            cost_usd=0.0,
+        )
     
     client = FakeXClient()
     
@@ -56,7 +70,11 @@ async def search_recent(input: SearchRecentInput) -> SearchRecentOutput:
         max_results=input.max_results,
     )
     
-    cost_usd = len(posts) * 0.005
+    # Calculate cost from config
+    cost_usd = len(posts) * settings.x_post_read_cost
+    
+    # Record in ledger
+    record_x_reads(len(posts), cost_usd)
     
     activity.logger.info(f"Found {len(posts)} posts, cost ${cost_usd:.4f}")
     
@@ -74,8 +92,16 @@ async def lookup_post(input: LookupPostInput) -> Optional[Post]:
     
     Idempotent: same post_id is cached.
     Returns None if post is deleted (404).
+    Budget: Records 1 post read.
     """
     activity.logger.info(f"Looking up post {input.post_id} (key: {input.idempotency_key})")
+    
+    settings = get_settings()
+    
+    # Check budget
+    if not check_x_budget(1):
+        activity.logger.warning(f"Daily X budget cap reached, skipping lookup")
+        return None
     
     client = FakeXClient()
     
@@ -83,6 +109,8 @@ async def lookup_post(input: LookupPostInput) -> Optional[Post]:
     
     if post:
         activity.logger.info(f"Found post {input.post_id} by @{post.author.username}")
+        # Record cost
+        record_x_reads(1, settings.x_post_read_cost)
     else:
         activity.logger.info(f"Post {input.post_id} not found (deleted or 404)")
     
