@@ -487,7 +487,17 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
             reasoning="No valid segments after processing",
         )
     
-    draft_text = ' '.join(seg.text for seg in processed_segments if seg.text)
+    # Join segments, ensuring each ends with punctuation for proper sentence splitting
+    draft_parts = []
+    for seg in processed_segments:
+        if seg.text:
+            text = seg.text
+            # Add period if text doesn't end with sentence-ending punctuation
+            if text and not text.rstrip()[-1:] in '.!?':
+                text = text + '.'
+            draft_parts.append(text)
+    
+    draft_text = ' '.join(draft_parts)
     activity.logger.info(f"Constructed draft: {len(draft_text)} chars from {len(processed_segments)} segments")
     
     # Re-split into sentences and verify mapping
