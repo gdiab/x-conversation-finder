@@ -576,6 +576,9 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
     gate_called_event = asyncio.Event()
     gate_block_event = asyncio.Event()
     
+    from temporalio import activity as activity_module
+    
+    @activity_module.defn
     async def verify_edited_text_blocking(input):
         """Blocking version of verify_edited_text for concurrency test."""
         from temporalio import activity
@@ -663,6 +666,9 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
     gate_call_count = 0
     max_attempts = 3
     
+    from temporalio import activity as activity_module
+    
+    @activity_module.defn
     async def verify_edited_text_failing(input):
         """Failing version of verify_edited_text that exhausts retries."""
         from temporalio import activity
