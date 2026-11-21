@@ -76,6 +76,7 @@ ALLOWLIST_WORDS: Set[str] = {
     "is", "are", "was", "were", "be", "been", "being",
     "do", "does", "did", "have", "has", "had",
     "can", "could", "would", "will", "should",
+    "try", "tried", "work", "works", "worked",
     
     # Pronouns (non-product)
     "you", "your", "yours", "they", "them", "their",
@@ -92,6 +93,7 @@ ALLOWLIST_WORDS: Set[str] = {
     # Adjectives (non-comparative, non-absolute)
     "good", "great", "interesting", "helpful", "nice",
     "hard", "easy", "different", "similar", "same",
+    "well",
     
     # Prepositions and connectors
     "on", "in", "at", "to", "from", "for", "with", "about",
@@ -219,7 +221,12 @@ def _matches_backstop_pattern(text: str) -> bool:
     - Compliance/security terms
     - Availability terms
     - Risky absolutes
+    
+    Applies confusables fold before matching.
     """
+    # Apply confusables fold to catch homoglyphs
+    text_folded = _apply_confusables_fold(text)
+    
     backstop_patterns = [
         # Compliance/security terms
         r'\b(?:soc2|sso|rbac|hipaa|gdpr|encrypted?|encryption|compliance|compliant|certified|certification|audit(?:ing|s| logs)?|role-based access control)\b',
@@ -227,10 +234,12 @@ def _matches_backstop_pattern(text: str) -> bool:
         r'\b(?:24/7|uptime|availability|downtime|sla|99\.?\d*%)\b',
         # Risky absolutes
         r'\b(?:always|never|guarantee[sd]?|best|fastest|slowest|most|only|all|every|unlimited|instant(?:ly)?|zero|exactly-once)\b',
+        # Numbers (needs to catch "10k", "20x", etc.)
+        r'\b\d+[kKMBx%]\b',
     ]
     
     for pattern in backstop_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
+        if re.search(pattern, text_folded, re.IGNORECASE):
             return True
     
     return False

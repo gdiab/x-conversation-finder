@@ -37,40 +37,39 @@ def split_into_sentences(text: str) -> List[str]:
     
     Fixed to not break on:
     - Decimals like 99.99%
-    - Common abbreviations: Inc., Ltd., e.g., i.e., Mr., Dr., vs., etc.
+    - Common abbreviations: Inc., Ltd., e.g., i.e., Mr., Dr., vs., etc., Ph.D.
     
     Splits on sentence-ending punctuation (. ! ?) followed by space or end,
     but not on decimals or abbreviations.
     Returns non-empty sentences.
     """
     # Common abbreviations that should not trigger sentence splits
+    # Map pattern to replacement text
     abbreviations = [
-        r'\bInc\.',
-        r'\bLtd\.',
-        r'\bCo\.',
-        r'\bCorp\.',
-        r'\be\.g\.',
-        r'\bi\.e\.',
-        r'\bvs\.',
-        r'\bMr\.',
-        r'\bMrs\.',
-        r'\bMs\.',
-        r'\bDr\.',
-        r'\bProf\.',
-        r'\betc\.',
-        r'\bapprox\.',
-        r'\bca\.',
+        (r'\bInc\.', 'Inc.'),
+        (r'\bLtd\.', 'Ltd.'),
+        (r'\bCo\.', 'Co.'),
+        (r'\bCorp\.', 'Corp.'),
+        (r'\be\.g\.', 'e.g.'),
+        (r'\bi\.e\.', 'i.e.'),
+        (r'\bvs\.', 'vs.'),
+        (r'\bMr\.', 'Mr.'),
+        (r'\bMrs\.', 'Mrs.'),
+        (r'\bMs\.', 'Ms.'),
+        (r'\bDr\.', 'Dr.'),
+        (r'\bProf\.', 'Prof.'),
+        (r'\betc\.', 'etc.'),
+        (r'\bapprox\.', 'approx.'),
+        (r'\bca\.', 'ca.'),
+        (r'\bPh\.D\.', 'Ph.D.'),
     ]
     
     # Replace abbreviations with placeholders temporarily
     placeholders = {}
-    for i, abbr_pattern in enumerate(abbreviations):
+    for i, (pattern, replacement) in enumerate(abbreviations):
         placeholder = f'___ABBR{i}___'
-        # Find all matches and replace them
-        text = re.sub(abbr_pattern, placeholder, text, flags=re.IGNORECASE)
-        placeholders[placeholder] = re.search(abbr_pattern.replace(r'\b', '').replace(r'\.', '.'), 
-                                               abbr_pattern.replace(r'\b', '').replace(r'\.', '.'),
-                                               re.IGNORECASE)
+        text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+        placeholders[placeholder] = replacement
     
     # Use negative lookbehind and lookahead to avoid splitting decimals
     # Don't split if period is between digits
@@ -81,28 +80,8 @@ def split_into_sentences(text: str) -> List[str]:
     for sent in sentences:
         if sent.strip():
             # Restore abbreviations by replacing placeholders back
-            for placeholder, _ in placeholders.items():
-                # Extract the abbreviation text from the pattern
-                # Simple approach: use mapping
-                abbr_map = {
-                    '___ABBR0___': 'Inc.',
-                    '___ABBR1___': 'Ltd.',
-                    '___ABBR2___': 'Co.',
-                    '___ABBR3___': 'Corp.',
-                    '___ABBR4___': 'e.g.',
-                    '___ABBR5___': 'i.e.',
-                    '___ABBR6___': 'vs.',
-                    '___ABBR7___': 'Mr.',
-                    '___ABBR8___': 'Mrs.',
-                    '___ABBR9___': 'Ms.',
-                    '___ABBR10___': 'Dr.',
-                    '___ABBR11___': 'Prof.',
-                    '___ABBR12___': 'etc.',
-                    '___ABBR13___': 'approx.',
-                    '___ABBR14___': 'ca.',
-                }
-                if placeholder in abbr_map:
-                    sent = sent.replace(placeholder, abbr_map[placeholder])
+            for placeholder, abbr_text in placeholders.items():
+                sent = sent.replace(placeholder, abbr_text)
             result.append(sent.strip())
     
     return result
@@ -439,13 +418,15 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     activity.logger.info(f"Split into {len(sentences)} sentences")
     
     for sentence in sentences:
-        norm_sentence = normalize_text(sentence)
+        # Normalize and strip trailing punctuation for comparison
+        norm_sentence = normalize_text(sentence.rstrip('.!?'))
         
         # Find which segment contains this sentence
         found = False
         for seg in processed_segments:
             if seg.text:
-                norm_seg = normalize_text(seg.text)
+                # Also strip trailing punctuation from segment for comparison
+                norm_seg = normalize_text(seg.text.rstrip('.!?'))
                 # Exact normalized match only (not substring containment)
                 if norm_sentence == norm_seg:
                     found = True
