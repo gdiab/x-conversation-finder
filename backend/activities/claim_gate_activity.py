@@ -21,6 +21,7 @@ from backend.models import FounderMaterial, Claim, ClaimGateResult
 class ClaimGateInput:
     """Input for claim_gate activity."""
     
+    draft_text: str
     claims: List[Claim]
     founder_materials: List[FounderMaterial]
     idempotency_key: str
@@ -122,49 +123,101 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     """
     Deterministic claim gate - verify all product claims.
     
-    Per ADR-0006 and NB2: This is code, not model attestation.
-    Checks:
-    1. Each quoted span appears in the cited passage
-    2. Every number/percent/superlative/guarantee word is backed
+    Per ADR-0006, NB2, and R3-B1: This is code, not model attestation.
+    Scans draft.text itself and checks:
+    1. Every risky word in draft_text is covered by a declared, verified claim
+    2. Each declared claim's text appears in draft_text
+    3. Each quoted span appears in the cited passage
+    4. Every risky word in claim.text is backed by cited passages
     """
     activity.logger.info(
-        f"Running claim gate on {len(input.claims)} claim(s), "
+        f"Running claim gate on draft ({len(input.draft_text)} chars), "
+        f"{len(input.claims)} claim(s), "
         f"{len(input.founder_materials)} materials (key: {input.idempotency_key})"
     )
     
-    if not input.claims:
-        activity.logger.info("No claims to check, gate passes")
-        return ClaimGateResult(
-            passed=True,
-            claims=[],
-            failed_claims=[],
-            reasoning="No product claims in draft",
-        )
+    # Extract all risky words from the draft text itself
+    draft_risky_words = find_risky_words(input.draft_text)
+    activity.logger.info(f"Found {len(draft_risky_words)} risky words in draft: {draft_risky_words}")
     
+    # Build materials lookup
     materials_by_id = {}
     for i, material in enumerate(input.founder_materials):
         passage_id = material.passage_id or f"passage_{i}"
         materials_by_id[passage_id] = material
     
-    activity.logger.info(f"Checking {len(input.claims)} claims against {len(materials_by_id)} passages")
+    # If no claims declared
+    if not input.claims:
+        if draft_risky_words:
+            activity.logger.warning(
+                f"No claims declared but draft contains {len(draft_risky_words)} risky words: {draft_risky_words}"
+            )
+            return ClaimGateResult(
+                passed=False,
+                claims=[],
+                failed_claims=[],
+                reasoning=f"Draft contains risky words but no claims declared: {', '.join(draft_risky_words[:3])}",
+            )
+        else:
+            activity.logger.info("No claims and no risky words, gate passes")
+            return ClaimGateResult(
+                passed=True,
+                claims=[],
+                failed_claims=[],
+                reasoning="No risky words in draft",
+            )
+    
+    activity.logger.info(f"Verifying {len(input.claims)} claims against {len(materials_by_id)} passages")
     
     failed_claims = []
+    verified_claim_texts = []
     
+    # Verify each declared claim
     for claim in input.claims:
+        # Check that claim text appears in draft
+        if claim.text not in input.draft_text:
+            failed_claims.append((claim, f"Claim text not found in draft: '{claim.text}'"))
+            activity.logger.warning(f"Claim text not in draft: '{claim.text[:50]}...'")
+            continue
+        
+        # Verify claim against founder materials
         passed, reason = verify_claim(claim, materials_by_id)
         
         if not passed:
             failed_claims.append((claim, reason))
             activity.logger.warning(
-                f"Claim failed: '{claim.text[:50]}...' - {reason}"
+                f"Claim failed verification: '{claim.text[:50]}...' - {reason}"
             )
         else:
+            verified_claim_texts.append(claim.text)
             activity.logger.info(f"Claim passed: '{claim.text[:50]}...'")
+    
+    # Check that every risky word in draft is covered by a verified claim
+    uncovered_risky_words = []
+    for risky_word in draft_risky_words:
+        covered = False
+        for claim_text in verified_claim_texts:
+            if risky_word.lower() in claim_text.lower():
+                covered = True
+                break
+        if not covered:
+            uncovered_risky_words.append(risky_word)
+    
+    if uncovered_risky_words:
+        activity.logger.warning(
+            f"Draft contains {len(uncovered_risky_words)} uncovered risky words: {uncovered_risky_words}"
+        )
+        return ClaimGateResult(
+            passed=False,
+            claims=input.claims,
+            failed_claims=failed_claims,
+            reasoning=f"Draft contains uncovered risky words: {', '.join(uncovered_risky_words[:3])}",
+        )
     
     gate_passed = len(failed_claims) == 0
     
     if gate_passed:
-        reasoning = f"All {len(input.claims)} claim(s) verified against founder materials"
+        reasoning = f"All {len(input.claims)} claim(s) verified and all {len(draft_risky_words)} risky words covered"
     else:
         reasoning = f"{len(failed_claims)} of {len(input.claims)} claim(s) failed verification"
     

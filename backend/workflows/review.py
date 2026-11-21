@@ -195,11 +195,12 @@ class ReviewWorkflow:
                 result_type=Evidence,
             )
             
-            # Run deterministic claim gate
+            # Run deterministic claim gate (R3-B1: scans draft.text itself)
             if evidence.draft:
                 claim_gate_result = await workflow.execute_activity(
                     claim_gate,
                     ClaimGateInput(
+                        draft_text=evidence.draft.text,
                         claims=evidence.draft.claim_gate.claims,
                         founder_materials=evidence.founder_materials,
                         idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
