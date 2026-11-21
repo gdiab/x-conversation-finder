@@ -16,7 +16,7 @@ from backend.activities.reply_activities import ReplyActivities
 from backend.activities import x_activity_funcs, reply_activity_funcs
 from backend.activities.store_activities import store_card, update_card, get_card
 from backend.activities.claim_gate_activity import claim_gate
-from backend.adapters import FakeXClient, FakeReplyAgent, PlainReplyAgent
+from backend.adapters import FakeXClient, HttpXClient, FakeReplyAgent, PlainReplyAgent
 
 
 async def main():
@@ -33,10 +33,21 @@ async def main():
     # X Client adapter
     if settings.x_client_adapter == "fake":
         x_client = FakeXClient()
+    elif settings.x_client_adapter == "real":
+        if not settings.x_bearer_token:
+            logger.error("X_BEARER_TOKEN is required when x_client_adapter=real")
+            raise ValueError(
+                "Real X client selected but X_BEARER_TOKEN is not configured. "
+                "Set X_BEARER_TOKEN in environment or use x_client_adapter=fake"
+            )
+        logger.info("Initializing real X API client with bearer token")
+        x_client = HttpXClient(bearer_token=settings.x_bearer_token)
     else:
-        # Real X client would go here when implemented
-        logger.warning("Real X client not implemented, falling back to fake")
-        x_client = FakeXClient()
+        logger.error(f"Unknown x_client_adapter: {settings.x_client_adapter}")
+        raise ValueError(
+            f"Invalid x_client_adapter '{settings.x_client_adapter}'. "
+            "Valid options: 'fake', 'real'"
+        )
     
     # Reply agent adapter
     if settings.reply_agent_adapter == "fake":

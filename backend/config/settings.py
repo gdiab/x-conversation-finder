@@ -75,8 +75,9 @@ class Settings(BaseSettings):
     # Continue-As-New threshold
     can_threshold_posts: int = 100
     
-    # Adapter selection (B5: injected adapters)
+    # Adapter selection (B5: injected adapters, NB1: explicit selection)
     # Set 2026-11-21: "fake" for tests, "real" for production
+    # Worker refuses to start if "real" is selected but X_BEARER_TOKEN is not configured
     x_client_adapter: str = "fake"
     reply_agent_adapter: str = "fake"
     
