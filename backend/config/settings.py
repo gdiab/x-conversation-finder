@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 
 class Settings(BaseSettings):
@@ -79,18 +79,22 @@ class Settings(BaseSettings):
     watch_poll_interval_hours: int = 3
     watch_max_results: int = 10
     
-    @field_validator('watch_poll_interval_hours')
-    @classmethod
-    def validate_poll_interval(cls, v: int, info) -> int:
-        """R5-S3: Enforce minimum poll interval of 1 hour for production."""
-        # Allow 0 for testing with fake adapters (check env var directly)
-        import os
-        x_client_adapter = os.environ.get('X_CLIENT_ADAPTER', '')
-        if v == 0 and x_client_adapter == 'fake':
-            return v  # Test mode: allow immediate poll
-        if v < 1:
-            raise ValueError(f"watch_poll_interval_hours must be at least 1, got {v}")
-        return v
+    @model_validator(mode='after')
+    def validate_poll_interval(self):
+        """R5-S3: Enforce minimum poll interval of 1 hour for production.
+        
+        Exception: 0 hours is allowed only when x_client_adapter='fake' (for tests).
+        This validation runs after all fields are set, so it covers:
+        - API endpoint creating TopicWatch via settings.watch_poll_interval_hours
+        - Direct workflow starts that build TopicWatchInput from settings
+        - Worker startup validation
+        """
+        # Allow 0 only for fake adapter
+        if self.watch_poll_interval_hours == 0 and self.x_client_adapter == 'fake':
+            return self  # Test mode: allow immediate poll
+        if self.watch_poll_interval_hours < 1:
+            raise ValueError(f"watch_poll_interval_hours must be at least 1, got {self.watch_poll_interval_hours}")
+        return self
     
     # Daily read cap (ADR-0005: target ~300 posts/day across topics)
     # Set 2026-11-21: Cost is $0.005/post, so 300 posts = $1.50/day

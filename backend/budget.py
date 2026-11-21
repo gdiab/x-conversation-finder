@@ -60,6 +60,13 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tupl
     Uses BEGIN IMMEDIATE transaction for atomic reserve-then-commit.
     Cap enforced on first call too.
     
+    Note: The read cap is soft by at most one call. A reservation that would exceed the cap
+    is rejected, but the cap may be exceeded by up to (max_results - 1) reads if the last
+    allowed reservation is fully used. For example, with a cap of 100 and max_results=10,
+    the last allowed call might reserve reads 91-100, so actual usage could reach 100.
+    Reconciliation adjusts down to actual usage but never prevents a reservation that
+    would stay within the cap.
+    
     Returns (cost in USD, reservation date YYYY-MM-DD).
     
     Raises BudgetExceeded if:
@@ -99,6 +106,16 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tupl
             raise BudgetExceeded(
                 f"Would exceed daily read cap: "
                 f"{projected_reads} > {settings.daily_post_read_cap}"
+            )
+        
+        # Log if we're close to or over the soft cap after reconciliation would occur
+        if current_reads > settings.daily_post_read_cap:
+            import logging
+            logger = logging.getLogger(__name__)
+            overage = current_reads - settings.daily_post_read_cap
+            logger.warning(
+                f"Read cap soft overage: {current_reads:.0f} reads exceeds cap of "
+                f"{settings.daily_post_read_cap} by {overage:.0f} (soft cap allows up to one call past limit)"
             )
         
         if not ledger:
@@ -265,6 +282,23 @@ def reconcile_x_reads(
         new_cost = ledger.x_cost_usd + delta_cost
         
         # Clamp at zero (never go negative)
+        if new_reads < 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Zero floor clamped over-refund: would refund {abs(new_reads):.1f} reads "
+                f"from {ledger.x_reads:.1f}, clamping to 0 "
+                f"(workflow_id={workflow_id}, activity_id={activity_id})"
+            )
+        if new_cost < 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Zero floor clamped over-refund: would refund ${abs(new_cost):.4f} "
+                f"from ${ledger.x_cost_usd:.4f}, clamping to $0.00 "
+                f"(workflow_id={workflow_id}, activity_id={activity_id})"
+            )
+        
         ledger.x_reads = max(0.0, new_reads)
         ledger.x_cost_usd = max(0.0, new_cost)
         ledger.last_updated = datetime.now(timezone.utc).isoformat()
@@ -365,6 +399,15 @@ def reconcile_inference_tokens(
         new_cost = ledger.inference_cost_usd + delta_cost
         
         # Clamp at zero (never go negative)
+        if new_cost < 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Zero floor clamped over-refund: would refund ${abs(new_cost):.6f} "
+                f"from ${ledger.inference_cost_usd:.6f}, clamping to $0.00 "
+                f"(workflow_id={workflow_id}, activity_id={activity_id})"
+            )
+        
         ledger.inference_cost_usd = max(0.0, new_cost)
         ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
