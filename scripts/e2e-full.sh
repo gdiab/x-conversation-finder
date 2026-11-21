@@ -40,7 +40,10 @@ echo ""
 
 # Initialize database
 rm -f /tmp/x-finder-e2e-full.db /tmp/temporal-e2e-full.db*
-python3 -c "from backend.database import init_db; init_db()"
+if ! python3 -c "from backend.database import init_db; init_db()"; then
+    echo "❌ Database initialization failed"
+    exit 1
+fi
 echo "✓ Database initialized"
 echo ""
 
@@ -190,6 +193,21 @@ APPROVE_RESPONSE=$(curl -s -X POST "http://localhost:8002/api/reviews/$WORKFLOW_
   -H "Content-Type: application/json" \
   -d '{"posted_url": "https://x.com/founder/status/12345", "client_request_id": "e2e-full-approve"}')
 echo "$APPROVE_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$APPROVE_RESPONSE"
+
+# Verify approval succeeded
+APPROVE_OK=$(echo "$APPROVE_RESPONSE" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print('ok' if data.get('status') == 'approved' or 'ok' in str(data).lower() or 'success' in str(data).lower() else '')
+except:
+    pass
+" 2>/dev/null)
+
+if [ -z "$APPROVE_OK" ] && echo "$APPROVE_RESPONSE" | grep -qi "error"; then
+    echo "❌ Approval failed"
+    exit 1
+fi
 echo "✓ Review approved"
 sleep 3
 echo ""
@@ -262,10 +280,10 @@ except:
 " 2>/dev/null)
 
 if [ "$FINAL_STATUS" != "followup_due" ]; then
-    echo "⚠️ Final status is '$FINAL_STATUS', expected 'followup_due'"
-else
-    echo "✓ Final status verified: followup_due"
+    echo "❌ Final status is '$FINAL_STATUS', expected 'followup_due'"
+    exit 1
 fi
+echo "✓ Final status verified: followup_due"
 
 # S-6: Verify check_followup actually ran by checking followup_replies
 FOLLOWUP_COUNT=$(echo "$FINAL_REVIEWS" | python3 -c "
@@ -279,23 +297,24 @@ except:
     print(0)
 " 2>/dev/null)
 
-if [ "$FOLLOWUP_COUNT" -gt 0 ]; then
-    echo "✓ check_followup executed ($FOLLOWUP_COUNT replies fetched)"
-else
-    echo "⚠️ check_followup may not have executed (no followup_replies)"
+if [ "$FOLLOWUP_COUNT" -eq 0 ]; then
+    echo "❌ check_followup did not execute (no followup_replies)"
+    exit 1
 fi
+echo "✓ check_followup executed ($FOLLOWUP_COUNT replies fetched)"
 echo ""
 
 echo "=== E2E Test Complete ==="
 echo ""
-echo "✓ TopicWatch started and polled"
-echo "✓ Review child workflow spawned naturally"
-echo "✓ Review card created with status 'pending'"
-echo "✓ Review approved with posted URL"
-echo "✓ Posted reply confirmed"
-echo "✓ Follow-up timer fired (${FOLLOWUP_DELAY_SECONDS}s - real durable timer)"
-echo "✓ check_followup activity executed"
-echo "✓ Final status: $FINAL_STATUS"
+echo "All assertions passed:"
+echo "  - TopicWatch started and polled"
+echo "  - Review child workflow spawned naturally"
+echo "  - Review card created with status 'pending'"
+echo "  - Review approved with posted URL"
+echo "  - Posted reply confirmed"
+echo "  - Follow-up timer fired (${FOLLOWUP_DELAY_SECONDS}s - real durable timer)"
+echo "  - check_followup activity executed ($FOLLOWUP_COUNT replies)"
+echo "  - Final status: $FINAL_STATUS"
 echo ""
 echo "All operations used fake adapters (no real X API calls)"
 echo ""
