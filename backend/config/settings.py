@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
@@ -74,8 +75,17 @@ class Settings(BaseSettings):
     
     # Topic watch settings (ADR-0005: X access polling)
     # Set 2026-11-21: 3h poll interval matches ADR-0005
+    # R5-S3: Minimum 1 hour enforced for production (prevents excessive X API usage)
     watch_poll_interval_hours: int = 3
     watch_max_results: int = 10
+    
+    @field_validator('watch_poll_interval_hours')
+    @classmethod
+    def validate_poll_interval(cls, v: int) -> int:
+        """R5-S3: Enforce minimum poll interval of 1 hour for production."""
+        if v < 1:
+            raise ValueError(f"watch_poll_interval_hours must be at least 1, got {v}")
+        return v
     
     # Daily read cap (ADR-0005: target ~300 posts/day across topics)
     # Set 2026-11-21: Cost is $0.005/post, so 300 posts = $1.50/day
