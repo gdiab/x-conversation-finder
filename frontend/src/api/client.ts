@@ -150,3 +150,28 @@ export async function nudgeReview(workflowId: string, instruction: string): Prom
   const result = await response.json();
   return result.new_draft;
 }
+
+export async function confirmPostedReview(workflowId: string, replyUrl: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/reviews/${workflowId}/confirm_posted`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      reply_url: replyUrl,
+      client_request_id: generateRequestId(),
+    }),
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to confirm posted: ${response.statusText}`);
+  }
+}
+
+export async function getBudget(): Promise<any> {
+  const response = await fetch(`${API_BASE}/budget`);
+  
+  if (!response.ok) {
+    throw new Error(`Failed to get budget: ${response.statusText}`);
+  }
+  
+  return response.json();
+}

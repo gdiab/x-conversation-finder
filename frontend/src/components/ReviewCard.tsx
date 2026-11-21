@@ -4,7 +4,7 @@
 
 import { useState } from 'react';
 import type { ReviewCard as ReviewCardType } from '../api/client';
-import { approveReview, skipReview, editReview, nudgeReview } from '../api/client';
+import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview } from '../api/client';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -13,6 +13,7 @@ interface ReviewCardProps {
 
 export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const [postedUrl, setPostedUrl] = useState('');
+  const [replyUrl, setReplyUrl] = useState('');
   const [skipReason, setSkipReason] = useState('');
   const [editText, setEditText] = useState(card.evidence.draft?.text || '');
   const [nudgeInstruction, setNudgeInstruction] = useState('');
@@ -91,6 +92,25 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       onUpdate();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to nudge');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirmPosted = async () => {
+    if (!replyUrl.trim()) {
+      setError('Please enter the reply URL');
+      return;
+    }
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      await confirmPostedReview(card.workflow_id, replyUrl);
+      onUpdate();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to confirm posted');
     } finally {
       setLoading(false);
     }
@@ -272,7 +292,52 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         </div>
       )}
 
+      {/* Follow-up Replies */}
+      {card.status === 'followup_due' && card.followup_replies && card.followup_replies.length > 0 && (
+        <div style={{ marginBottom: '20px', borderTop: '1px solid #eee', paddingTop: '20px' }}>
+          <h4>Follow-up Replies ({card.followup_replies.length})</h4>
+          {card.followup_replies.map((reply: any, idx: number) => (
+            <div key={idx} style={{
+              backgroundColor: '#f9f9f9',
+              padding: '12px',
+              borderRadius: '4px',
+              marginBottom: '8px',
+            }}>
+              <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
+                @{reply.author}
+              </div>
+              <div>{reply.text}</div>
+              <a href={reply.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: '12px', marginTop: '4px', display: 'block' }}>
+                View reply →
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Actions */}
+      {card.status === 'approved' && (
+        <div style={{ borderTop: '1px solid #eee', paddingTop: '20px' }}>
+          <h4>Confirm Posted Reply</h4>
+          <div style={{ marginBottom: '12px' }}>
+            <input
+              type="text"
+              placeholder="Paste URL of your posted reply"
+              value={replyUrl}
+              onChange={(e) => setReplyUrl(e.target.value)}
+              style={{ width: '300px', padding: '8px', marginRight: '8px' }}
+            />
+            <button
+              onClick={handleConfirmPosted}
+              disabled={loading}
+              style={{ backgroundColor: '#4caf50', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '4px' }}
+            >
+              Confirm Posted
+            </button>
+          </div>
+        </div>
+      )}
+      
       {card.status === 'pending' && (
         <div style={{ borderTop: '1px solid #eee', paddingTop: '20px' }}>
           <h4>Actions</h4>

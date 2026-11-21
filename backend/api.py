@@ -95,6 +95,12 @@ class NudgeRequest(BaseModel):
     client_request_id: str
 
 
+class ConfirmPostedRequest(BaseModel):
+    """Request to confirm posted reply."""
+    reply_url: str
+    client_request_id: str
+
+
 @app.post("/api/watch/start", response_model=StartWatchResponse)
 async def start_watch(request: StartWatchRequest):
     """Start a topic watch workflow."""
@@ -235,6 +241,25 @@ async def get_review(workflow_id: str):
     
     except Exception as e:
         raise HTTPException(status_code=404, detail="Review not found")
+
+
+@app.post("/api/reviews/{workflow_id}/confirm_posted")
+async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest):
+    """Send confirm_posted update to a review workflow."""
+    if not temporal_client:
+        raise HTTPException(status_code=500, detail="Temporal client not connected")
+    
+    try:
+        handle = temporal_client.get_workflow_handle(workflow_id)
+        result = await handle.execute_update(
+            "confirm_posted",
+            args=[request.reply_url, request.client_request_id]
+        )
+        
+        return {"message": "Confirmed", "result": result}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/budget")
