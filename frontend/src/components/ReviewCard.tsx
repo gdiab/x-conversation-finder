@@ -242,19 +242,105 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
             <span style={{ color: card.evidence.draft.claim_gate.passed ? 'green' : 'red' }}>
               {card.evidence.draft.claim_gate.passed ? 'PASSED' : 'FAILED'}
             </span>
-            {card.evidence.draft.claim_gate.unsupported_claims.length > 0 && (
-              <div style={{ fontSize: '14px', color: 'red', marginTop: '4px' }}>
-                Unsupported: {card.evidence.draft.claim_gate.unsupported_claims.join(', ')}
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              {card.evidence.draft.claim_gate.reasoning}
+            </div>
+            {card.evidence.draft.claim_gate.failed_sentences.length > 0 && (
+              <div style={{ marginTop: '8px' }}>
+                <div style={{ fontSize: '14px', fontWeight: 'bold', color: 'red' }}>
+                  Failed Sentences:
+                </div>
+                {card.evidence.draft.claim_gate.failed_sentences.map((failure, idx) => (
+                  <div key={idx} style={{
+                    backgroundColor: '#ffebee',
+                    padding: '8px',
+                    borderRadius: '4px',
+                    marginTop: '4px',
+                    fontSize: '14px',
+                  }}>
+                    <div style={{ fontWeight: 'bold' }}>"{failure.sentence}"</div>
+                    <div style={{ color: '#c62828', fontSize: '12px', marginTop: '4px' }}>
+                      {failure.reason}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
         )}
       </div>
 
+      {/* Segments with Tags */}
+      {card.evidence.draft && card.evidence.draft.segments.length > 0 && (
+        <div style={{ marginBottom: '20px' }}>
+          <h4>Reply Segments</h4>
+          <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
+            Each segment is tagged as claim or non-claim. Claims show their supporting passage.
+          </div>
+          {card.evidence.draft.segments.map((segment, idx) => {
+            const isClaim = segment.kind === 'claim';
+            const matchedPassage = isClaim && segment.source_passage_id
+              ? card.evidence.founder_materials.find(m => m.passage_id === segment.source_passage_id)
+              : null;
+            
+            return (
+              <div key={idx} style={{
+                backgroundColor: isClaim ? '#e3f2fd' : '#f5f5f5',
+                padding: '12px',
+                borderRadius: '4px',
+                marginBottom: '8px',
+                border: `1px solid ${isClaim ? '#90caf9' : '#e0e0e0'}`,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                  <div style={{ flex: 1 }}>
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      fontWeight: 'bold',
+                      backgroundColor: isClaim ? '#1976d2' : '#757575',
+                      color: '#fff',
+                      marginRight: '8px',
+                    }}>
+                      {segment.kind}
+                    </span>
+                    <span>{segment.text}</span>
+                  </div>
+                </div>
+                {isClaim && segment.quote && (
+                  <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
+                    <strong>Quote:</strong> "{segment.quote}"
+                  </div>
+                )}
+                {matchedPassage && (
+                  <div style={{
+                    backgroundColor: '#fff',
+                    padding: '8px',
+                    borderRadius: '4px',
+                    marginTop: '8px',
+                    fontSize: '12px',
+                    borderLeft: '3px solid #1976d2',
+                  }}>
+                    <div style={{ fontWeight: 'bold', color: '#1976d2', marginBottom: '4px' }}>
+                      Supporting Passage:
+                    </div>
+                    <div style={{ fontStyle: 'italic', color: '#666', marginBottom: '4px' }}>
+                      {matchedPassage.source}
+                    </div>
+                    <div>{matchedPassage.passage}</div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Draft Reply */}
       {card.evidence.draft && (
         <div style={{ marginBottom: '20px' }}>
-          <h4>Draft Reply</h4>
+          <h4>Draft Reply (Combined)</h4>
           {isEditing ? (
             <div>
               <textarea

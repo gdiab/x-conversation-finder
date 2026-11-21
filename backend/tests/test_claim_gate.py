@@ -517,3 +517,129 @@ async def test_claim_gate_cheap_support_fails():
     # Should fail because "distributed", "consensus", "99.9%", "HIPAA" aren't in passage
     assert not result.passed
     assert "support" in result.failed_sentences[0][1].lower()
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_multiple_segments_mixed_results():
+    """
+    Test claim gate with multiple segments where some pass and some fail.
+    Covers the old test_claim_gate_multiple_claims_some_fail scenario.
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform provides distributed systems support.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    segments = [
+        Segment(
+            text="Thanks for the question.",
+            kind="non_claim"
+        ),
+        Segment(
+            text="Our platform supports distributed systems.",
+            kind="claim",
+            source_passage_id="passage_0",
+            quote="distributed systems support"
+        ),
+        Segment(
+            text="We have the fastest performance in the industry.",
+            kind="claim",
+            source_passage_id="passage_0",
+            quote="fastest"  # Not in passage
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_mixed",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert len(result.failed_sentences) == 1
+    assert "fastest" in result.failed_sentences[0][0].lower()
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_empty_segments():
+    """
+    Test claim gate with empty segments list (edge case).
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform is great.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    segments = []
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_empty",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    # Empty segments means empty draft, which should pass (no claims to verify)
+    assert result.passed
+    assert len(result.failed_sentences) == 0
+
+
+@pytest.mark.asyncio
+async def test_normalize_text_handles_whitespace():
+    """
+    Test that quote matching handles different whitespace.
+    Covers helper function testing from old tests.
+    """
+    from backend.activities.claim_gate_activity import check_quote_in_passage
+    
+    passage = "Our   platform    provides\n  distributed   systems."
+    
+    # Should match despite different whitespace
+    assert check_quote_in_passage("platform provides distributed", passage)
+    assert check_quote_in_passage("platform  provides   distributed", passage)
+
+
+@pytest.mark.asyncio
+async def test_claim_gate_no_quote_provided():
+    """
+    Test claim segment with no quote field fails.
+    """
+    materials = [
+        FounderMaterial(
+            source="product_docs",
+            passage="Our platform supports SSO.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    segments = [
+        Segment(
+            text="We support SSO.",
+            kind="claim",
+            source_passage_id="passage_0",
+            quote=None  # Missing quote
+        ),
+    ]
+    
+    input_data = ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_no_quote",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "no quote" in result.failed_sentences[0][1].lower()

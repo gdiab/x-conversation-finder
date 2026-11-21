@@ -517,6 +517,19 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             # New skip reason format per ADR-0006 Amendment: includes per-sentence failures
             assert "not enough evidence" in card["skip_reason"].lower()
             assert "insufficient support" in card["skip_reason"].lower()
+            
+            # Gap 2: Verify ALL failed sentences are recorded in evidence, not just summary
+            assert card["evidence"]["draft"] is not None
+            failed_sentences = card["evidence"]["draft"]["claim_gate"]["failed_sentences"]
+            assert len(failed_sentences) == 2  # Both sentences failed (split by sentence splitter)
+            # Verify all failures are recorded with reasons (not truncated to display summary)
+            for failure in failed_sentences:
+                assert "sentence" in failure
+                assert "reason" in failure
+                assert len(failure["sentence"]) > 0
+                assert "insufficient support" in failure["reason"].lower()
+            # Verify this is more than what's in skip_reason (which is capped at 3 with 30 char limit)
+            assert card["skip_reason"] is not None
 
 
 @pytest.mark.asyncio

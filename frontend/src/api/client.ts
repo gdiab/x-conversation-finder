@@ -35,17 +35,49 @@ export interface ReviewCard {
       source: string;
       passage: string;
       relevance: string;
+      passage_id?: string;
     }>;
     draft: {
       text: string;
+      segments: Array<{
+        text: string;
+        kind: "claim" | "non_claim";
+        source_passage_id: string | null;
+        quote: string | null;
+      }>;
       claim_gate: {
         passed: boolean;
-        claims_checked: string[];
-        unsupported_claims: string[];
-        supported_claims: Record<string, string>;
+        segments: Array<{
+          text: string;
+          kind: "claim" | "non_claim";
+          source_passage_id: string | null;
+          quote: string | null;
+        }>;
+        failed_sentences: Array<{
+          sentence: string;
+          reason: string;
+        }>;
         reasoning: string;
+        // Legacy fields for backwards compatibility
+        claims: Array<{
+          text: string;
+          cited_passage_ids: string[];
+          quoted_spans: string[];
+        }>;
+        failed_claims: Array<{
+          claim: {
+            text: string;
+            cited_passage_ids: string[];
+            quoted_spans: string[];
+          };
+          reason: string;
+        }>;
       };
       steers_applied: string[];
+      token_count: number;
+      model_used: string;
+      input_tokens: number;
+      output_tokens: number;
     } | null;
     skip_reason: string | null;
   };
