@@ -123,6 +123,9 @@ class FakeReplyAgent(ReplyAgentPort):
     def _compute_freshness(self, created_at: str) -> float:
         """Compute freshness score."""
         created_dt = datetime.fromisoformat(created_at)
+        # Ensure timezone-aware for comparison
+        if created_dt.tzinfo is None:
+            created_dt = created_dt.replace(tzinfo=timezone.utc)
         age_hours = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600
         
         if age_hours < 24:
