@@ -134,6 +134,143 @@ class ReviewWorkflow:
             reply_post_id=self.reply_post_id,
         )
 
+    async def _research_post(self, workflow_id: str, created_at: str) -> Optional[Evidence]:
+        """Research post and return evidence, or None if skipped for low confidence."""
+        input = self.input
+        
+        evidence = await workflow.execute_activity(
+            "research_post",
+            ResearchPostInput(
+                post=input.post,
+                topic=input.topic,
+                product_brief=input.product_brief,
+                idempotency_key=f"{input.post.id}:research",
+            ),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
+            retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+            result_type=Evidence,
+        )
+        
+        workflow.logger.info(f"Research complete: confidence={evidence.confidence_score:.2f}")
+        
+        # Skip if low confidence
+        if evidence.confidence_score < input.confidence_threshold:
+            self.status = ReviewStatus.SKIPPED
+            self.skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
+            self.evidence = evidence
+            workflow.logger.info(f"Skipped: low confidence {evidence.confidence_score:.2f}")
+            
+            card = self._build_card(workflow_id, input.post, created_at)
+            
+            await workflow.execute_activity(
+                store_card,
+                StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:skip"),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
+            )
+            
+            return None
+        
+        return evidence
+
+    async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
+        """Draft reply with claim gate validation retries. Returns None if validation fails."""
+        input = self.input
+        claim_gate_attempts = 0
+        max_claim_gate_attempts = input.config.claim_gate_max_attempts
+        
+        while claim_gate_attempts < max_claim_gate_attempts:
+            claim_gate_attempts += 1
+            
+            # Draft reply
+            steer = "Try again with only supported claims" if claim_gate_attempts > 1 else None
+            evidence = await workflow.execute_activity(
+                "draft_reply",
+                DraftReplyInput(
+                    evidence=evidence,
+                    steer=steer,
+                    idempotency_key=f"{input.post.id}:draft:attempt{claim_gate_attempts}",
+                ),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+                result_type=Evidence,
+            )
+            
+            # Run deterministic claim gate
+            if evidence.draft:
+                claim_gate_result = await workflow.execute_activity(
+                    claim_gate,
+                    ClaimGateInput(
+                        claims=evidence.draft.claim_gate.claims,
+                        founder_materials=evidence.founder_materials,
+                        idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
+                    ),
+                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
+                )
+                
+                # Update evidence with gate result
+                evidence.draft.claim_gate = claim_gate_result
+                
+                if claim_gate_result.passed:
+                    workflow.logger.info(f"Claim gate passed on attempt {claim_gate_attempts}")
+                    return evidence
+                else:
+                    workflow.logger.warning(
+                        f"Claim gate failed on attempt {claim_gate_attempts}: "
+                        f"{len(claim_gate_result.failed_claims)} failed claims"
+                    )
+            else:
+                workflow.logger.error("No draft generated")
+                break
+        
+        # Skip if claim gate failed after retries
+        self.status = ReviewStatus.SKIPPED
+        self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
+        self.evidence = evidence
+        workflow.logger.info(f"Skipped: claim gate failed after {claim_gate_attempts} attempts")
+        
+        card = self._build_card(workflow_id, input.post, created_at)
+        
+        await workflow.execute_activity(
+            store_card,
+            StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:gate_fail"),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
+        )
+        
+        return None
+
+    async def _wait_for_decision(self, workflow_id: str) -> Optional[str]:
+        """Wait for human decision (approve/skip). Returns None if timed out."""
+        input = self.input
+        timeout_hours = input.config.review_timeout_hours
+        workflow.logger.info(f"Waiting for human decision ({timeout_hours}h timeout)")
+        
+        try:
+            await workflow.wait_condition(
+                lambda: self.approved or self.skipped,
+                timeout=timedelta(hours=timeout_hours),
+            )
+        except asyncio.TimeoutError:
+            self.status = ReviewStatus.EXPIRED
+            workflow.logger.info(f"Review expired after {timeout_hours}h")
+            
+            await workflow.execute_activity(
+                update_card,
+                UpdateCardInput(
+                    workflow_id=workflow_id,
+                    updates={"status": ReviewStatus.EXPIRED.value},
+                    idempotency_key=f"{workflow_id}:update:expire",
+                ),
+                start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
+            )
+            
+            return "expired"
+        
+        if self.skipped:
+            workflow.logger.info("Skipped by founder")
+            return "skipped"
+        
+        return None
+
     @workflow.run
     async def run(self, input: ReviewInput) -> str:
         """Run the review workflow."""
@@ -147,107 +284,18 @@ class ReviewWorkflow:
         
         try:
             # Step 1: Research
-            evidence = await workflow.execute_activity(
-                "research_post",
-                ResearchPostInput(
-                    post=input.post,
-                    topic=input.topic,
-                    product_brief=input.product_brief,
-                    idempotency_key=f"{input.post.id}:research",
-                ),
-                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
-                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
-                result_type=Evidence,
-            )
-            
-            workflow.logger.info(f"Research complete: confidence={evidence.confidence_score:.2f}")
-            
-            # Skip if low confidence
-            if evidence.confidence_score < input.confidence_threshold:
-                self.status = ReviewStatus.SKIPPED
-                self.skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
-                self.evidence = evidence
-                workflow.logger.info(f"Skipped: low confidence {evidence.confidence_score:.2f}")
-                
-                card = self._build_card(workflow_id, input.post, created_at)
-                
-                await workflow.execute_activity(
-                    store_card,
-                    StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:skip"),
-                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
-                )
-                
+            evidence = await self._research_post(workflow_id, created_at)
+            if evidence is None:
                 return "skipped"
             
             # Step 2: Draft (with claim gate retry logic)
-            claim_gate_attempts = 0
-            max_claim_gate_attempts = input.config.claim_gate_max_attempts
-            
-            while claim_gate_attempts < max_claim_gate_attempts:
-                claim_gate_attempts += 1
-                
-                # Draft reply
-                steer = "Try again with only supported claims" if claim_gate_attempts > 1 else None
-                evidence = await workflow.execute_activity(
-                    "draft_reply",
-                    DraftReplyInput(
-                        evidence=evidence,
-                        steer=steer,
-                        idempotency_key=f"{input.post.id}:draft:attempt{claim_gate_attempts}",
-                    ),
-                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
-                    retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
-                    result_type=Evidence,
-                )
-                
-                # Run deterministic claim gate
-                if evidence.draft:
-                    claim_gate_result = await workflow.execute_activity(
-                        claim_gate,
-                        ClaimGateInput(
-                            claims=evidence.draft.claim_gate.claims,
-                            founder_materials=evidence.founder_materials,
-                            idempotency_key=f"{input.post.id}:gate:attempt{claim_gate_attempts}",
-                        ),
-                        start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
-                    )
-                    
-                    # Update evidence with gate result
-                    evidence.draft.claim_gate = claim_gate_result
-                    
-                    if claim_gate_result.passed:
-                        workflow.logger.info(f"Claim gate passed on attempt {claim_gate_attempts}")
-                        break
-                    else:
-                        workflow.logger.warning(
-                            f"Claim gate failed on attempt {claim_gate_attempts}: "
-                            f"{len(claim_gate_result.failed_claims)} failed claims"
-                        )
-                else:
-                    workflow.logger.error("No draft generated")
-                    break
-            
-            # Skip if claim gate failed after retries
-            if not evidence.draft or not evidence.draft.claim_gate.passed:
-                self.status = ReviewStatus.SKIPPED
-                self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
-                self.evidence = evidence
-                workflow.logger.info(f"Skipped: claim gate failed after {claim_gate_attempts} attempts")
-                
-                card = self._build_card(workflow_id, input.post, created_at)
-                
-                await workflow.execute_activity(
-                    store_card,
-                    StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:gate_fail"),
-                    start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
-                )
-                
+            evidence = await self._draft_and_validate(evidence, workflow_id, created_at)
+            if evidence is None:
                 return "skipped"
             
             self.evidence = evidence
             
             # Store pending card
-            self.evidence = evidence
             card = self._build_card(workflow_id, input.post, created_at)
             
             await workflow.execute_activity(
@@ -256,51 +304,12 @@ class ReviewWorkflow:
                 start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
             )
             
-            # Step 3: Wait for human decision and signal completion
-            timeout_hours = input.config.review_timeout_hours
-            workflow.logger.info(f"Waiting for human decision ({timeout_hours}h timeout)")
+            # Step 3: Wait for human decision
+            result = await self._wait_for_decision(workflow_id)
+            if result:
+                return result
             
-            try:
-                await workflow.wait_condition(
-                    lambda: self.approved or self.skipped,
-                    timeout=timedelta(hours=timeout_hours),
-                )
-            except asyncio.TimeoutError:
-                self.status = ReviewStatus.EXPIRED
-                workflow.logger.info(f"Review expired after {timeout_hours}h")
-                
-                await workflow.execute_activity(
-                    update_card,
-                    UpdateCardInput(
-                        workflow_id=workflow_id,
-                        updates={"status": ReviewStatus.EXPIRED.value},
-                        idempotency_key=f"{workflow_id}:update:expire",
-                    ),
-                    start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
-                )
-                
-                return "expired"
-            
-            # Handle skip
-            if self.skipped:
-                workflow.logger.info(f"Skipped by founder")
-                
-                await workflow.execute_activity(
-                    update_card,
-                    UpdateCardInput(
-                        workflow_id=workflow_id,
-                        updates={
-                            "status": ReviewStatus.SKIPPED.value,
-                            "skip_reason": self.skip_reason,
-                        },
-                        idempotency_key=f"{workflow_id}:update:skip",
-                    ),
-                    start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
-                )
-                
-                return "skipped"
-            
-            # Handle approve - wait for confirmation
+            # Handle approval (approved is True at this point)
             workflow.logger.info(f"Approved by founder")
             
             # Update to approved status
@@ -318,6 +327,7 @@ class ReviewWorkflow:
             )
             
             # Step 4: Wait for confirm_posted and update completion
+            timeout_hours = input.config.review_timeout_hours
             workflow.logger.info(f"Waiting for reply URL confirmation ({timeout_hours}h timeout)")
             
             try:
