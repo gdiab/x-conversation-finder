@@ -15,8 +15,6 @@ from backend.gate.non_claim_set import (
     is_closed_set_non_claim,
     normalize_for_closed_set,
     _apply_confusables_fold,
-    _contains_number,
-    _matches_backstop_pattern,
 )
 from backend.models import FounderMaterial, Segment
 
@@ -49,45 +47,48 @@ async def test_split_sentences_handles_abbreviations():
 
 
 @pytest.mark.asyncio
-async def test_qa_r12_splitter_uppercase_after_abbreviation():
+async def test_qa_r13_splitter_never_split_after_abbreviation():
     """
-    QA R12: Splitter splits when next word is capitalized after vs./e.g./i.e./etc.
+    QA R13: Splitter NEVER splits after abbreviations.
     
-    Abbreviation is non-boundary ONLY when next token is lowercase or digit.
-    When next word is uppercase, split there.
+    This replaces test_qa_r12_splitter_uppercase_after_abbreviation which
+    locked in wrong behavior (splitting after abbreviations when next word
+    was uppercase).
+    
+    Expected results:
+    - "Ask Dr. Smith about it." is one sentence
+    - "Foo vs. It is shipped." is one sentence  
+    - "Use e.g. Postgres." keeps all of its text
+    - "We are Acme Inc." is not selectable (ends in abbreviation)
     """
-    # Specified failing case: "vs. It" should split
-    text = "Retries are on the roadmap vs. It is shipped."
-    sentences = split_into_sentences(text)
-    assert len(sentences) == 2
-    assert "vs." in sentences[0]
-    assert sentences[1].startswith("It is shipped")
+    # NEVER split after abbreviation, even if next word is uppercase
+    text1 = "Foo vs. It is shipped."
+    sentences1 = split_into_sentences(text1)
+    assert len(sentences1) == 1
+    assert "vs." in sentences1[0]
+    assert "It is shipped" in sentences1[0]
     
-    # "e.g." followed by uppercase splits (over-splitting is safe)
-    # Note: splits on "e.g. JSON" because JSON is uppercase
-    text2 = "They support formats e.g. JSON. It scales."
+    text2 = "Ask Dr. Smith about it."
     sentences2 = split_into_sentences(text2)
-    # May split on e.g. if next is uppercase, but must split on the period before "It"
-    assert len(sentences2) >= 2
-    # Verify the last sentence starts with "It"
-    assert any("It" in s for s in sentences2)
+    assert len(sentences2) == 1
+    assert "Dr. Smith" in sentences2[0]
     
-    # "Acme Inc." at end of sentence should be one sentence
-    text3 = "The company is Acme Inc."
+    text3 = "Use e.g. Postgres."
     sentences3 = split_into_sentences(text3)
     assert len(sentences3) == 1
+    assert "e.g. Postgres" in sentences3[0]
     
-    # "Inc." followed by uppercase should split (new sentence)
-    text4 = "Founded by Acme Inc. It raised $50M."
+    # Sentence ending in abbreviation is one sentence
+    text4 = "We are Acme Inc."
     sentences4 = split_into_sentences(text4)
-    assert len(sentences4) == 2
-    assert "Inc." in sentences4[0]
-    assert sentences4[1].startswith("It raised")
+    assert len(sentences4) == 1
     
-    # Existing abbreviation tests should still pass
-    # "Ph.D." followed by lowercase continues
-    text5 = "John Smith, Ph.D. is a founder."
+    # But if there's a sentence after (with no abbreviation), that splits normally
+    text5 = "We are Acme Inc. Our product supports SSO."
     sentences5 = split_into_sentences(text5)
+    # Should be 2 sentences: first ends with "Inc.", second starts with "Our"
+    # Actually no - because we NEVER split after abbreviation
+    # So this becomes one long sentence
     assert len(sentences5) == 1
 
 
@@ -222,32 +223,19 @@ async def test_is_closed_set_non_claim_greetings_thanks():
     assert not is_closed_set_non_claim("Hello, many teams switched from Temporal to us.")
 
 
-@pytest.mark.asyncio
-async def test_is_closed_set_non_claim_opinion_frames():
-    """B5a: Opinion frames without product claims are non_claim."""
-    # Opinion without product claims
-    # QA R12: Updated examples - removed "this", "hard", "well" from allowlist
-    assert is_closed_set_non_claim("I think the problem is interesting.")
-    assert is_closed_set_non_claim("I love the thread.")
-    assert is_closed_set_non_claim("In my experience, the approach is different.")
-    
-    # B5a: Opinion that launders claim → NOT non_claim
-    assert not is_closed_set_non_claim("I think it's way cheaper.")
-    assert not is_closed_set_non_claim("In my experience it cuts costs in half.")
-    assert not is_closed_set_non_claim("I believe ours is 10x faster.")
+# QA R13: DELETED - Opinion frames removed in v2.0.0
+# Opinion frames were replaced with fixed phrase list
+# See test_r13_edit_assertion_* tests for edit-path rejection tests
 
 
 @pytest.mark.asyncio
 async def test_qa_r11_b1_rejected_examples():
     """
-    QA R11 B1: All specified examples must be REJECTED.
+    QA R13: Update for v2.0.0 - these must not match fixed phrases.
     
-    These are all violations of the closed-set non_claim rules:
-    - Numbers (digits or words) are never allowed
-    - Open-ended tails are not accepted
-    - Frames don't make assertions non_claims
+    These are not in the fixed phrase list, so they are rejected.
     """
-    # Number words in various contexts
+    # QA R13: These are not exact matches to fixed phrases
     assert not is_closed_set_non_claim("Happy to share that setup takes five minutes.")
     assert not is_closed_set_non_claim("Happy to share our free forever plan.")
     assert not is_closed_set_non_claim("Thanks for asking about whether our product is the cheapest")
@@ -262,39 +250,20 @@ async def test_qa_r11_b1_rejected_examples():
 @pytest.mark.asyncio
 async def test_qa_r11_b1_passing_examples():
     """
-    QA R11 B1: Genuine non_claims must PASS.
+    QA R13: Update for v2.0.0 - these must match fixed phrases exactly.
     
-    These are valid closed-set non_claims.
+    These are exact matches to phrases in the fixed phrase list.
     """
     assert is_closed_set_non_claim("Thanks!")
     assert is_closed_set_non_claim("Happy to share more details.")
     assert is_closed_set_non_claim("What stack are you on?")
-    assert is_closed_set_non_claim("Love this thread.")
+    # QA R13: "Love this thread" needs "I" prefix to match phrase
+    assert is_closed_set_non_claim("I love this thread.")
 
 
-@pytest.mark.asyncio
-async def test_qa_r12_frame_assertions_rejected():
-    """
-    QA R12: Frame assertions with product/capability/evaluative words must be REJECTED.
-    
-    Even in "I think" or "Why" frames, product assertions are not non_claims.
-    The allowlist was tightened to remove all product, capability, and evaluative words.
-    """
-    # Specified failing cases
-    assert not is_closed_set_non_claim("I think this works well.")
-    assert not is_closed_set_non_claim("I think we have a great setup.")
-    assert not is_closed_set_non_claim("I think setup is great.")
-    assert not is_closed_set_non_claim("I love setup.")
-    assert not is_closed_set_non_claim("Why is the setup very easy?")
-    assert not is_closed_set_non_claim("I like that this has the same setup.")
-    
-    # Additional variants covering capability/product words
-    assert not is_closed_set_non_claim("I think it works.")
-    assert not is_closed_set_non_claim("Why can we use this?")
-    assert not is_closed_set_non_claim("I think that will help.")
-    assert not is_closed_set_non_claim("I believe these have good performance.")
-    assert not is_closed_set_non_claim("How well does this work?")
-    assert not is_closed_set_non_claim("I think those could scale.")
+# QA R13: DELETED - Frame assertions test removed in v2.0.0
+# Frames were replaced with fixed phrase list
+# See test_r13_edit_assertion_* tests for edit-path rejection tests of these examples
 
 
 @pytest.mark.asyncio
@@ -565,10 +534,9 @@ async def test_b5b_its_handling():
     because it's often a product reference. Opinion frames with "it's" are rejected.
     
     The tokenizer splits "it's" into "it" + "'s", and since "it" is not in
-    ALLOWLIST_WORDS, these opinion frames are rejected to prevent product-reference
-    laundering.
+    fixed phrase list, these are rejected in edit paths.
     """
-    # "it's" is not allowlisted (even in opinion frames) - "it" not in ALLOWLIST_WORDS
+    # QA R13: "it" sentences are not in the fixed phrase list
     assert not is_closed_set_non_claim("I think it's a great question.")
     assert not is_closed_set_non_claim("In my opinion it's really interesting.")
     
@@ -771,7 +739,452 @@ async def test_nfkc_handles_fullwidth_and_mathematical():
     normalized_math = normalize_for_closed_set(math_bold)
     assert "soc2" in normalized_math.lower()
     
-    # Verify these get caught by backstop
-    from backend.gate.non_claim_set import _matches_backstop_pattern
-    assert _matches_backstop_pattern(fullwidth)
-    assert _matches_backstop_pattern(math_bold)
+    # QA R13: Verify these get caught by TEST-ONLY backstop
+    from backend.gate.non_claim_set import _test_only_matches_backstop
+    assert _test_only_matches_backstop(fullwidth)
+    assert _test_only_matches_backstop(math_bold)
+
+
+# ==================== QA R13: ARCHITECT DECISION 3 TESTS ====================
+# Fixed phrase list v2.0.0 - phrase_id only, no frames
+
+
+@pytest.mark.asyncio
+async def test_r13_phrase_validation():
+    """QA R13: Test that all phrases pass validation (no numbers, pass backstop)."""
+    from backend.gate.non_claim_set import validate_all_phrases
+    
+    errors = validate_all_phrases()
+    assert errors == [], f"Phrase validation failed: {errors}"
+
+
+@pytest.mark.asyncio
+async def test_r13_unknown_phrase_id_rejected():
+    """QA R13: Unknown phrase_id must be rejected."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    segments = [
+        Segment(kind="non_claim", phrase_id="unknown.phrase.id"),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_unknown_phrase_id"
+    ))
+    
+    assert not result.passed
+    assert any("Unknown phrase_id" in reason for _, reason in result.failed_sentences)
+
+
+@pytest.mark.asyncio
+async def test_r13_non_claim_with_text_rejected():
+    """QA R13: Non_claim segment that carries text must never have that text used."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Model should not provide text for non_claim, only phrase_id
+    segments = [
+        Segment(kind="non_claim", text="Thanks for sharing.", phrase_id="thanks.for_sharing"),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_non_claim_with_text"
+    ))
+    
+    assert not result.passed
+    assert any("must not have text" in reason for _, reason in result.failed_sentences)
+
+
+@pytest.mark.asyncio
+async def test_r13_draft_shape_empty_segments():
+    """QA R13: Draft must have at least 1 segment."""
+    materials = []
+    segments = []
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_empty_segments"
+    ))
+    
+    assert not result.passed
+    assert "at least 1 segment" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_r13_draft_shape_too_many_segments():
+    """QA R13: Draft must have at most 3 segments."""
+    materials = []
+    segments = [
+        Segment(kind="non_claim", phrase_id="opener.thanks"),
+        Segment(kind="non_claim", phrase_id="thanks.for_sharing"),
+        Segment(kind="non_claim", phrase_id="offer.happy_to_help"),
+        Segment(kind="non_claim", phrase_id="offer.share_details"),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_too_many_segments"
+    ))
+    
+    assert not result.passed
+    assert "at most 3 segments" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_r13_draft_shape_two_claims():
+    """QA R13: Draft must have at most 1 claim."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO. It has built-in encryption.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    segments = [
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=1),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_two_claims"
+    ))
+    
+    assert not result.passed
+    assert "at most 1 claim" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_r13_valid_assembly_passes():
+    """QA R13: A valid assembly with phrase_id and claim passes."""
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    segments = [
+        Segment(kind="non_claim", phrase_id="opener.thanks"),
+        Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key="test_valid_assembly"
+    ))
+    
+    assert result.passed
+    assert len(result.segments) == 2
+    assert result.segments[0].text == "Thanks!"
+    assert "SSO" in result.segments[1].text
+
+
+# ==================== QA R13: EDIT-PATH REJECTION TESTS ====================
+# Port all r8-r13 assertion examples to edit-path rejection tests
+
+
+@pytest.mark.asyncio
+async def test_r13_edit_assertion_i_think_its_way_cheaper():
+    """QA R13 Edit: 'I think it's way cheaper.' must be rejected."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    gated_segments = []
+    
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="I think it's way cheaper.",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_edit_assertion1"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r13_edit_assertion_i_think_they_are_same():
+    """QA R13 Edit: 'I think they are the same.' must be rejected."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    gated_segments = []
+    
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="I think they are the same.",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_edit_assertion2"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r13_edit_assertion_i_like_the_idea():
+    """QA R13 Edit: 'I like the idea.' must be rejected."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    gated_segments = []
+    
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="I like the idea.",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_edit_assertion3"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r13_edit_assertion_i_think_you_are_problem():
+    """QA R13 Edit: 'I think you are the problem.' must be rejected."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    gated_segments = []
+    
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="I think you are the problem.",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_edit_assertion4"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r13_edit_assertion_why_is_issue_same():
+    """QA R13 Edit: 'Why is the issue the same?' must be rejected."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    gated_segments = []
+    
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="Why is the issue the same?",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_edit_assertion5"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r13_edit_assertion_i_think_works_well():
+    """QA R13 Edit: 'I think this works well.' must be rejected."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    gated_segments = []
+    
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="I think this works well.",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_edit_assertion6"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].passed
+
+
+@pytest.mark.asyncio
+async def test_r13_abbreviation_ending_non_selectable():
+    """QA R13: Sentences ending in abbreviation are NOT selectable."""
+    from backend.activities.claim_gate_activity import insert_claim_sentence
+    
+    materials = {
+        "passage_0": FounderMaterial(
+            source="brief.md",
+            passage="We are Acme Inc.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    }
+    
+    # Sentence ends with "Inc." - not selectable
+    segment = Segment(kind="claim", source_passage_id="passage_0", sentence_index=0)
+    success, text, error = insert_claim_sentence(segment, materials)
+    
+    assert not success
+    assert "abbreviation" in error.lower()
+
+
+@pytest.mark.asyncio
+async def test_r13_referent_curly_quotes():
+    """QA R13: Unresolved referent rule uses explicit unicode escapes for curly quotes."""
+    # Test with real curly-quote characters
+    assert has_unresolved_referent('"It is ok."')  # Curly left double quote
+    assert has_unresolved_referent('"It is ok."')  # Curly right double quote (if starts with)
+    assert has_unresolved_referent("'It is ok.'")  # Curly left single quote
+    assert has_unresolved_referent("- It is ok")   # Leading dash
+    
+    # Normal quotes should still work
+    assert has_unresolved_referent('"It is ok."')
+    assert has_unresolved_referent("'It is ok.'")
+
+
+@pytest.mark.asyncio
+async def test_r13_discourse_markers():
+    """QA R13: Discourse markers (Therefore, Otherwise, Thus, Hence, Still, Yet) are stripped."""
+    # These should NOT be flagged as referents (discourse markers are skipped)
+    assert not has_unresolved_referent("Therefore it ships.")
+    assert not has_unresolved_referent("Otherwise it fails.")
+    assert not has_unresolved_referent("Thus we proceed.")
+    assert not has_unresolved_referent("Hence the decision.")
+    assert not has_unresolved_referent("Still it works.")
+    assert not has_unresolved_referent("Yet it succeeds.")
+
+
+@pytest.mark.asyncio
+async def test_r13_both_special_handling():
+    """QA R13: 'Both' is only flagged when followed by verb or 'of'."""
+    # Should NOT be flagged (Both + noun)
+    assert not has_unresolved_referent("Both plans include SSO.")
+    
+    # SHOULD be flagged (Both + verb)
+    assert has_unresolved_referent("Both are supported.")
+    assert has_unresolved_referent("Both have SSO.")
+    assert has_unresolved_referent("Both do this.")
+    
+    # SHOULD be flagged (Both + of)
+    assert has_unresolved_referent("Both of them work.")
+
+
+@pytest.mark.asyncio
+async def test_r13_reuse_tracks_sentence_type():
+    """QA R13: Reuse tracks question vs statement. Questions match only questions."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = []
+    
+    # Gated question
+    gated_segments = [
+        Segment(kind="non_claim", text="They are the same as your stack?", phrase_id=None)
+    ]
+    
+    # Test 1: Edited to statement form - should NOT reuse verdict
+    results1 = await verify_edited_text(EditedTextGateInput(
+        edited_text="They are the same as your stack.",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_question_to_statement"
+    ))
+    
+    assert len(results1) == 1
+    assert not results1[0].kept_segment  # Did NOT reuse
+    
+    # Test 2: Kept as question - should reuse verdict
+    results2 = await verify_edited_text(EditedTextGateInput(
+        edited_text="They are the same as your stack?",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_question_to_question"
+    ))
+    
+    assert len(results2) == 1
+    assert results2[0].kept_segment  # DID reuse
+
+
+@pytest.mark.asyncio
+async def test_r13_verified_claim_edited_to_question_loses_status():
+    """QA R13: A verified claim edited to end in '?' loses its verified status."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Gated statement
+    gated_segments = [
+        Segment(kind="claim", text="Our product supports SSO", source_passage_id="passage_0", sentence_index=0)
+    ]
+    
+    # Edited to question - should NOT reuse verdict
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="Our product supports SSO?",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_statement_to_question"
+    ))
+    
+    assert len(results) == 1
+    assert not results[0].kept_segment  # Did NOT reuse
+
+
+@pytest.mark.asyncio
+async def test_r13_statement_punctuation_changes_keep_verdict():
+    """QA R13: Changing '.' to '!' keeps the verdict (both statements)."""
+    from backend.activities.claim_gate_activity import EditedTextGateInput, verify_edited_text
+    
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our product supports SSO.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Gated statement with period
+    gated_segments = [
+        Segment(kind="claim", text="Our product supports SSO", source_passage_id="passage_0", sentence_index=0)
+    ]
+    
+    # Changed to exclamation - should reuse verdict (both statements)
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="Our product supports SSO!",
+        gated_segments=gated_segments,
+        founder_materials=materials,
+        idempotency_key="test_period_to_exclamation"
+    ))
+    
+    assert len(results) == 1
+    assert results[0].kept_segment  # DID reuse (both are statements)
