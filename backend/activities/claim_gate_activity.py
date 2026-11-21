@@ -310,13 +310,15 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     results = []
     
     for sentence in sentences:
-        norm_sentence = normalize_text(sentence)
+        # QA R12: Strip trailing punctuation before normalizing for comparison
+        # Segment texts are stored without trailing punctuation (from insert_claim_sentence)
+        norm_sentence = normalize_text(sentence.rstrip('.!?'))
         
         # B4: Check if this sentence exactly matches a previously gated segment (exact after normalization)
         matched_seg = None
         for seg in input.gated_segments:
             if seg.text:
-                norm_seg = normalize_text(seg.text)
+                norm_seg = normalize_text(seg.text.rstrip('.!?'))
                 if norm_sentence == norm_seg:
                     matched_seg = seg
                     break
