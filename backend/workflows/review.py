@@ -40,6 +40,16 @@ with workflow.unsafe.imports_passed_through():
     from backend.activities.claim_gate_activity import ClaimGateInput
     from backend.config import get_settings
     
+    def dict_to_claim_gate_result(data: dict) -> ClaimGateResult:
+        """Convert dict to ClaimGateResult dataclass."""
+        return ClaimGateResult(
+            passed=data["passed"],
+            claims_checked=data["claims_checked"],
+            unsupported_claims=data["unsupported_claims"],
+            supported_claims=data["supported_claims"],
+            reasoning=data["reasoning"],
+        )
+    
     def dict_to_post(data: dict) -> Post:
         """Convert dict to Post dataclass."""
         author = Author(
@@ -227,7 +237,7 @@ class ReviewWorkflow:
                 
                 # Run deterministic claim gate
                 if evidence.draft:
-                    claim_gate_result = await workflow.execute_activity(
+                    claim_gate_result_dict = await workflow.execute_activity(
                         "claim_gate",
                         ClaimGateInput(
                             draft_text=evidence.draft.text,
@@ -236,6 +246,7 @@ class ReviewWorkflow:
                         ),
                         start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
                     )
+                    claim_gate_result = dict_to_claim_gate_result(claim_gate_result_dict)
                     
                     # Update evidence with gate result
                     evidence.draft.claim_gate = claim_gate_result

@@ -15,6 +15,7 @@ from temporalio.worker import Worker
 from backend.workflows.review import ReviewWorkflow, ReviewInput
 from backend.activities import XActivities, ReplyActivities
 from backend.activities.store_activities import store_card, update_card
+from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
 
 
@@ -32,6 +33,7 @@ async def test_review_workflow_approve(sample_post, product_brief):
             activities=[
                 reply_activities.research_post,
                 reply_activities.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
                 x_activities.lookup_post,
@@ -97,6 +99,7 @@ async def test_review_workflow_skip(sample_post, product_brief):
             activities=[
                 reply_activities.research_post,
                 reply_activities.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
                 x_activities.lookup_post,
@@ -144,6 +147,7 @@ async def test_review_workflow_nudge(sample_post, product_brief):
             activities=[
                 reply_activities.research_post,
                 reply_activities.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
                 x_activities.lookup_post,
@@ -212,6 +216,7 @@ async def test_review_workflow_timeout(sample_post, product_brief):
             activities=[
                 reply_activities.research_post,
                 reply_activities.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
                 x_activities.lookup_post,
@@ -253,6 +258,7 @@ async def test_review_workflow_low_confidence(sample_post, product_brief):
             activities=[
                 reply_activities.research_post,
                 reply_activities.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
                 x_activities.lookup_post,
@@ -292,6 +298,7 @@ async def test_review_workflow_approved_not_confirmed(sample_post, product_brief
             activities=[
                 reply_activities.research_post,
                 reply_activities.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
                 x_activities.lookup_post,
@@ -343,6 +350,7 @@ async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_b
             activities=[
                 reply_activities.research_post,
                 reply_activities.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
                 x_activities.lookup_post,
