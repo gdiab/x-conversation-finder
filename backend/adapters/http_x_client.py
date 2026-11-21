@@ -6,7 +6,8 @@ Implements XClientPort using real X API v2 bearer token authentication.
 
 import httpx
 from typing import List, Optional, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from temporalio.exceptions import ApplicationError
 
 from backend.ports import XClientPort
 from backend.models import Post, Author
@@ -82,11 +83,19 @@ class HttpXClient(XClientPort):
                 )
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
-                # Handle 429 rate limit (S-7)
+                # R4-SF4: Handle 429 rate limit with typed ApplicationError
                 if e.response.status_code == 429:
-                    retry_after = e.response.headers.get("Retry-After", "60")
-                    raise httpx.HTTPError(
-                        f"Rate limited. Retry after {retry_after} seconds"
+                    retry_after_str = e.response.headers.get("Retry-After", "60")
+                    try:
+                        retry_after_seconds = int(retry_after_str)
+                    except ValueError:
+                        retry_after_seconds = 60
+                    
+                    raise ApplicationError(
+                        f"X API rate limited. Retry after {retry_after_seconds} seconds",
+                        type="RateLimitError",
+                        non_retryable=False,
+                        next_retry_delay=timedelta(seconds=retry_after_seconds),
                     )
                 raise
             data = response.json()
@@ -172,11 +181,19 @@ class HttpXClient(XClientPort):
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     return None
-                # Handle 429 rate limit (S-7)
+                # R4-SF4: Handle 429 rate limit with typed ApplicationError
                 if e.response.status_code == 429:
-                    retry_after = e.response.headers.get("Retry-After", "60")
-                    raise httpx.HTTPError(
-                        f"Rate limited. Retry after {retry_after} seconds"
+                    retry_after_str = e.response.headers.get("Retry-After", "60")
+                    try:
+                        retry_after_seconds = int(retry_after_str)
+                    except ValueError:
+                        retry_after_seconds = 60
+                    
+                    raise ApplicationError(
+                        f"X API rate limited. Retry after {retry_after_seconds} seconds",
+                        type="RateLimitError",
+                        non_retryable=False,
+                        next_retry_delay=timedelta(seconds=retry_after_seconds),
                     )
                 raise
             
