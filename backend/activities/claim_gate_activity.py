@@ -39,49 +39,41 @@ def split_into_sentences(text: str) -> List[str]:
     - Decimals like 99.99%
     - Common abbreviations: Inc., Ltd., e.g., i.e., Mr., Dr., vs., etc., Ph.D.
     
-    Splits on sentence-ending punctuation (. ! ?) followed by space or end,
-    but not on decimals or abbreviations.
+    Splits on sentence-ending punctuation (. ! ?) followed by space,
+    but not on decimals or common abbreviations.
     Returns non-empty sentences.
     """
-    # Common abbreviations that should not trigger sentence splits
-    # Map pattern to replacement text
-    abbreviations = [
-        (r'\bInc\.', 'Inc.'),
-        (r'\bLtd\.', 'Ltd.'),
-        (r'\bCo\.', 'Co.'),
-        (r'\bCorp\.', 'Corp.'),
-        (r'\be\.g\.', 'e.g.'),
-        (r'\bi\.e\.', 'i.e.'),
-        (r'\bvs\.', 'vs.'),
-        (r'\bMr\.', 'Mr.'),
-        (r'\bMrs\.', 'Mrs.'),
-        (r'\bMs\.', 'Ms.'),
-        (r'\bDr\.', 'Dr.'),
-        (r'\bProf\.', 'Prof.'),
-        (r'\betc\.', 'etc.'),
-        (r'\bapprox\.', 'approx.'),
-        (r'\bca\.', 'ca.'),
-        (r'\bPh\.D\.', 'Ph.D.'),
+    # Replace common abbreviations with placeholders to protect them during splitting
+    # We replace the ENTIRE abbreviation including periods
+    replacements = {}
+    abbrevs = [
+        'Inc.', 'Ltd.', 'Co.', 'Corp.',
+        'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.',
+        'Ph.D.', 'e.g.', 'i.e.', 'vs.', 'etc.', 'approx.', 'ca.',
     ]
     
-    # Replace abbreviations with placeholders temporarily
-    placeholders = {}
-    for i, (pattern, replacement) in enumerate(abbreviations):
-        placeholder = f'___ABBR{i}___'
-        text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
-        placeholders[placeholder] = replacement
+    for i, abbrev in enumerate(abbrevs):
+        placeholder = f'__ABBR{i}__'
+        # Case-insensitive replacement with word boundaries
+        pattern = r'\b' + re.escape(abbrev)
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        # Store the actual matched text for restoration (preserves case)
+        for match in reversed(matches):  # Reverse to maintain positions
+            actual_text = match.group(0)
+            text = text[:match.start()] + placeholder + text[match.end():]
+            if placeholder not in replacements:
+                replacements[placeholder] = actual_text
     
-    # Use negative lookbehind and lookahead to avoid splitting decimals
-    # Don't split if period is between digits
-    sentences = re.split(r'(?<!\d)[.!?]+(?!\d)\s+', text)
+    # Now split on sentence-ending punctuation
+    # Don't split if period is between digits (decimals)
+    sentences = re.split(r'(?<!\d)[.!?]+\s+', text)
     
     # Restore abbreviations in each sentence
     result = []
     for sent in sentences:
         if sent.strip():
-            # Restore abbreviations by replacing placeholders back
-            for placeholder, abbr_text in placeholders.items():
-                sent = sent.replace(placeholder, abbr_text)
+            for placeholder, abbrev in replacements.items():
+                sent = sent.replace(placeholder, abbrev)
             result.append(sent.strip())
     
     return result
