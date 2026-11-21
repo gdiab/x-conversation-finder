@@ -13,7 +13,9 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from backend.workflows.review import ReviewWorkflow, ReviewInput
-from backend.activities import XActivities, ReplyActivities
+from backend.activities.x_activities import XActivities
+from backend.activities.reply_activities import ReplyActivities
+from backend.activities import x_activity_funcs, reply_activity_funcs
 from backend.activities.store_activities import store_card, update_card
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
@@ -22,22 +24,19 @@ from backend.adapters import FakeXClient, FakeReplyAgent
 @pytest.mark.asyncio
 async def test_review_workflow_approve(sample_post, product_brief):
     """Test Review workflow with approval."""
-    x_activities = XActivities(FakeXClient())
-    reply_activities = ReplyActivities(FakeReplyAgent())
-    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activities.lookup_post,
-                x_activities.check_followup,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}"
@@ -97,13 +96,13 @@ async def test_review_workflow_skip(sample_post, product_brief):
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activities.lookup_post,
-                x_activities.check_followup,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_skip"
@@ -145,13 +144,13 @@ async def test_review_workflow_nudge(sample_post, product_brief):
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activities.lookup_post,
-                x_activities.check_followup,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_nudge"
@@ -214,13 +213,13 @@ async def test_review_workflow_timeout(sample_post, product_brief):
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activities.lookup_post,
-                x_activities.check_followup,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_timeout"
@@ -256,13 +255,13 @@ async def test_review_workflow_low_confidence(sample_post, product_brief):
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activities.lookup_post,
-                x_activities.check_followup,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_low_conf"
@@ -296,13 +295,13 @@ async def test_review_workflow_approved_not_confirmed(sample_post, product_brief
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activities.lookup_post,
-                x_activities.check_followup,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_not_confirmed"
@@ -348,13 +347,13 @@ async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_b
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activities.lookup_post,
-                x_activities.check_followup,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_invalid_url"

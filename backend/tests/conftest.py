@@ -4,6 +4,23 @@ import pytest
 from datetime import datetime, timezone
 
 from backend.models import Post, Author
+from backend.activities.x_activities import XActivities
+from backend.activities.reply_activities import ReplyActivities
+from backend.activities import x_activity_funcs, reply_activity_funcs
+from backend.adapters import FakeXClient, FakeReplyAgent
+
+
+@pytest.fixture(autouse=True)
+def setup_activity_functions():
+    """Set up module-level activity functions for all tests."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    x_activity_funcs.set_x_activities(x_activities)
+    reply_activity_funcs.set_reply_activities(reply_activities)
+    yield
+    # Cleanup after test
+    x_activity_funcs.set_x_activities(None)
+    reply_activity_funcs.set_reply_activities(None)
 
 
 @pytest.fixture

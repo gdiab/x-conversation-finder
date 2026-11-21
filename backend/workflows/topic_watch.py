@@ -19,8 +19,10 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from backend.activities import SearchRecentInput
+    from backend.activities import x_activity_funcs
     from backend.workflows.review import ReviewWorkflow, ReviewInput
     from temporalio.workflow import ParentClosePolicy
+    from backend.config import get_settings
 
 
 @dataclass
@@ -90,9 +92,10 @@ class TopicWatchWorkflow:
             
             workflow.logger.info(f"Searching for '{input.query}' since_id={since_id}")
             
+            settings = get_settings()
             try:
                 search_result = await workflow.execute_activity(
-                    "search_recent",
+                    x_activity_funcs.search_recent,
                     SearchRecentInput(
                         query=input.query,
                         since_id=since_id,
@@ -100,7 +103,7 @@ class TopicWatchWorkflow:
                         idempotency_key=f"{input.account}:{input.topic}:{iteration}",
                     ),
                     start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
+                    retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
                 )
                 
                 workflow.logger.info(
