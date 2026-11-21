@@ -380,6 +380,79 @@ async def test_regression_dropped_qualifier_rejected():
     assert len(result.failed_sentences) > 0
 
 
+@pytest.mark.parametrize("test_case,expected_reason", [
+    # Numbers and quantification
+    ("Handles 10k requests per second.", "backstop"),
+    ("We process millions of events daily.", "backstop"),
+    ("Our platform has 99.99% uptime.", "backstop"),
+    ("Supports 100x faster performance.", "backstop"),
+    # Availability and SLAs
+    ("We offer 24/7 support.", "backstop"),
+    ("Guaranteed 99.9% uptime.", "backstop"),
+    ("Provides exactly-once delivery.", "backstop"),
+    # Compliance and security
+    ("We are SOC2 certified.", "backstop"),
+    ("Supports RBAC authentication.", "backstop"),
+    ("HIPAA compliant storage.", "backstop"),
+    # Competitive claims
+    ("Battle-tested in production.", "backstop"),
+    ("Beats Temporal on latency.", "backstop"),
+    ("Faster than Kafka.", "backstop"),
+    # Cost and business claims
+    ("Cuts infrastructure bills in half.", "closed-set"),
+    ("Eliminates on-call pain.", "closed-set"),
+    ("Ships twice as fast.", "closed-set"),
+    # Features and usage
+    ("Used by thousands of developers.", "backstop"),
+    ("Works on Kubernetes.", "closed-set"),
+    ("Free tier available.", "closed-set"),
+    # Negation mismatches (would swap meaning)
+    ("Does not require manual configuration.", "closed-set"),
+    ("Never needs downtime for upgrades.", "backstop"),
+    # QA r10: Order swap
+    ("Kafka is faster than our product.", "closed-set"),
+])
+@pytest.mark.asyncio
+async def test_regression_paraphrase_free_text_rejected(test_case, expected_reason):
+    """
+    Regression suite: Agent free text (not verbatim passage sentences) must be rejected.
+    
+    These are the paraphrase regression examples. With the new architecture, agent cannot
+    submit these as claims (no sentence_index), so they come as non_claim free text.
+    The backstop patterns and closed-set rules must reject them.
+    
+    QA r8-r10 examples included: backstop patterns, competitive claims, order swaps.
+    """
+    materials = [
+        FounderMaterial(
+            source="brief.md",
+            passage="Our platform is designed for reliability.",
+            relevance="relevant",
+            passage_id="passage_0"
+        )
+    ]
+    
+    # Agent tries to submit as non_claim free text (not a passage sentence)
+    segments = [
+        Segment(kind="non_claim", text=test_case),
+    ]
+    
+    result = await claim_gate(ClaimGateInput(
+        segments=segments,
+        founder_materials=materials,
+        idempotency_key=f"test_paraphrase_{test_case[:20]}"
+    ))
+    
+    assert not result.passed, f"Expected '{test_case}' to be rejected"
+    assert len(result.failed_sentences) > 0
+    # Verify the reason matches expectation (backstop or closed-set)
+    reason_lower = result.failed_sentences[0][1].lower()
+    if expected_reason == "backstop":
+        assert "closed-set" in reason_lower or "backstop" in reason_lower
+    else:  # closed-set
+        assert "closed-set" in reason_lower
+
+
 @pytest.mark.asyncio
 async def test_regression_paraphrase_rejected():
     """Regression: Paraphrased claims (not verbatim) must be rejected.

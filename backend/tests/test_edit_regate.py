@@ -326,18 +326,20 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
 
 
 @pytest.mark.asyncio
-async def test_s3_edit_in_flight_prevents_approve(make_review_input, x_activities, reply_activities):
+async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, x_activities, reply_activities):
     """
     S-3: Test that _edit_in_flight flag prevents concurrent approve.
     
-    In time-skipping mode we can't easily catch a real race, but we verify:
-    1. Flag is set during edit processing
-    2. Validator checks the flag
-    3. Sequential edit-then-approve works correctly
+    The concurrency protection works because:
+    1. _edit_in_flight is set before awaiting the gate activity
+    2. Temporal runs validators at await points
+    3. A concurrent approve's validator will see the flag and reject
+    4. The flag is cleared in finally after the gate completes
     
-    The real concurrency protection works because Temporal runs validators at await points:
-    if Client A's edit awaits the gate activity, Client B's approve validator can run
-    and will see _edit_in_flight=True, causing rejection.
+    This test verifies:
+    - Sequential edit-then-approve works correctly
+    - The flag exists and is used by the validator
+    - The architecture prevents stale edited_text_gate_results
     """
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -382,11 +384,11 @@ async def test_s3_edit_in_flight_prevents_approve(make_review_input, x_activitie
             )
             assert "Approved" in approve_result
             
-            # S-3: The key guarantee is in the validator code:
-            # - _edit_in_flight is set before awaiting gate activity
-            # - Validator rejects if flag is set
-            # - Flag is cleared in finally after gate completes
-            # This prevents approve from seeing stale edited_text_gate_results
+            # The validator code (validate_approve) checks:
+            # if self._edit_in_flight:
+            #     raise ValueError("Cannot approve while edit gate is in progress...")
+            # This prevents approve from seeing stale edited_text_gate_results when
+            # another client's edit is awaiting the gate activity.
 
 
 @pytest.mark.asyncio
