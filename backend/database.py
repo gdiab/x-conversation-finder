@@ -85,6 +85,12 @@ def get_db() -> Session:
 
 
 def init_db():
-    """Initialize database."""
-    get_engine()
-    Base.metadata.create_all(get_engine())
+    """Initialize database with WAL mode (B3)."""
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    
+    # Enable WAL mode for SQLite (B3)
+    if "sqlite" in str(engine.url):
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()

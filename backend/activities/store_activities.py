@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import json
+import asyncio
 
 from backend.models import ReviewCard, ReviewStatus, Evidence
 from backend.database import get_db, ReviewCardDB
@@ -91,6 +92,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                     "source": m.source,
                     "passage": m.passage,
                     "relevance": m.relevance,
+                    "passage_id": m.passage_id,
                 }
                 for m in card.evidence.founder_materials
             ],
@@ -98,9 +100,25 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "text": card.evidence.draft.text,
                 "claim_gate": {
                     "passed": card.evidence.draft.claim_gate.passed,
-                    "claims_checked": card.evidence.draft.claim_gate.claims_checked,
-                    "unsupported_claims": card.evidence.draft.claim_gate.unsupported_claims,
-                    "supported_claims": card.evidence.draft.claim_gate.supported_claims,
+                    "claims": [
+                        {
+                            "text": c.text,
+                            "cited_passage_ids": c.cited_passage_ids,
+                            "quoted_spans": c.quoted_spans,
+                        }
+                        for c in card.evidence.draft.claim_gate.claims
+                    ],
+                    "failed_claims": [
+                        {
+                            "claim": {
+                                "text": c.text,
+                                "cited_passage_ids": c.cited_passage_ids,
+                                "quoted_spans": c.quoted_spans,
+                            },
+                            "reason": reason,
+                        }
+                        for c, reason in card.evidence.draft.claim_gate.failed_claims
+                    ],
                     "reasoning": card.evidence.draft.claim_gate.reasoning,
                 },
                 "steers_applied": card.evidence.draft.steers_applied,
@@ -120,53 +138,42 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
     )
 
 
-@activity.defn(name="store_card")
-async def store_card(input: StoreCardInput) -> bool:
-    """
-    Store a review card in SQLite.
-    
-    Idempotent: upsert by workflow_id.
-    """
-    activity.logger.info(
-        f"Storing card {input.card.workflow_id} (key: {input.idempotency_key})"
-    )
-    
+def _store_card_sync(input: StoreCardInput) -> bool:
+    """Synchronous DB work for store_card (B3)."""
     db = get_db()
     try:
-        # Check if exists
-        existing = db.query(ReviewCardDB).filter(
-            ReviewCardDB.workflow_id == input.card.workflow_id
-        ).first()
+        card_db = _card_to_db(input.card)
         
-        if existing:
-            # Update
-            card_db = _card_to_db(input.card)
-            for key, value in card_db.__dict__.items():
-                if not key.startswith('_'):
-                    setattr(existing, key, value)
-        else:
-            # Insert
-            card_db = _card_to_db(input.card)
-            db.add(card_db)
-        
+        # Use INSERT...ON CONFLICT (B3)
+        # SQLAlchemy's merge() provides upsert-like behavior
+        db.merge(card_db)
         db.commit()
-        activity.logger.info(f"Stored card {input.card.workflow_id}")
         return True
     finally:
         db.close()
 
 
-@activity.defn(name="update_card")
-async def update_card(input: UpdateCardInput) -> bool:
+@activity.defn(name="store_card")
+async def store_card(input: StoreCardInput) -> bool:
     """
-    Update a review card.
+    Store a review card in SQLite.
     
-    Idempotent: updates are applied by field.
+    Idempotent: upsert by workflow_id using merge (INSERT...ON CONFLICT).
+    B3: Runs sync DB work via asyncio.to_thread.
     """
     activity.logger.info(
-        f"Updating card {input.workflow_id} (key: {input.idempotency_key})"
+        f"Storing card {input.card.workflow_id} (key: {input.idempotency_key})"
     )
     
+    # B3: Run sync DB work in thread pool
+    result = await asyncio.to_thread(_store_card_sync, input)
+    
+    activity.logger.info(f"Stored card {input.card.workflow_id}")
+    return result
+
+
+def _update_card_sync(input: UpdateCardInput) -> bool:
+    """Synchronous DB work for update_card (B3)."""
     db = get_db()
     try:
         card_db = db.query(ReviewCardDB).filter(
@@ -174,7 +181,6 @@ async def update_card(input: UpdateCardInput) -> bool:
         ).first()
         
         if not card_db:
-            activity.logger.error(f"Card {input.workflow_id} not found")
             return False
         
         # Apply updates
@@ -199,9 +205,25 @@ async def update_card(input: UpdateCardInput) -> bool:
                         "text": value.draft.text,
                         "claim_gate": {
                             "passed": value.draft.claim_gate.passed,
-                            "claims_checked": value.draft.claim_gate.claims_checked,
-                            "unsupported_claims": value.draft.claim_gate.unsupported_claims,
-                            "supported_claims": value.draft.claim_gate.supported_claims,
+                            "claims": [
+                                {
+                                    "text": c.text,
+                                    "cited_passage_ids": c.cited_passage_ids,
+                                    "quoted_spans": c.quoted_spans,
+                                }
+                                for c in value.draft.claim_gate.claims
+                            ],
+                            "failed_claims": [
+                                {
+                                    "claim": {
+                                        "text": c.text,
+                                        "cited_passage_ids": c.cited_passage_ids,
+                                        "quoted_spans": c.quoted_spans,
+                                    },
+                                    "reason": reason,
+                                }
+                                for c, reason in value.draft.claim_gate.failed_claims
+                            ],
                             "reasoning": value.draft.claim_gate.reasoning,
                         },
                         "steers_applied": value.draft.steers_applied,
@@ -211,17 +233,36 @@ async def update_card(input: UpdateCardInput) -> bool:
                 card_db.evidence_data = json.dumps(evidence_data)
         
         db.commit()
-        activity.logger.info(f"Updated card {input.workflow_id}")
         return True
     finally:
         db.close()
 
 
-@activity.defn(name="get_card")
-async def get_card(input: GetCardInput) -> Optional[Dict]:
-    """Get a review card by workflow ID."""
-    activity.logger.info(f"Getting card {input.workflow_id}")
+@activity.defn(name="update_card")
+async def update_card(input: UpdateCardInput) -> bool:
+    """
+    Update a review card.
     
+    Idempotent: updates are applied by field.
+    B3: Runs sync DB work via asyncio.to_thread.
+    """
+    activity.logger.info(
+        f"Updating card {input.workflow_id} (key: {input.idempotency_key})"
+    )
+    
+    # B3: Run sync DB work in thread pool
+    result = await asyncio.to_thread(_update_card_sync, input)
+    
+    if not result:
+        activity.logger.error(f"Card {input.workflow_id} not found")
+    else:
+        activity.logger.info(f"Updated card {input.workflow_id}")
+    
+    return result
+
+
+def _get_card_sync(input: GetCardInput) -> Optional[Dict]:
+    """Synchronous DB work for get_card (B3)."""
     db = get_db()
     try:
         card_db = db.query(ReviewCardDB).filter(
@@ -229,10 +270,7 @@ async def get_card(input: GetCardInput) -> Optional[Dict]:
         ).first()
         
         if not card_db:
-            activity.logger.info(f"Card {input.workflow_id} not found")
             return None
-        
-        activity.logger.info(f"Found card {input.workflow_id}")
         
         # Return as dict
         return {
@@ -250,6 +288,26 @@ async def get_card(input: GetCardInput) -> Optional[Dict]:
         }
     finally:
         db.close()
+
+
+@activity.defn(name="get_card")
+async def get_card(input: GetCardInput) -> Optional[Dict]:
+    """
+    Get a review card by workflow ID.
+    
+    B3: Runs sync DB work via asyncio.to_thread.
+    """
+    activity.logger.info(f"Getting card {input.workflow_id}")
+    
+    # B3: Run sync DB work in thread pool
+    result = await asyncio.to_thread(_get_card_sync, input)
+    
+    if result:
+        activity.logger.info(f"Found card {input.workflow_id}")
+    else:
+        activity.logger.info(f"Card {input.workflow_id} not found")
+    
+    return result
 
 
 def get_all_cards() -> List[Dict]:
