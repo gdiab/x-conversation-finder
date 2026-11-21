@@ -76,7 +76,21 @@ class ReviewWorkflow:
         self.skip_reason: Optional[str] = None
         self.client_request_id: Optional[str] = None
         self._processed_requests: set[str] = set()
-    
+
+    def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
+        """Helper to build a ReviewCard from current state."""
+        return ReviewCard(
+            workflow_id=workflow_id,
+            post=post,
+            evidence=self.evidence,
+            status=self.status,
+            created_at=created_at,
+            updated_at=workflow.now().isoformat(),
+            skip_reason=self.skip_reason if self.skipped else None,
+            posted_url=self.posted_url,
+            reply_post_id=self.reply_post_id,
+        )
+
     @workflow.run
     async def run(self, input: ReviewInput) -> str:
         """Run the review workflow."""
@@ -106,17 +120,10 @@ class ReviewWorkflow:
             if evidence.confidence_score < input.confidence_threshold:
                 self.status = ReviewStatus.SKIPPED
                 self.skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
+                self.evidence = evidence
                 workflow.logger.info(f"Skipped: {self.skip_reason}")
                 
-                card = ReviewCard(
-                    workflow_id=workflow_id,
-                    post=input.post,
-                    evidence=evidence,
-                    status=self.status,
-                    created_at=created_at,
-                    updated_at=workflow.now().isoformat(),
-                    skip_reason=self.skip_reason,
-                )
+                card = self._build_card(workflow_id, input.post, created_at)
                 
                 await workflow.execute_activity(
                     "store_card",
@@ -177,17 +184,10 @@ class ReviewWorkflow:
             if not evidence.draft or not evidence.draft.claim_gate.passed:
                 self.status = ReviewStatus.SKIPPED
                 self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
+                self.evidence = evidence
                 workflow.logger.info(f"Skipped: {self.skip_reason}")
                 
-                card = ReviewCard(
-                    workflow_id=workflow_id,
-                    post=input.post,
-                    evidence=evidence,
-                    status=self.status,
-                    created_at=created_at,
-                    updated_at=workflow.now().isoformat(),
-                    skip_reason=self.skip_reason,
-                )
+                card = self._build_card(workflow_id, input.post, created_at)
                 
                 await workflow.execute_activity(
                     "store_card",
@@ -201,14 +201,7 @@ class ReviewWorkflow:
             
             # Store pending card
             self.evidence = evidence
-            card = ReviewCard(
-                workflow_id=workflow_id,
-                post=input.post,
-                evidence=evidence,
-                status=self.status,
-                created_at=created_at,
-                updated_at=workflow.now().isoformat(),
-            )
+            card = self._build_card(workflow_id, input.post, created_at)
             
             await workflow.execute_activity(
                 "store_card",
