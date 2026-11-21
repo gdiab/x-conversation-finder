@@ -576,9 +576,9 @@ async def test_b5b_its_handling():
     assert not is_closed_set_non_claim("It's 10x faster.")
     assert not is_closed_set_non_claim("It's better than the alternatives.")
     
-    # But "this" IS allowlisted, so opinion frames with "this" pass
-    assert is_closed_set_non_claim("I think this is a great question.")
-    assert is_closed_set_non_claim("I think this is really interesting.")
+    # QA R12: "this" and "great/really" removed from allowlist, so these now fail
+    assert not is_closed_set_non_claim("I think this is a great question.")
+    assert not is_closed_set_non_claim("I think this is really interesting.")
 
 
 @pytest.mark.asyncio

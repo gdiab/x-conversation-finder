@@ -58,8 +58,8 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             assert card["status"] == "pending"
             original_text = card["evidence"]["draft"]["text"]
             
-            # Edit to valid text (using closed-set non_claims from the allowlist)
-            edited_text = "Thanks! Our product helps developers build reliable systems. Happy to share more details."
+            # Edit to valid text (closed-set non_claims + verbatim passage sentence)
+            edited_text = "Thanks! Our product helps developers build reliable distributed systems. Happy to share more details."
             client_request_id = str(uuid.uuid4())
             result_text = await handle.execute_update(
                 "edit",
@@ -388,7 +388,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
             client_request_id = str(uuid.uuid4())
             edit_handle = await handle.start_update(
                 "edit",
-                args=["Thanks! Our product helps developers build reliable systems. Happy to help.", client_request_id],
+                args=["Thanks! Our product helps developers build reliable distributed systems. Happy to help.", client_request_id],
                 wait_for_stage=WorkflowUpdateStage.ACCEPTED,
             )
             
@@ -462,7 +462,7 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
             await env.sleep(1)
             
             # Edit
-            edited_text = "Thanks! Our product helps developers build reliable systems. Happy to help."
+            edited_text = "Thanks! Our product helps developers build reliable distributed systems. Happy to help."
             client_request_id = str(uuid.uuid4())
             await handle.execute_update(
                 "edit",

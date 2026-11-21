@@ -55,7 +55,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 FounderMaterial(
                     source="product_brief.md",
                     # Per Architect: short, standalone, claim-ready sentences
-                    passage="Our product helps developers build reliable systems. Our product provides automatic failover. Our product guarantees strong consistency.",
+                    passage="Our product helps developers build reliable distributed systems. Our product provides automatic failover. Our product guarantees strong consistency.",
                     relevance="Directly relevant to the post's discussion of reliability",
                     passage_id="passage_0",
                 )
