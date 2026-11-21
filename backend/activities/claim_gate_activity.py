@@ -97,21 +97,21 @@ OPINION_PATTERNS = [
 ]
 
 # B5a: Product words (expanded to include ours/us/our/we)
-# Note: "it"/"this" with claim context (comparative, capability, number) counts as product mention
+# Be explicit: "we/our/ours/us" and "it's/it is" (but not "this" alone)
 PRODUCT_INDICATORS = [
     r'\b(?:we|our|ours|us)\b',
-    r'\b(?:the product|the tool|the platform|the service|the app|the system)\b',
-    r'\b(?:it|it\'s|this|this is)\b',  # Ambiguous pronouns - will check for claim indicators
+    r'\b(?:my|the)\s+(?:product|tool|platform|service|app|system)\b',
+    r'\bit\'?s?\b',  # "it's" or "it" or "its"
 ]
 
 # Claim indicators that combine with product mention to make it a claim
 CLAIM_INDICATORS = [
     # Comparatives and superlatives
-    r'\b(?:better|worse|faster|slower|more|less|best|worst|fastest|slowest|most|least|than|compared to|cheaper|quicker)\b',
-    # Numbers and quantifications
-    r'\b\d+\.?\d*\s*(?:%|percent|pct|times|x|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)?\b',
+    r'\b(?:better|worse|faster|slower|more|less|best|worst|fastest|slowest|most|least|than|compared to|cheaper|quicker|way cheaper)\b',
+    # Numbers and quantifications (including "10x", "twenty")
+    r'\b(?:\d+\.?\d*\s*(?:%|percent|pct|times|x|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)?|ten|twenty|thirty|hundred|thousand)\b',
     # Capability verbs
-    r'\b(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates|cut|cuts|reduce|reduces|eliminate|eliminates|beat|beats|work|works|ship|ships|come|comes|switch|switched)\b',
+    r'\b(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|has|have|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates|cut|cuts|reduce|reduces|eliminate|eliminates|beat|beats|work|works|ship|ships|come|comes|switch|switched)\b',
     # Competitor/alternative mentions
     r'\b(?:Temporal|Kubernetes|Kafka|AWS|Azure|GCP|Docker|Jenkins|CircleCI|GitHub Actions|Slack|Teams|Jira|Confluence)\b',
 ]
@@ -119,8 +119,8 @@ CLAIM_INDICATORS = [
 # Pattern backstop: these patterns always classify a segment as a claim
 # (overriding any non_claim tag from the model)
 BACKSTOP_PATTERNS = [
-    # Any digit or unit
-    r'\b\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)\b',
+    # Any digit or unit (including word numbers like "twenty")
+    r'\b(?:\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)?|ten|twenty|thirty|forty|fifty|hundred|thousand|million|billion)\b',
     # Compliance/security terms
     r'\b(?:SOC2|SSO|RBAC|HIPAA|GDPR|encrypted|encryption|compliance|compliant|certified|certification|audit|auditing|audit logs|role-based access control)\b',
     # Availability terms
@@ -214,9 +214,9 @@ def is_closed_set_non_claim(text: str) -> bool:
     # Check if it's a pure greeting/thanks phrase
     # These patterns should match the WHOLE text for pure greetings
     pure_greeting_patterns = [
-        r'^(?:thanks|thank you)\s*(?:for\s+\w+)?[!.]*$',  # "Thanks", "Thanks for sharing!"
-        r'^(?:hi|hello|hey)\s*(?:there)?[!.]*$',  # "Hi!", "Hello there!"
-        r'^(?:happy|glad|pleased)\s+to\s+(?:help|share|chat)[!.]*$',  # "Happy to help!"
+        r'^(?:thanks|thank you)(?:\s+for\s+[\w\s]+)?[!.]*$',  # "Thanks", "Thanks for the question!"
+        r'^(?:hi|hello|hey)(?:\s+there)?[!.]*$',  # "Hi!", "Hello there!"
+        r'^(?:would be\s+)?(?:happy|glad|pleased)\s+to\s+(?:help|share|chat)[\w\s]*[!.]*$',  # "Happy to help!", "Would be happy to share more details if useful!"
     ]
     
     for pattern in pure_greeting_patterns:
