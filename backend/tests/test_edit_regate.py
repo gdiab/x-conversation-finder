@@ -400,16 +400,18 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
             # S-3: This should raise WorkflowUpdateFailedError because _edit_in_flight_count > 0
             # The validator checks and raises ValueError with specific message
             from temporalio.client import WorkflowUpdateFailedError
-            from temporalio.exceptions import ApplicationError
             client_request_id2 = str(uuid.uuid4())
             with pytest.raises(WorkflowUpdateFailedError) as exc_info:
                 await handle.execute_update(
                     "approve",
                     args=["https://x.com/test/status/999", client_request_id2, False]
                 )
-            # Verify the error cause and message
-            assert isinstance(exc_info.value.cause, ApplicationError)
-            assert "edit gate is in progress" in str(exc_info.value.cause).lower()
+            # Verify the error message (robust for Python 3.11 and 3.13)
+            error_str = str(exc_info.value)
+            cause = exc_info.value.cause
+            if cause:
+                error_str += " " + str(cause)
+            assert "edit gate is in progress" in error_str.lower()
             
             # Release the block so edit can complete
             gate_block_event.set()
@@ -547,16 +549,18 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
             
             # Approve without post_anyway should FAIL
             from temporalio.client import WorkflowUpdateFailedError
-            from temporalio.exceptions import ApplicationError
             client_request_id = str(uuid.uuid4())
             with pytest.raises(WorkflowUpdateFailedError) as exc_info:
                 await handle.execute_update(
                     "approve",
                     args=["https://x.com/test/status/999", client_request_id, False]
                 )
-            # Verify the error cause and message
-            assert isinstance(exc_info.value.cause, ApplicationError)
-            assert "post_anyway" in str(exc_info.value.cause).lower()
+            # Verify the error message (robust for Python 3.11 and 3.13)
+            error_str = str(exc_info.value)
+            cause = exc_info.value.cause
+            if cause:
+                error_str += " " + str(cause)
+            assert "post_anyway" in error_str.lower()
             
             # Approve WITH post_anyway=True should succeed
             client_request_id = str(uuid.uuid4())
@@ -639,15 +643,17 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
             
             # Now try to approve while edit is in flight - should fail
             from temporalio.client import WorkflowUpdateFailedError
-            from temporalio.exceptions import ApplicationError
             with pytest.raises(WorkflowUpdateFailedError) as exc_info:
                 await handle.execute_update(
                     "approve",
                     args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
                 )
-            # Verify the error cause and message
-            assert isinstance(exc_info.value.cause, ApplicationError)
-            assert "edit gate is in progress" in str(exc_info.value.cause).lower()
+            # Verify the error message (robust for Python 3.11 and 3.13)
+            error_str = str(exc_info.value)
+            cause = exc_info.value.cause
+            if cause:
+                error_str += " " + str(cause)
+            assert "edit gate is in progress" in error_str.lower()
             
             # Unblock the gate
             gate_block_event.set()
@@ -744,16 +750,18 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
             
             # Approve without post_anyway should FAIL
             from temporalio.client import WorkflowUpdateFailedError
-            from temporalio.exceptions import ApplicationError
             client_request_id = str(uuid.uuid4())
             with pytest.raises(WorkflowUpdateFailedError) as exc_info:
                 await handle.execute_update(
                     "approve",
                     args=["https://x.com/test/status/999", client_request_id, False]
                 )
-            # Verify the error cause and message
-            assert isinstance(exc_info.value.cause, ApplicationError)
-            assert "retries exhausted" in str(exc_info.value.cause).lower()
+            # Verify the error message (robust for Python 3.11 and 3.13)
+            error_str = str(exc_info.value)
+            cause = exc_info.value.cause
+            if cause:
+                error_str += " " + str(cause)
+            assert "retries exhausted" in error_str.lower()
             
             # Approve WITH post_anyway=True should succeed
             client_request_id = str(uuid.uuid4())

@@ -189,6 +189,31 @@ async def test_qa_r11_b1_passing_examples():
 
 
 @pytest.mark.asyncio
+async def test_qa_r12_frame_assertions_rejected():
+    """
+    QA R12: Frame assertions with product/capability/evaluative words must be REJECTED.
+    
+    Even in "I think" or "Why" frames, product assertions are not non_claims.
+    The allowlist was tightened to remove all product, capability, and evaluative words.
+    """
+    # Specified failing cases
+    assert not is_closed_set_non_claim("I think this works well.")
+    assert not is_closed_set_non_claim("I think we have a great setup.")
+    assert not is_closed_set_non_claim("I think setup is great.")
+    assert not is_closed_set_non_claim("I love setup.")
+    assert not is_closed_set_non_claim("Why is the setup very easy?")
+    assert not is_closed_set_non_claim("I like that this has the same setup.")
+    
+    # Additional variants covering capability/product words
+    assert not is_closed_set_non_claim("I think it works.")
+    assert not is_closed_set_non_claim("Why can we use this?")
+    assert not is_closed_set_non_claim("I think that will help.")
+    assert not is_closed_set_non_claim("I believe these have good performance.")
+    assert not is_closed_set_non_claim("How well does this work?")
+    assert not is_closed_set_non_claim("I think those could scale.")
+
+
+@pytest.mark.asyncio
 async def test_contains_number():
     """Numbers (digits and words) must be detected."""
     # Digits
@@ -649,7 +674,7 @@ async def test_nfkc_handles_fullwidth_and_mathematical():
     - Fullwidth characters (e.g., ＳＯＣ２ → SOC2)
     - Mathematical alphanumerics (e.g., 𝐒𝐎𝐂𝟐 → SOC2)
     """
-    from gate.non_claim_set import normalize_for_closed_set
+    from backend.gate.non_claim_set import normalize_for_closed_set
     
     # Fullwidth SOC2
     fullwidth = "ＳＯＣ２"
@@ -662,6 +687,6 @@ async def test_nfkc_handles_fullwidth_and_mathematical():
     assert "soc2" in normalized_math.lower()
     
     # Verify these get caught by backstop
-    from gate.non_claim_set import _matches_backstop_pattern
+    from backend.gate.non_claim_set import _matches_backstop_pattern
     assert _matches_backstop_pattern(fullwidth)
     assert _matches_backstop_pattern(math_bold)

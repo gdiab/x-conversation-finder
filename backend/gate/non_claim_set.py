@@ -68,32 +68,28 @@ EXACT_NON_CLAIMS: Set[str] = {
 
 # Allowlist of words that can appear in question/opinion frame remainders
 # These are non-claim words that don't make assertions about the product
+# QA R12: Restricted to truly empty conversational words only.
+# Removed all product, capability, and evaluative words.
 ALLOWLIST_WORDS: Set[str] = {
     # Question words
     "what", "which", "where", "when", "who", "how", "why",
     
-    # Common verbs/linking words (non-assertive)
+    # Linking verbs (non-assertive, purely copular)
     "is", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did", "have", "has", "had",
-    "can", "could", "would", "will", "should",
-    "try", "tried", "work", "works", "worked",
+    "do", "does", "did",
+    "try", "tried",
     
     # Pronouns (non-product)
     "you", "your", "yours", "they", "them", "their",
-    "i", "me", "my", "we",  # Note: "we/our/ours" in product context triggers backstop
+    "i", "me", "my",
     
-    # Demonstratives (when not product references)
-    "this", "that", "these", "those",
-    
-    # Common nouns (non-product, non-claim)
+    # Common nouns (non-product, non-claim, purely conversational)
     "stack", "thread", "question", "approach", "problem",
-    "setup", "discussion", "post", "comment", "idea",
+    "discussion", "post", "comment", "idea",
     "topic", "issue", "context", "case", "situation",
     
-    # Adjectives (non-comparative, non-absolute)
-    "good", "great", "interesting", "helpful", "nice",
-    "hard", "easy", "different", "similar", "same",
-    "well",
+    # Adjectives (purely descriptive, non-evaluative)
+    "interesting", "different", "similar", "same",
     
     # Prepositions and connectors
     "on", "in", "at", "to", "from", "for", "with", "about",
@@ -102,9 +98,8 @@ ALLOWLIST_WORDS: Set[str] = {
     # Articles
     "a", "an", "the",
     
-    # Other common non-claim words
-    "really", "very", "quite", "just", "also", "too",
-    "here", "there",
+    # Empty conversational words
+    "just", "also", "too",
 }
 
 # Question frames: "What stack are you on?" is OK
