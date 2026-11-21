@@ -206,13 +206,23 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
                 failed_claims=[],
                 reasoning=f"Draft contains risky words but no claims declared: {', '.join(draft_risky_words[:3])}",
             )
+        elif capability_sentences:
+            activity.logger.warning(
+                f"No claims declared but draft contains {len(capability_sentences)} product capability sentences"
+            )
+            return ClaimGateResult(
+                passed=False,
+                claims=[],
+                failed_claims=[],
+                reasoning=f"Draft contains product capability sentences but no claims declared: {capability_sentences[0][:60]}...",
+            )
         else:
-            activity.logger.info("No claims and no risky words, gate passes")
+            activity.logger.info("No claims, no risky words, and no capability sentences, gate passes")
             return ClaimGateResult(
                 passed=True,
                 claims=[],
                 failed_claims=[],
-                reasoning="No risky words in draft",
+                reasoning="No risky words or capability sentences in draft",
             )
     
     activity.logger.info(f"Verifying {len(input.claims)} claims against {len(materials_by_id)} passages")

@@ -152,7 +152,7 @@ async def test_verify_claim_risky_word_not_backed():
 @pytest.mark.asyncio
 async def test_claim_gate_no_claims_no_risky_words():
     """Test claim gate with no claims and no risky words (R3-B1)."""
-    draft_text = "This is interesting. Our platform helps with workflows."
+    draft_text = "This is interesting. The platform has good features."
     
     input_data = ClaimGateInput(
         draft_text=draft_text,
@@ -377,3 +377,70 @@ async def test_claim_gate_uncovered_risky_word_in_draft_fails():
     assert not result.passed
     assert "uncovered risky words" in result.reasoning.lower()
     assert "99.99%" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_capability_sentence_without_claim_blocked():
+    """Test R4-SF1: capability sentence without claim is blocked."""
+    draft_text = "Our tool helps teams export to Notion seamlessly."
+    
+    materials = [
+        FounderMaterial(
+            source="product_brief",
+            passage="We build productivity tools for teams.",
+            relevance="medium",
+            passage_id="passage_0",
+        )
+    ]
+    
+    # No claims covering the capability
+    claims = []
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_capability_no_claim",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "product capability" in result.reasoning.lower()
+    assert "no claims" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_capability_sentence_with_matching_claim_allowed():
+    """Test R4-SF1: capability sentence with matching claim is allowed."""
+    draft_text = "Our tool helps teams export to Notion seamlessly."
+    
+    materials = [
+        FounderMaterial(
+            source="product_brief",
+            passage="Our tool helps teams export data to Notion and other platforms.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    # Claim covers the capability
+    claims = [
+        Claim(
+            text="Our tool helps teams export to Notion",
+            cited_passage_ids=["passage_0"],
+            quoted_spans=["helps teams export"],
+        )
+    ]
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_capability_with_claim",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert result.passed
+    assert "1 product capability" in result.reasoning.lower()
