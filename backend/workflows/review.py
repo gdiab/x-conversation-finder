@@ -76,7 +76,12 @@ class ReviewWorkflow:
         self.reply_post_id: Optional[str] = None
         self.skip_reason: Optional[str] = None
         self.client_request_id: Optional[str] = None
-        self._processed_requests: set[str] = set()
+        # B9: Separate dedupe sets per handler
+        self._approve_requests: set[str] = set()
+        self._skip_requests: set[str] = set()
+        self._edit_requests: set[str] = set()
+        self._confirm_requests: set[str] = set()
+        self._nudge_requests: set[str] = set()
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state."""
@@ -357,13 +362,13 @@ class ReviewWorkflow:
         Per ADR-0004: approve just yields the copy text.
         The founder posts manually and then calls confirm_posted.
         """
-        # Deduplicate
-        if client_request_id in self._processed_requests:
+        # Deduplicate (B9: per-handler set)
+        if client_request_id in self._approve_requests:
             workflow.logger.info(f"Ignoring duplicate approve signal: {client_request_id}")
             return
         
         workflow.logger.info(f"Received approve signal")
-        self._processed_requests.add(client_request_id)
+        self._approve_requests.add(client_request_id)
         
         self.approved = True
         self.posted_url = posted_url
@@ -372,13 +377,13 @@ class ReviewWorkflow:
     @workflow.signal
     async def skip(self, reason: str, client_request_id: str):
         """Skip signal - founder declines to post."""
-        # Deduplicate
-        if client_request_id in self._processed_requests:
+        # Deduplicate (B9: per-handler set)
+        if client_request_id in self._skip_requests:
             workflow.logger.info(f"Ignoring duplicate skip signal: {client_request_id}")
             return
         
         workflow.logger.info(f"Received skip signal")
-        self._processed_requests.add(client_request_id)
+        self._skip_requests.add(client_request_id)
         
         self.skipped = True
         self.skip_reason = reason
@@ -392,14 +397,14 @@ class ReviewWorkflow:
         Parses reply post ID from URL, verifies it's a reply to our target post.
         Returns success message or raises error if invalid.
         """
-        # Deduplicate
-        if client_request_id in self._processed_requests:
+        # Deduplicate (B9: per-handler set)
+        if client_request_id in self._confirm_requests:
             workflow.logger.info(f"Ignoring duplicate confirm_posted: {client_request_id}")
             return f"Already confirmed reply {self.reply_post_id}"
         
         workflow.logger.info(f"Received confirm_posted: {reply_url}")
         
-        self._processed_requests.add(client_request_id)
+        self._confirm_requests.add(client_request_id)
         
         # Parse reply post ID from URL (already validated by validator)
         match = re.search(r'/status/(\d+)', reply_url)
@@ -466,13 +471,13 @@ class ReviewWorkflow:
     @workflow.update
     async def edit(self, new_text: str, client_request_id: str) -> str:
         """Edit update - founder edits the draft."""
-        # Deduplicate
-        if client_request_id in self._processed_requests:
+        # Deduplicate (B9: per-handler set)
+        if client_request_id in self._edit_requests:
             workflow.logger.info(f"Ignoring duplicate edit: {client_request_id}")
             return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
         
         workflow.logger.info(f"Received edit update: {len(new_text)} chars")
-        self._processed_requests.add(client_request_id)
+        self._edit_requests.add(client_request_id)
         
         self.evidence.draft.text = new_text
         self.evidence.draft.steers_applied.append("manual_edit")
@@ -506,13 +511,13 @@ class ReviewWorkflow:
     @workflow.update
     async def nudge(self, instruction: str, client_request_id: str) -> str:
         """Nudge update - steer a redraft."""
-        # Deduplicate
-        if client_request_id in self._processed_requests:
+        # Deduplicate (B9: per-handler set)
+        if client_request_id in self._nudge_requests:
             workflow.logger.info(f"Ignoring duplicate nudge: {client_request_id}")
             return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
         
         workflow.logger.info(f"Received nudge update: {len(instruction)} chars")
-        self._processed_requests.add(client_request_id)
+        self._nudge_requests.add(client_request_id)
         
         settings = get_settings()
         self.evidence = await workflow.execute_activity(
@@ -541,6 +546,17 @@ class ReviewWorkflow:
         
         return self.evidence.draft.text
     
+    @nudge.validator
+    def validate_nudge(self, instruction: str, client_request_id: str) -> None:
+        """Validator for nudge Update - checks state and input (B9)."""
+        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
+            raise ValueError(f"Cannot nudge in status {self.status.value}")
+        
+        if not self.evidence or not self.evidence.draft:
+            raise ValueError("No draft to nudge")
+        
+        if not instruction or not instruction.strip():
+            raise ValueError("Instruction cannot be empty")
     
     @workflow.query
     def get_card(self) -> dict:
