@@ -64,8 +64,32 @@ export interface StartWatchRequest {
 
 const API_BASE = '/api';
 
-function generateRequestId(): string {
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+// Stable request IDs based on operation and timestamp window
+// This ensures that rapid retries use the same ID for deduplication
+const requestIdCache = new Map<string, string>();
+
+function generateRequestId(operation: string, workflowId: string): string {
+  // Round timestamp to nearest 5 seconds for retry stability
+  const timestampWindow = Math.floor(Date.now() / 5000) * 5000;
+  const cacheKey = `${operation}:${workflowId}:${timestampWindow}`;
+  
+  // Reuse cached ID within the same time window
+  if (requestIdCache.has(cacheKey)) {
+    return requestIdCache.get(cacheKey)!;
+  }
+  
+  const requestId = `req_${timestampWindow}_${Math.random().toString(36).slice(2)}`;
+  requestIdCache.set(cacheKey, requestId);
+  
+  // Clear old cache entries (keep last 10)
+  if (requestIdCache.size > 10) {
+    const firstKey = requestIdCache.keys().next().value;
+    if (firstKey) {
+      requestIdCache.delete(firstKey);
+    }
+  }
+  
+  return requestId;
 }
 
 export async function startWatch(request: StartWatchRequest): Promise<{ workflow_id: string; message: string }> {
@@ -128,7 +152,7 @@ export async function editReview(workflowId: string, newText: string): Promise<s
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       new_text: newText,
-      client_request_id: generateRequestId(),
+      client_request_id: generateRequestId('edit', workflowId),
     }),
   });
   
