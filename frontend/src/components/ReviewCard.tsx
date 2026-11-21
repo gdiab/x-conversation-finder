@@ -400,7 +400,13 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           {/* Edit */}
           <div style={{ marginBottom: '12px' }}>
             <button
-              onClick={() => setIsEditing(!isEditing)}
+              onClick={() => {
+                if (isEditing) {
+                  // Clear request ID on abandonment
+                  editRequestId.current = null;
+                }
+                setIsEditing(!isEditing);
+              }}
               disabled={loading}
               style={{ marginRight: '8px' }}
             >
@@ -433,6 +439,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
               </button>
               <button
                 onClick={() => {
+                  // Clear request ID on abandonment
+                  nudgeRequestId.current = null;
                   setIsNudging(false);
                   setNudgeInstruction('');
                 }}
