@@ -159,16 +159,17 @@ def has_unresolved_referent(text: str) -> bool:
     normalized = normalized.strip().lower()
     
     # Skip leading conjunctions and discourse markers (with optional comma)
+    # Pattern: word + optional comma + space
     discourse_markers = [
-        r'^and\s+,?\s*',
-        r'^also\s+,?\s*',
-        r'^but\s+,?\s*',
-        r'^so\s+,?\s*',
-        r'^however\s+,?\s*',
-        r'^plus\s+,?\s*',
-        r'^then\s+,?\s*',
-        r'^additionally\s+,?\s*',
-        r'^moreover\s+,?\s*',
+        r'^and\s*,?\s+',
+        r'^also\s*,?\s+',
+        r'^but\s*,?\s+',
+        r'^so\s*,?\s+',
+        r'^however\s*,?\s+',
+        r'^plus\s*,?\s+',
+        r'^then\s*,?\s+',
+        r'^additionally\s*,?\s+',
+        r'^moreover\s*,?\s+',
     ]
     for marker in discourse_markers:
         normalized = re.sub(marker, '', normalized, count=1)
