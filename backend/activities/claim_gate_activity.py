@@ -69,10 +69,11 @@ def find_risky_words(text: str) -> List[str]:
 
 def find_product_capability_sentences(text: str) -> List[str]:
     """
-    R4-SF1: Find sentences that make product capability claims.
+    R5-S1: Find sentences that make product capability claims.
     
     Detects sentences with:
-    - "we"/"our" + capability verbs (help, provide, enable, etc.)
+    - "we"/"our"/"my" + capability verbs (help, provide, enable, etc.)
+    - Pronoun/implicit subjects: "it"/"this"/"the app"/"the tool"/"the product"/product-name + capability verbs
     
     Returns list of sentences that are likely product capability claims.
     """
@@ -86,10 +87,15 @@ def find_product_capability_sentences(text: str) -> List[str]:
         if not sentence:
             continue
         
-        # Check if sentence contains "we" or "our"
-        has_first_person = bool(re.search(r'\b(?:we|our)\b', sentence, re.IGNORECASE))
+        # Check if sentence contains first-person or pronoun/implicit subject
+        has_first_person = bool(re.search(r'\b(?:we|our|my)\b', sentence, re.IGNORECASE))
+        has_pronoun_subject = bool(re.search(
+            r'\b(?:it|this|the (?:app|tool|product|platform|system|service))\b', 
+            sentence, 
+            re.IGNORECASE
+        ))
         
-        if not has_first_person:
+        if not (has_first_person or has_pronoun_subject):
             continue
         
         # Check if sentence contains a capability verb

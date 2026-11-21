@@ -444,3 +444,33 @@ async def test_capability_sentence_with_matching_claim_allowed():
     
     assert result.passed
     assert "1 product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_capability_sentence_with_pronoun_subject_blocked():
+    """Test R5-S1: pronoun/implicit subject capability sentence blocked without claim."""
+    draft_text = "It supports SSO and audit logs."
+    
+    materials = [
+        FounderMaterial(
+            source="product_brief",
+            passage="We build security-focused software.",
+            relevance="medium",
+            passage_id="passage_0",
+        )
+    ]
+    
+    # No claims covering the capability
+    claims = []
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_pronoun_capability_no_claim",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "product capability" in result.reasoning.lower()
