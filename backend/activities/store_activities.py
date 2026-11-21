@@ -25,6 +25,8 @@ class UpdateCardInput:
     
     Replaces dict-based updates with explicit typed fields so Temporal can properly
     serialize/deserialize all values, including bools.
+    
+    QA R13: Added edit_seq to prevent stale card writes.
     """
     workflow_id: str
     idempotency_key: str
@@ -40,6 +42,7 @@ class UpdateCardInput:
     edited_text_gate_state: Optional[str] = None  # QA R11 B2/C: "passed", "failed", or "not_checked"
     post_anyway: Optional[bool] = None
     post_anyway_failing_sentences: Optional[List[str]] = None
+    edit_seq: Optional[int] = None  # QA R13: Monotonic edit sequence
 
 
 @dataclass
@@ -224,7 +227,11 @@ async def store_card(input: StoreCardInput) -> bool:
 
 
 def _update_card_sync(input: UpdateCardInput) -> bool:
-    """Synchronous DB work for update_card. B1: Works with typed fields instead of dict."""
+    """
+    Synchronous DB work for update_card. B1: Works with typed fields instead of dict.
+    
+    QA R13: Checks edit_seq and ignores writes with lower seq than stored.
+    """
     db = get_db()
     try:
         card_db = db.query(ReviewCardDB).filter(
@@ -233,6 +240,15 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         
         if not card_db:
             return False
+        
+        # QA R13: Check edit_seq - ignore stale writes
+        if input.edit_seq is not None:
+            stored_edit_seq = card_db.edit_seq or 0
+            if input.edit_seq < stored_edit_seq:
+                # Stale write - ignore it
+                return True  # Return True to indicate operation was "successful" (idempotent)
+            # Update the stored edit_seq
+            card_db.edit_seq = input.edit_seq
         
         # B1: Apply updates from typed fields
         if input.status is not None:
@@ -247,8 +263,10 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
             card_db.skip_reason = input.skip_reason
         if input.followup_replies is not None:
             card_db.followup_replies = input.followup_replies
+            flag_modified(card_db, "followup_replies")  # QA R13: flag_modified for JSON
         if input.edited_text_gate_results is not None:
             card_db.edited_text_gate_results = input.edited_text_gate_results
+            flag_modified(card_db, "edited_text_gate_results")  # QA R13: flag_modified for JSON
         if input.edited_text_gate_state is not None:
             card_db.edited_text_gate_state = input.edited_text_gate_state
         if input.post_anyway is not None:
@@ -256,6 +274,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
             card_db.post_anyway = input.post_anyway
         if input.post_anyway_failing_sentences is not None:
             card_db.post_anyway_failing_sentences = input.post_anyway_failing_sentences
+            flag_modified(card_db, "post_anyway_failing_sentences")  # QA R13: flag_modified for JSON
         
         # B2: Update evidence_data JSON with flag_modified
         if input.evidence is not None:

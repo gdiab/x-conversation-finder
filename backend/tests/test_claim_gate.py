@@ -561,11 +561,12 @@ async def test_regression_order_swap_rejected():
 @pytest.mark.asyncio
 async def test_b5b_its_handling():
     """
-    Updated for Architect's (A): Under the NEW closed-set rules, "it" is not in the allowlist
+    QA R13: Under the closed-set rules (v1.1.0), "it" is not in the allowlist
     because it's often a product reference. Opinion frames with "it's" are rejected.
     
-    Reason: The NEW rules are deliberately conservative. "it" tokenizes separately from "'s",
-    and "it" is not allowlisted to avoid product-reference laundering through opinion frames.
+    The tokenizer splits "it's" into "it" + "'s", and since "it" is not in
+    ALLOWLIST_WORDS, these opinion frames are rejected to prevent product-reference
+    laundering.
     """
     # "it's" is not allowlisted (even in opinion frames) - "it" not in ALLOWLIST_WORDS
     assert not is_closed_set_non_claim("I think it's a great question.")

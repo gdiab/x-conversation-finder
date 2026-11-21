@@ -134,6 +134,8 @@ class ReviewWorkflow:
         self.post_anyway_failing_sentences: Optional[List[str]] = None
         # S-3: Concurrency guard for edit-in-flight (B3: counter instead of bool)
         self._edit_in_flight_count = 0
+        # QA R13: Monotonic edit sequence to prevent stale card writes
+        self._edit_seq = 0
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -668,6 +670,10 @@ class ReviewWorkflow:
         # and incorrectly allows approval. The counter ensures A's validator rejects until all edits complete.
         self._edit_in_flight_count += 1
         
+        # QA R13: Increment edit_seq for this edit
+        self._edit_seq += 1
+        current_edit_seq = self._edit_seq
+        
         try:
             # Re-gate edited text (ADR-0006 Amendment E)
             workflow.logger.info(f"Running re-gate on edited text")
@@ -717,7 +723,7 @@ class ReviewWorkflow:
             
             # QA R12: Hash removed (dead code, see validate_approve)
             
-            # Update card with edited text and gate results
+            # QA R13: Update card with edited text, gate results, and edit_seq
             await workflow.execute_activity(
                 update_card,
                 UpdateCardInput(
@@ -726,6 +732,7 @@ class ReviewWorkflow:
                     evidence=self.evidence,
                     edited_text_gate_results=self.edited_text_gate_results,
                     edited_text_gate_state=gate_state,
+                    edit_seq=current_edit_seq,
                 ),
                 start_to_close_timeout=timedelta(seconds=10),
             )

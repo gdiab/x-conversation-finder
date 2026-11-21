@@ -40,6 +40,8 @@ class ReviewCardDB(Base):
     edited_text_gate_state = Column(String, nullable=True)  # "passed", "failed", or "not_checked"
     post_anyway = Column(Boolean, nullable=True)
     post_anyway_failing_sentences = Column(JSON, nullable=True)
+    # QA R13: Monotonic edit sequence to prevent stale card writes
+    edit_seq = Column(Integer, nullable=True, default=0)
 
 
 class BudgetLedgerDB(Base):
@@ -144,3 +146,28 @@ def init_db():
         with engine.connect() as conn:
             conn.execute(text("PRAGMA journal_mode=WAL"))
             conn.commit()
+    
+    # QA R13: Run migrations for existing databases
+    _migrate_add_edit_seq(engine)
+
+
+def _migrate_add_edit_seq(engine):
+    """
+    QA R13: Migration to add edit_seq column to review_cards.
+    
+    This migration is idempotent - it checks if the column exists before adding it.
+    """
+    if "sqlite" not in str(engine.url):
+        # Only needed for SQLite; other DBs handle this differently
+        return
+    
+    with engine.connect() as conn:
+        # Check if edit_seq column exists
+        result = conn.execute(text("PRAGMA table_info(review_cards)"))
+        columns = [row[1] for row in result]
+        
+        if 'edit_seq' not in columns:
+            logger.info("Adding edit_seq column to review_cards table")
+            conn.execute(text("ALTER TABLE review_cards ADD COLUMN edit_seq INTEGER DEFAULT 0"))
+            conn.commit()
+            logger.info("Migration complete: edit_seq column added")

@@ -35,31 +35,27 @@ def split_into_sentences(text: str) -> List[str]:
     """
     Split text into sentences.
     
-    QA R12: Rewritten with single-pass tokenizer. Abbreviation is a non-boundary
-    ONLY when next token starts lowercase or digit. When next word is capitalized
-    after vs./e.g./i.e./etc., split there.
+    QA R13: NEVER split after a known abbreviation. A sentence ending in 
+    a known abbreviation is NOT selectable as a claim.
     
     Simple deterministic rule:
     - Never split after a period between digits (decimals like 99.9)
-    - Split on [.!?]+ followed by whitespace
-    - UNLESS the period belongs to an abbreviation AND next token is lowercase/digit
-    
-    Over-splitting is safe (smaller quoted sentence is still verbatim).
-    Under-splitting is dangerous (merges referent into selectable).
+    - Never split after a known abbreviation (Dr. Mr. Mrs. Ms. Prof. Inc. Ltd. Co. Corp. vs. e.g. i.e. etc. approx. St.)
+    - Split on [.!?]+ followed by whitespace otherwise
     
     Returns non-empty sentences.
     """
-    # Known abbreviations that might appear
-    abbrevs = ['Inc.', 'Ltd.', 'Co.', 'Corp.', 'etc.', 'Ph.D.', 'U.S.',
-               'e.g.', 'i.e.', 'vs.', 'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.',
-               'approx.', 'ca.']
+    # QA R13: Known abbreviations - NEVER split after these
+    abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'Inc.', 'Ltd.', 'Co.', 
+               'Corp.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
     
-    # Tokenize: find all sentence-ending punctuation followed by whitespace or end
-    # Also track abbreviations
+    # Build case-insensitive pattern for abbreviations
+    abbrev_pattern = '|'.join(re.escape(a) for a in abbrevs)
+    
     result = []
     current = []
     
-    # Build a regex that tokenizes text into words, punctuation, and spaces
+    # Tokenize into words and spaces
     tokens = re.findall(r'\S+|\s+', text)
     
     i = 0
@@ -75,25 +71,11 @@ def split_into_sentences(text: str) -> List[str]:
                 i += 1
                 continue
             
-            # Check if it's an abbreviation
-            is_abbrev = any(token.endswith(abbr) for abbr in abbrevs)
-            
-            if is_abbrev:
-                # Look at next non-whitespace token
-                next_token = None
-                j = i + 1
-                while j < len(tokens):
-                    if tokens[j].strip():
-                        next_token = tokens[j]
-                        break
-                    j += 1
-                
-                if next_token:
-                    # If next token starts lowercase or digit, don't split
-                    if next_token[0].islower() or next_token[0].isdigit():
-                        i += 1
-                        continue
-                    # Otherwise, next token is uppercase -> split here
+            # QA R13: Check if it's an abbreviation - NEVER split
+            if re.search(r'(' + abbrev_pattern + r')$', token, re.IGNORECASE):
+                # It's an abbreviation, continue without splitting
+                i += 1
+                continue
             
             # Check if next token is whitespace followed by content
             if i + 1 < len(tokens) and tokens[i + 1].strip() == '':
@@ -143,7 +125,9 @@ def has_unresolved_referent(text: str) -> bool:
     """
     Check if a sentence starts with an unresolved referent.
     
-    QA R12: Enhanced to strip leading punctuation/quotes and skip discourse markers.
+    QA R13: Use explicit unicode escapes for curly quotes, strip leading dashes,
+    add discourse markers (Therefore, Otherwise, Thus, Hence, Still, Yet),
+    fix "Both" to only flag when followed by verb or 'of'.
     
     Per Architect decision 2026-11-21 (B):
     Quoted claim sentences must stand alone. A passage sentence that opens
@@ -154,11 +138,16 @@ def has_unresolved_referent(text: str) -> bool:
     """
     # Strip leading straight/curly quotes, brackets, and punctuation
     normalized = text.strip()
-    # Remove leading quotes (straight and curly), brackets, and angle brackets
-    normalized = re.sub(r'^["\'\[\(\{""''«»‹›]+', '', normalized)
+    # QA R13: Use explicit unicode escapes for curly quotes
+    # \u201c = " (left double quote), \u201d = " (right double quote)
+    # \u2018 = ' (left single quote), \u2019 = ' (right single quote)
+    # \u00ab = « (left guillemet), \u00bb = » (right guillemet)
+    # Also strip leading dash, bullet, en dash (\u2013), em dash (\u2014)
+    normalized = re.sub(r'^["\'\[\(\{<\u201c\u201d\u2018\u2019\u00ab\u00bb\-\u2022\u2013\u2014]+', '', normalized)
     normalized = normalized.strip().lower()
     
     # Skip leading conjunctions and discourse markers (with optional comma)
+    # QA R13: Add Therefore, Otherwise, Thus, Hence, Still, Yet
     # Pattern: word + optional comma + space
     discourse_markers = [
         r'^and\s*,?\s+',
@@ -170,12 +159,19 @@ def has_unresolved_referent(text: str) -> bool:
         r'^then\s*,?\s+',
         r'^additionally\s*,?\s+',
         r'^moreover\s*,?\s+',
+        r'^therefore\s*,?\s+',
+        r'^otherwise\s*,?\s+',
+        r'^thus\s*,?\s+',
+        r'^hence\s*,?\s+',
+        r'^still\s*,?\s+',
+        r'^yet\s*,?\s+',
     ]
     for marker in discourse_markers:
         normalized = re.sub(marker, '', normalized, count=1)
     
     # Unresolved referent patterns at the start of a sentence
     # Note: "It's", "That's", "They're" and "Its" remain flagged
+    # QA R13: "Both" is special - only flag when followed by verb or 'of'
     unresolved_patterns = [
         r'^it\b',
         r'^it\'s\b',
@@ -191,7 +187,6 @@ def has_unresolved_referent(text: str) -> bool:
         r'^their\b',
         r'^such\b',
         r'^the above\b',
-        r'^both\b',
         r'^the former\b',
         r'^the latter\b',
         r'^which\b',
@@ -203,6 +198,29 @@ def has_unresolved_referent(text: str) -> bool:
         if re.match(pattern, normalized):
             return True
     
+    # QA R13: Special handling for "Both"
+    # Only flag when followed by: are/is/do/does/have/has/were/was/of
+    if re.match(r'^both\s+(are|is|do|does|have|has|were|was|of)\b', normalized):
+        return True
+    
+    return False
+
+
+def ends_with_abbreviation(text: str) -> bool:
+    """
+    Check if a sentence ends with a known abbreviation.
+    
+    QA R13: A sentence ending in a known abbreviation is NOT selectable.
+    
+    Returns True if the sentence ends with an abbreviation.
+    """
+    abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'Inc.', 'Ltd.', 'Co.', 
+               'Corp.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
+    
+    text_stripped = text.rstrip()
+    for abbr in abbrevs:
+        if text_stripped.endswith(abbr):
+            return True
     return False
 
 
@@ -216,6 +234,8 @@ def insert_claim_sentence(
     Per Architect decision 2026-11-21 (B):
     Quoted claim sentences must stand alone. Sentences starting with
     unresolved referents are not selectable.
+    
+    QA R13: Sentences ending in known abbreviations are not selectable.
     
     Returns (success, inserted_text, error_reason).
     """
@@ -239,6 +259,10 @@ def insert_claim_sentence(
     # (B) Check for unresolved referents - sentence must stand alone
     if has_unresolved_referent(sentence):
         return False, "", "Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above)"
+    
+    # QA R13: Check for abbreviation ending - not selectable
+    if ends_with_abbreviation(sentence):
+        return False, "", "Sentence ends with an abbreviation (not selectable)"
     
     # Only normalization: trim trailing punctuation for flow
     sentence = sentence.rstrip('.!?')
@@ -310,14 +334,26 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     results = []
     
     for sentence in sentences:
+        # QA R13: Track sentence type (question vs statement) for reuse
+        # Don't fold '?' together with '.' and '!'. A question matches only a question.
+        is_question = sentence.rstrip().endswith('?')
+        
         # QA R12: Strip trailing punctuation before normalizing for comparison
         # Segment texts are stored without trailing punctuation (from insert_claim_sentence)
         norm_sentence = normalize_text(sentence.rstrip('.!?'))
         
         # B4: Check if this sentence exactly matches a previously gated segment (exact after normalization)
+        # QA R13: Also check sentence type - questions match only questions, statements match statements
         matched_seg = None
         for seg in input.gated_segments:
             if seg.text:
+                # Check if the segment is a question
+                seg_is_question = seg.text.rstrip().endswith('?')
+                
+                # Only reuse if sentence types match
+                if is_question != seg_is_question:
+                    continue
+                
                 norm_seg = normalize_text(seg.text.rstrip('.!?'))
                 if norm_sentence == norm_seg:
                     matched_seg = seg

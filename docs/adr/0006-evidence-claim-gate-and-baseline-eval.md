@@ -75,6 +75,8 @@ Claims are quoted, not paraphrased. A claim segment references a founder passage
    Per-sentence results are stored. This is not a hard block: if the edited text fails, the `approve` Update requires `post_anyway=True`. The validator rejects approve without it when failures exist, and the card records `post_anyway` and the failing sentences.
    
    **Concurrent edits** (QA R12): Resolve as last-writer-wins by finish order. Each edit runs its gate independently; the last to complete sets the final draft.text and gate state. The _edit_in_flight_count counter prevents approve while any edit is running, but does not serialize edits themselves.
+   
+   **Stale card writes** (QA R13): A monotonically increasing edit_seq in workflow state is incremented at the start of each edit and passed to update_card. The store activity ignores any write whose edit_seq is lower than the stored value, preventing an earlier edit's update_card that lands last from overwriting a later edit's data. SQLAlchemy's flag_modified is used for JSON columns to ensure changes are persisted.
 
 6. **On failure:** Exactly one redraft carrying the gate's per-sentence reasons as the steer, then gate again. A second failure ends the `Review` as `skipped: not enough evidence` with the reasons recorded in the evidence trail. A failed draft never reaches a card.
 
