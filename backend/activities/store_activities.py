@@ -1,12 +1,16 @@
 """Storage activities for review cards using SQLite."""
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import json
 
-from backend.models import ReviewCard, ReviewStatus
+from backend.models import ReviewCard, ReviewStatus, Evidence
 from backend.database import get_db, ReviewCardDB
+
+
+# Type alias for update patches
+CardUpdate = Dict[str, Union[str, Evidence, List[Dict[str, Any]]]]
 
 
 @dataclass
@@ -19,10 +23,21 @@ class StoreCardInput:
 
 @dataclass
 class UpdateCardInput:
-    """Input for update_card activity."""
+    """
+    Input for update_card activity.
+    
+    Valid update keys:
+    - status: str (ReviewStatus value)
+    - approved_by: str
+    - posted_url: str
+    - reply_post_id: str
+    - skip_reason: str
+    - followup_replies: List[Dict[str, Any]]
+    - evidence: Evidence (full object with draft)
+    """
     
     workflow_id: str
-    updates: Dict[str, Any]
+    updates: CardUpdate
     idempotency_key: str
 
 
