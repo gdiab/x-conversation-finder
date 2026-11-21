@@ -19,7 +19,6 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from backend.activities import SearchRecentInput
-    from backend.activities import x_activity_funcs
     from backend.workflows.review import ReviewWorkflow, ReviewInput
     from temporalio.workflow import ParentClosePolicy
     from backend.config import get_settings
@@ -95,7 +94,7 @@ class TopicWatchWorkflow:
             settings = get_settings()
             try:
                 search_result = await workflow.execute_activity(
-                    x_activity_funcs.search_recent,
+                    "search_recent",
                     SearchRecentInput(
                         query=input.query,
                         since_id=since_id,

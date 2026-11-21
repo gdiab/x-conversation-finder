@@ -35,7 +35,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from backend.activities.claim_gate_activity import ClaimGateInput, claim_gate
     from backend.activities.store_activities import store_card, update_card
-    from backend.activities import x_activity_funcs, reply_activity_funcs
     from backend.config import get_settings
 
 
@@ -105,7 +104,7 @@ class ReviewWorkflow:
         try:
             # Step 1: Research
             evidence = await workflow.execute_activity(
-                reply_activity_funcs.research_post,
+                "research_post",
                 ResearchPostInput(
                     post=input.post,
                     topic=input.topic,
@@ -145,7 +144,7 @@ class ReviewWorkflow:
                 # Draft reply
                 steer = "Try again with only supported claims" if claim_gate_attempts > 1 else None
                 evidence = await workflow.execute_activity(
-                    reply_activity_funcs.draft_reply,
+                    "draft_reply",
                     DraftReplyInput(
                         evidence=evidence,
                         steer=steer,
@@ -306,7 +305,7 @@ class ReviewWorkflow:
             workflow.logger.info("Follow-up timer fired, checking for replies")
             
             followup_posts = await workflow.execute_activity(
-                x_activity_funcs.check_followup,
+                "check_followup",
                 CheckFollowupInput(
                     reply_post_id=self.reply_post_id,
                     idempotency_key=f"{workflow_id}:followup",
@@ -406,7 +405,7 @@ class ReviewWorkflow:
         # Lookup the reply post to verify it exists
         settings = get_settings()
         reply_post = await workflow.execute_activity(
-            x_activity_funcs.lookup_post,
+            "lookup_post",
             LookupPostInput(
                 post_id=reply_post_id,
                 idempotency_key=f"{workflow.info().workflow_id}:confirm:{reply_post_id}",
@@ -513,7 +512,7 @@ class ReviewWorkflow:
         
         settings = get_settings()
         self.evidence = await workflow.execute_activity(
-            reply_activity_funcs.draft_reply,
+            "draft_reply",
             DraftReplyInput(
                 evidence=self.evidence,
                 steer=instruction,

@@ -13,7 +13,6 @@ from backend.config import get_settings
 from backend.workflows import ReviewWorkflow, TopicWatchWorkflow
 from backend.activities.x_activities import XActivities
 from backend.activities.reply_activities import ReplyActivities
-from backend.activities import x_activity_funcs, reply_activity_funcs
 from backend.activities.store_activities import store_card, update_card, get_card
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, HttpXClient, FakeReplyAgent, PlainReplyAgent
@@ -58,13 +57,9 @@ async def main():
         logger.warning(f"Unknown reply_agent_adapter: {settings.reply_agent_adapter}, using fake")
         reply_agent = FakeReplyAgent()
     
-    # Create activity instances with injected dependencies
+    # Create activity instances with injected dependencies (B5: no module globals)
     x_activities = XActivities(x_client)
     reply_activities = ReplyActivities(reply_agent)
-    
-    # Set global instances for module-level activity functions
-    x_activity_funcs.set_x_activities(x_activities)
-    reply_activity_funcs.set_reply_activities(reply_activities)
     
     logger.info(f"Connecting to Temporal at {settings.temporal_host}")
     
@@ -80,12 +75,10 @@ async def main():
         task_queue="x-conversation-finder",
         workflows=[ReviewWorkflow, TopicWatchWorkflow],
         activities=[
-            # Module-level activity functions (importable in workflows)
-            x_activity_funcs.search_recent,
-            x_activity_funcs.lookup_post,
-            x_activity_funcs.check_followup,
-            reply_activity_funcs.research_post,
-            reply_activity_funcs.draft_reply,
+            # Activity class instances (B5: one registration path, injected deps)
+            x_activities,
+            reply_activities,
+            # Standalone activity functions
             store_card,
             update_card,
             get_card,
