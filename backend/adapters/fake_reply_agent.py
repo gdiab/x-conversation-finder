@@ -110,14 +110,28 @@ class FakeReplyAgent(ReplyAgentPort):
             reasoning="Gate not yet run (will be verified by claim_gate activity)",
         )
         
+        # R4-B2: Compute token usage from text length (~1 token per 4 chars)
+        # Input: evidence materials + steer (if any) + draft context
+        input_text_len = 0
+        for m in evidence.founder_materials:
+            input_text_len += len(m.passage)
+        if steer:
+            input_text_len += len(steer)
+        if evidence.draft and evidence.draft.text:
+            input_text_len += len(evidence.draft.text)
+        # Rough estimate: prompt overhead + context
+        input_tokens = (input_text_len + 500) // 4
+        
+        # Output: new draft text
+        output_tokens = len(base_text) // 4
+        
         evidence.draft = Draft(
             text=base_text,
             claim_gate=claim_gate,
             steers_applied=steers,
             token_count=len(base_text.split()),
-            # S-2: Realistic token usage for budget tracking
-            input_tokens=600,  # Approximate: post + materials + prompt
-            output_tokens=150,  # Approximate: draft length
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             model_used="fake-model",
         )
         

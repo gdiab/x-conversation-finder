@@ -6,7 +6,7 @@ from temporalio import activity
 
 from backend.models import Post
 from backend.ports import XClientPort
-from backend.budget import reserve_x_budget, BudgetExceeded
+from backend.budget import reserve_x_budget, reconcile_x_reads, BudgetExceeded
 from backend.config import get_settings
 
 
@@ -89,14 +89,15 @@ class XActivities:
             max_results=input.max_results,
         )
         
-        # Actual cost based on posts returned
+        # R4-B2: Reconcile budget to actual usage
         actual_reads = len(posts)
-        actual_cost = actual_reads * settings.x_post_read_cost
+        actual_cost = reconcile_x_reads(input.max_results, actual_reads, settings.x_post_read_cost)
         
         if actual_reads < input.max_results:
+            refund = (input.max_results - actual_reads) * settings.x_post_read_cost
             activity.logger.info(
-                f"Reserved budget for {input.max_results} reads (${cost_usd:.4f}), "
-                f"but got {actual_reads} posts (${actual_cost:.4f})"
+                f"Reserved {input.max_results} reads, got {actual_reads} posts, "
+                f"refunded ${refund:.4f}"
             )
         
         activity.logger.info(f"Found {len(posts)} posts, cost ${actual_cost:.4f}")
@@ -166,10 +167,16 @@ class XActivities:
             max_results=max_results,
         )
         
+        # R4-B2: Reconcile budget to actual usage
         actual_reads = len(posts)
+        actual_cost = reconcile_x_reads(max_results, actual_reads, settings.x_post_read_cost)
+        
+        if actual_reads < max_results:
+            refund = (max_results - actual_reads) * settings.x_post_read_cost
+            activity.logger.info(f"check_followup: refunded ${refund:.4f} ({max_results - actual_reads} unused reads)")
+        
         activity.logger.info(
-            f"Found {actual_reads} replies in conversation "
-            f"(reserved {max_results}, cost ${cost_usd:.4f})"
+            f"Found {actual_reads} replies in conversation (cost ${actual_cost:.4f})"
         )
         
         return posts

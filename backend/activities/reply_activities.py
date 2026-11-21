@@ -6,7 +6,7 @@ from temporalio import activity
 
 from backend.models import Evidence, Post
 from backend.ports import ReplyAgentPort
-from backend.budget import reserve_inference_budget, BudgetExceeded
+from backend.budget import reserve_inference_budget, reconcile_inference_tokens, BudgetExceeded
 
 
 @dataclass
@@ -105,11 +105,19 @@ class ReplyActivities:
         )
         
         if evidence.draft:
+            # R4-B2: Reconcile inference budget to actual usage
+            actual_cost = reconcile_inference_tokens(
+                reserved_input=800,
+                reserved_output=100,
+                actual_input=evidence.draft.input_tokens,
+                actual_output=evidence.draft.output_tokens
+            )
+            
             activity.logger.info(
                 f"Draft complete: {len(evidence.draft.text)} chars, "
                 f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
-                f"tokens={evidence.draft.input_tokens}/{evidence.draft.output_tokens} (in/out), "
-                f"reserved=800/100"
+                f"tokens={evidence.draft.input_tokens}/{evidence.draft.output_tokens} (actual), "
+                f"reserved=800/100, cost=${actual_cost:.6f}"
             )
         
         return evidence

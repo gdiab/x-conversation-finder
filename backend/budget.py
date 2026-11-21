@@ -197,6 +197,94 @@ def reserve_inference_budget(input_tokens: int, output_tokens: int) -> float:
         db.close()
 
 
+def reconcile_x_reads(reserved_reads: int, actual_reads: int, cost_per_read: float = None) -> float:
+    """
+    Reconcile X budget after actual results known (R4-B2).
+    
+    Refunds the difference if actual < reserved.
+    Returns the actual cost charged.
+    """
+    if actual_reads >= reserved_reads:
+        # No reconciliation needed
+        return actual_reads * (cost_per_read or get_settings().x_post_read_cost)
+    
+    settings = get_settings()
+    today = get_today_utc()
+    
+    if cost_per_read is None:
+        cost_per_read = settings.x_post_read_cost
+    
+    refund_reads = reserved_reads - actual_reads
+    refund_cost = refund_reads * cost_per_read
+    
+    db = get_db()
+    try:
+        db.execute(text("BEGIN IMMEDIATE"))
+        
+        ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
+        
+        if ledger:
+            ledger.x_reads -= refund_reads
+            ledger.x_cost_usd -= refund_cost
+            ledger.last_updated = datetime.now(timezone.utc).isoformat()
+            db.commit()
+        
+        return actual_reads * cost_per_read
+        
+    except Exception as e:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def reconcile_inference_tokens(reserved_input: int, reserved_output: int, 
+                               actual_input: int, actual_output: int) -> float:
+    """
+    Reconcile inference budget after actual usage known (R4-B2).
+    
+    Refunds the difference if actual < reserved.
+    Returns the actual cost charged.
+    """
+    settings = get_settings()
+    
+    reserved_cost = (
+        reserved_input * settings.inference_input_token_cost_usd +
+        reserved_output * settings.inference_output_token_cost_usd
+    )
+    
+    actual_cost = (
+        actual_input * settings.inference_input_token_cost_usd +
+        actual_output * settings.inference_output_token_cost_usd
+    )
+    
+    if actual_cost >= reserved_cost:
+        # No reconciliation needed
+        return actual_cost
+    
+    refund_cost = reserved_cost - actual_cost
+    today = get_today_utc()
+    
+    db = get_db()
+    try:
+        db.execute(text("BEGIN IMMEDIATE"))
+        
+        ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
+        
+        if ledger:
+            ledger.inference_cost_usd -= refund_cost
+            ledger.last_updated = datetime.now(timezone.utc).isoformat()
+            db.commit()
+        
+        return actual_cost
+        
+    except Exception as e:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def get_today_budget() -> dict:
     """Get today's budget usage for the spend meter."""
     settings = get_settings()

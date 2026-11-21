@@ -177,12 +177,19 @@ Be conversational, honest, and never invent features. Every claim must cite spec
         if steer:
             steers = steers + [steer]
         
+        # R4-B2: Extract real token usage from response
+        usage = response.usage
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        
         evidence.draft = Draft(
             text=result["text"],
             claim_gate=claim_gate,
             steers_applied=steers,
             token_count=len(result["text"].split()),
             model_used=self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
         
         return evidence
