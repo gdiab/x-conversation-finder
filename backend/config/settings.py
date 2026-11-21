@@ -1,0 +1,58 @@
+"""Application settings."""
+
+from functools import lru_cache
+from typing import Optional
+
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    """Application configuration."""
+    
+    # X API
+    x_api_key: str = ""
+    x_api_secret: str = ""
+    x_bearer_token: str = ""
+    
+    # X API pricing
+    x_post_read_cost: float = 0.005
+    x_user_read_cost: float = 0.010
+    x_post_create_cost: float = 0.015
+    
+    # LLM
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4o-mini"
+    
+    # Temporal
+    temporal_host: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    
+    # API
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    
+    # Budget limits
+    daily_spend_limit_usd: float = 5.0
+    daily_inference_limit_usd: float = 10.0
+    
+    # Database
+    database_url: str = "sqlite:///./x_conversation_finder.db"
+    
+    # Topic watch settings
+    watch_poll_interval_hours: int = 3
+    watch_max_results: int = 10
+    
+    # Review settings
+    review_timeout_hours: int = 48
+    confidence_threshold: float = 0.6
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """Get cached settings instance."""
+    return Settings()
