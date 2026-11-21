@@ -135,13 +135,19 @@ class FakeReplyAgent(ReplyAgentPort):
         text_parts = []
         for seg in segments:
             if seg.kind == "claim":
-                # Insert the sentence from the passage
+                # Insert the sentence from the passage WITH trailing period
+                # QA R12: Keep period so splitter can split correctly
                 passage = evidence.founder_materials[0].passage  # Simple: use first material
                 sentences = split_into_sentences(passage)
                 if seg.sentence_index is not None and 0 <= seg.sentence_index < len(sentences):
-                    text_parts.append(sentences[seg.sentence_index].rstrip('.!?'))
+                    # Don't strip punctuation - keep it for proper sentence splitting
+                    text_parts.append(sentences[seg.sentence_index])
             else:
-                text_parts.append(seg.text)
+                # Ensure non_claim text ends with punctuation
+                text = seg.text
+                if not text.endswith(('.', '!', '?')):
+                    text = text + '.'
+                text_parts.append(text)
         
         draft_text = ' '.join(text_parts)
         
