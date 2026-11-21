@@ -41,14 +41,23 @@ class FakeXClient(XClientPort):
         """
         Fake search returning synthetic posts.
         
+        Supports conversation_id: query syntax for testing followup replies.
         Returns (posts, newest_id)
         """
         self.call_count += 1
         
-        matching = [
-            p for p in self.posts_database
-            if any(term.lower() in p.text.lower() for term in query.split())
-        ]
+        # Handle conversation_id:X query syntax
+        if query.startswith("conversation_id:"):
+            conversation_id = query.split(":", 1)[1].strip()
+            matching = [
+                p for p in self.posts_database
+                if p.conversation_id == conversation_id
+            ]
+        else:
+            matching = [
+                p for p in self.posts_database
+                if any(term.lower() in p.text.lower() for term in query.split())
+            ]
         
         if since_id:
             matching = [
@@ -101,6 +110,56 @@ class FakeXClient(XClientPort):
         base_time = datetime.now(timezone.utc)
         
         posts = []
+        
+        # Add synthetic follow-up replies for E2E testing
+        # These are replies in the conversation thread of post 9999
+        # (used by check_followup activity in E2E test)
+        followup_reply_templates = [
+            {
+                "id": "9999001",
+                "text": "This is really helpful, thanks!",
+                "username": "followup_user1",
+                "name": "Followup User 1",
+                "followers": 100,
+                "hours_ago": 0,
+                "conversation_id": "9999",  # Part of 9999's conversation
+            },
+            {
+                "id": "9999002",
+                "text": "Can you share more details about this?",
+                "username": "followup_user2",
+                "name": "Followup User 2",
+                "followers": 250,
+                "hours_ago": 0,
+                "conversation_id": "9999",  # Part of 9999's conversation
+            },
+        ]
+        
+        for template in followup_reply_templates:
+            author = Author(
+                id=hashlib.md5(template["username"].encode()).hexdigest()[:16],
+                username=template["username"],
+                name=template["name"],
+                followers_count=template["followers"],
+                verified=False,
+            )
+            
+            created_at = base_time - timedelta(hours=template["hours_ago"])
+            
+            post = Post(
+                id=template["id"],
+                text=template["text"],
+                author=author,
+                created_at=created_at.isoformat(),
+                like_count=0,
+                reply_count=0,
+                repost_count=0,
+                quote_count=0,
+                conversation_id=template["conversation_id"],
+                in_reply_to_user_id="founder",
+                reply_settings="everyone",
+            )
+            posts.append(post)
         
         post_templates = [
             {
