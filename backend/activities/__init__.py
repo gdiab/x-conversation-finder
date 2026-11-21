@@ -1,17 +1,14 @@
 """Temporal activities."""
 
 from .x_activities import (
-    search_recent,
-    lookup_post,
-    check_followup,
+    XActivities,
     SearchRecentInput,
     SearchRecentOutput,
     LookupPostInput,
     CheckFollowupInput,
 )
 from .reply_activities import (
-    research_post,
-    draft_reply,
+    ReplyActivities,
     ResearchPostInput,
     DraftReplyInput,
 )
@@ -29,15 +26,12 @@ from .claim_gate_activity import (
 )
 
 __all__ = [
-    "search_recent",
-    "lookup_post",
-    "check_followup",
+    "XActivities",
     "SearchRecentInput",
     "SearchRecentOutput",
     "LookupPostInput",
     "CheckFollowupInput",
-    "research_post",
-    "draft_reply",
+    "ReplyActivities",
     "ResearchPostInput",
     "DraftReplyInput",
     "store_card",

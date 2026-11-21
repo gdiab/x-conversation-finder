@@ -11,17 +11,11 @@ from temporalio.worker import Worker
 
 from backend.config import get_settings
 from backend.workflows import ReviewWorkflow, TopicWatchWorkflow
-from backend.activities import (
-    search_recent,
-    lookup_post,
-    check_followup,
-    research_post,
-    draft_reply,
-    store_card,
-    update_card,
-    get_card,
-    claim_gate,
-)
+from backend.activities.x_activities import XActivities
+from backend.activities.reply_activities import ReplyActivities
+from backend.activities.store_activities import store_card, update_card, get_card
+from backend.activities.claim_gate_activity import claim_gate
+from backend.adapters import FakeXClient, FakeReplyAgent, PlainReplyAgent
 
 
 async def main():
@@ -30,6 +24,31 @@ async def main():
     
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
+    
+    # Initialize adapters based on config
+    logger.info(f"Initializing adapters: x_client={settings.x_client_adapter}, "
+                f"reply_agent={settings.reply_agent_adapter}")
+    
+    # X Client adapter
+    if settings.x_client_adapter == "fake":
+        x_client = FakeXClient()
+    else:
+        # Real X client would go here when implemented
+        logger.warning("Real X client not implemented, falling back to fake")
+        x_client = FakeXClient()
+    
+    # Reply agent adapter
+    if settings.reply_agent_adapter == "fake":
+        reply_agent = FakeReplyAgent()
+    elif settings.reply_agent_adapter == "plain":
+        reply_agent = PlainReplyAgent()
+    else:
+        logger.warning(f"Unknown reply_agent_adapter: {settings.reply_agent_adapter}, using fake")
+        reply_agent = FakeReplyAgent()
+    
+    # Create activity instances with injected dependencies
+    x_activities = XActivities(x_client)
+    reply_activities = ReplyActivities(reply_agent)
     
     logger.info(f"Connecting to Temporal at {settings.temporal_host}")
     
@@ -45,11 +64,11 @@ async def main():
         task_queue="x-conversation-finder",
         workflows=[ReviewWorkflow, TopicWatchWorkflow],
         activities=[
-            search_recent,
-            lookup_post,
-            check_followup,
-            research_post,
-            draft_reply,
+            x_activities.search_recent,
+            x_activities.lookup_post,
+            x_activities.check_followup,
+            reply_activities.research_post,
+            reply_activities.draft_reply,
             store_card,
             update_card,
             get_card,
@@ -57,7 +76,7 @@ async def main():
         ],
     )
     
-    logger.info("Worker running")
+    logger.info("Worker running with injected adapters")
     
     await worker.run()
 

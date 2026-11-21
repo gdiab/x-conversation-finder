@@ -12,29 +12,28 @@ from temporalio.worker import Worker
 
 from backend.workflows.topic_watch import TopicWatchWorkflow, TopicWatchInput
 from backend.workflows.review import ReviewWorkflow
-from backend.activities import (
-    search_recent,
-    lookup_post,
-    research_post,
-    draft_reply,
-    store_card,
-    update_card,
-)
+from backend.activities import XActivities, ReplyActivities
+from backend.activities.store_activities import store_card, update_card
+from backend.adapters import FakeXClient, FakeReplyAgent
 
 
 @pytest.mark.asyncio
 async def test_topic_watch_workflow_single_iteration(product_brief):
     """Test TopicWatch completes one iteration."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[TopicWatchWorkflow, ReviewWorkflow],
             activities=[
-                search_recent,
-                lookup_post,
-                research_post,
-                draft_reply,
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
                 store_card,
                 update_card,
             ],
@@ -68,16 +67,20 @@ async def test_topic_watch_workflow_single_iteration(product_brief):
 @pytest.mark.asyncio
 async def test_topic_watch_workflow_spawns_reviews(product_brief):
     """Test TopicWatch spawns Review child workflows."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[TopicWatchWorkflow, ReviewWorkflow],
             activities=[
-                search_recent,
-                lookup_post,
-                research_post,
-                draft_reply,
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
                 store_card,
                 update_card,
             ],
@@ -111,16 +114,20 @@ async def test_topic_watch_workflow_spawns_reviews(product_brief):
 @pytest.mark.asyncio
 async def test_topic_watch_workflow_continue_as_new(product_brief):
     """Test TopicWatch uses Continue-As-New after threshold."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[TopicWatchWorkflow, ReviewWorkflow],
             activities=[
-                search_recent,
-                lookup_post,
-                research_post,
-                draft_reply,
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
                 store_card,
                 update_card,
             ],

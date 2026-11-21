@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # Set 2026-11-21: 3 days after confirmation
     followup_delay_days: int = 3
     
+    # Adapter selection (B5: injected adapters)
+    # Set 2026-11-21: "fake" for tests, "real" for production
+    x_client_adapter: str = "fake"
+    reply_agent_adapter: str = "fake"
+    
     class Config:
         env_file = ".env"
         case_sensitive = False

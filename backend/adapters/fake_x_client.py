@@ -5,13 +5,14 @@ No real API calls, returns synthetic data.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import hashlib
 
 from backend.models import Post, Author
+from backend.ports import XClientPort
 
 
-class FakeXClient:
+class FakeXClient(XClientPort):
     """Fake X client for testing and CI."""
     
     def __init__(self):
@@ -23,7 +24,7 @@ class FakeXClient:
         query: str,
         since_id: Optional[str] = None,
         max_results: int = 10,
-    ) -> tuple[List[Post], Optional[str]]:
+    ) -> Tuple[List[Post], Optional[str]]:
         """
         Fake search returning synthetic posts.
         

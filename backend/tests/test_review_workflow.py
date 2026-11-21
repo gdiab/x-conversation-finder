@@ -13,25 +13,30 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from backend.workflows.review import ReviewWorkflow, ReviewInput
-from backend.activities import (
-    research_post,
-    draft_reply,
-    store_card,
-    update_card,
-    lookup_post,
-    check_followup,
-)
+from backend.activities import XActivities, ReplyActivities
+from backend.activities.store_activities import store_card, update_card
+from backend.adapters import FakeXClient, FakeReplyAgent
 
 
 @pytest.mark.asyncio
 async def test_review_workflow_approve(sample_post, product_brief):
     """Test Review workflow with approval."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
         ):
             workflow_id = f"review:test:{sample_post.id}"
             
@@ -81,12 +86,22 @@ async def test_review_workflow_approve(sample_post, product_brief):
 @pytest.mark.asyncio
 async def test_review_workflow_skip(sample_post, product_brief):
     """Test Review workflow with skip."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
         ):
             workflow_id = f"review:test:{sample_post.id}_skip"
             
@@ -118,12 +133,22 @@ async def test_review_workflow_skip(sample_post, product_brief):
 @pytest.mark.asyncio
 async def test_review_workflow_nudge(sample_post, product_brief):
     """Test Review workflow with nudge (redraft)."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
         ):
             workflow_id = f"review:test:{sample_post.id}_nudge"
             
@@ -176,12 +201,22 @@ async def test_review_workflow_nudge(sample_post, product_brief):
 @pytest.mark.asyncio
 async def test_review_workflow_timeout(sample_post, product_brief):
     """Test Review workflow expires after 48h."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
         ):
             workflow_id = f"review:test:{sample_post.id}_timeout"
             
@@ -207,12 +242,22 @@ async def test_review_workflow_timeout(sample_post, product_brief):
 @pytest.mark.asyncio
 async def test_review_workflow_low_confidence(sample_post, product_brief):
     """Test Review workflow skips on low confidence."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
         ):
             workflow_id = f"review:test:{sample_post.id}_low_conf"
             
@@ -236,12 +281,22 @@ async def test_review_workflow_low_confidence(sample_post, product_brief):
 @pytest.mark.asyncio
 async def test_review_workflow_approved_not_confirmed(sample_post, product_brief):
     """Test Review workflow expires to approved_not_confirmed if no confirmation."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
         ):
             workflow_id = f"review:test:{sample_post.id}_not_confirmed"
             
@@ -277,12 +332,22 @@ async def test_review_workflow_approved_not_confirmed(sample_post, product_brief
 @pytest.mark.asyncio
 async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_brief):
     """Test confirm_posted rejects invalid URL."""
+    x_activities = XActivities(FakeXClient())
+    reply_activities = ReplyActivities(FakeReplyAgent())
+    
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[research_post, draft_reply, store_card, update_card, lookup_post, check_followup],
+            activities=[
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                store_card,
+                update_card,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+            ],
         ):
             workflow_id = f"review:test:{sample_post.id}_invalid_url"
             
