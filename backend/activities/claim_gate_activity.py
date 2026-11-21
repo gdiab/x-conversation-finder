@@ -154,7 +154,8 @@ def has_unresolved_referent(text: str) -> bool:
     """
     # Strip leading straight/curly quotes, brackets, and punctuation
     normalized = text.strip()
-    normalized = re.sub(r'^["\'\[\(\{'"'"«»‹›]+', '', normalized)
+    # Remove leading quotes (straight and curly), brackets, and angle brackets
+    normalized = re.sub(r'^["\'\[\(\{""''«»‹›]+', '', normalized)
     normalized = normalized.strip().lower()
     
     # Skip leading conjunctions and discourse markers (with optional comma)
