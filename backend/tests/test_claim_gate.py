@@ -258,14 +258,15 @@ async def test_qa_r11_b1_rejected_examples():
 async def test_qa_r11_b1_passing_examples():
     """
     QA R13: Update for v2.0.0 - these must match fixed phrases exactly.
+    QA R14: Updated for v2.1.0 phrase list changes.
     
     These are exact matches to phrases in the fixed phrase list.
     """
     assert is_closed_set_non_claim("Thanks!")
-    assert is_closed_set_non_claim("Happy to share more details.")
+    assert is_closed_set_non_claim("Happy to share details.")  # v2.1.0 text
     assert is_closed_set_non_claim("What stack are you on?")
-    # QA R13: "I love this thread" was removed (evaluative). Use another phrase.
-    assert is_closed_set_non_claim("Interesting question.")
+    # QA R14: "Interesting question" was removed in v2.1.0
+    assert is_closed_set_non_claim("Thanks for sharing.")
 
 
 # QA R13: DELETED - Frame assertions test removed in v2.0.0
@@ -341,10 +342,11 @@ async def test_claim_gate_valid_claim_insertion():
     ]
     
     # QA R13: Non_claim segments use phrase_id (no text)
+    # QA R14: Use v2.1.0 phrase_ids
     segments = [
-        Segment(kind="non_claim", phrase_id="thanks.for_question"),
+        Segment(kind="non_claim", phrase_id="thanks.for_sharing"),
         Segment(kind="claim", source_passage_id="passage_0", sentence_index=0),
-        Segment(kind="non_claim", phrase_id="offer.happy_to_share"),
+        Segment(kind="non_claim", phrase_id="offer.happy_to_help"),
     ]
     
     result = await claim_gate(ClaimGateInput(
