@@ -8,6 +8,7 @@ Provides endpoints for:
 """
 
 import logging
+import sys
 from typing import List, Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -26,7 +27,12 @@ from backend.activities.store_activities import get_all_cards
 from backend.database import init_db
 from backend.budget import get_today_budget
 
-
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 temporal_client: Optional[Client] = None
 

@@ -196,10 +196,19 @@ echo ""
 
 # Approve
 echo "[4] Approving review..."
-APPROVE=$(curl -s -X POST "http://localhost:8001/api/reviews/$WORKFLOW_ID/approve" \
+HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/approve-response.txt -X POST "http://localhost:8001/api/reviews/$WORKFLOW_ID/approve" \
   -H "Content-Type: application/json" \
   -d '{"posted_url": "https://x.com/founder/status/12345", "client_request_id": "e2e-approve"}')
-echo "$APPROVE" | python3 -m json.tool 2>/dev/null | head -5 || echo "$APPROVE"
+
+if [ "$HTTP_CODE" != "200" ]; then
+    echo "❌ Approve failed with HTTP $HTTP_CODE"
+    cat /tmp/approve-response.txt
+    exit 1
+fi
+
+APPROVE=$(cat /tmp/approve-response.txt)
+(echo "$APPROVE" | python3 -m json.tool 2>/dev/null | head -5) || echo "$APPROVE"
+echo "✓ Review approved"
 sleep 2
 echo ""
 
@@ -207,8 +216,9 @@ echo ""
 echo "[5] Confirming posted reply..."
 CONFIRM=$(curl -s -X POST "http://localhost:8001/api/reviews/$WORKFLOW_ID/confirm_posted" \
   -H "Content-Type: application/json" \
-  -d '{"reply_url": "https://x.com/founder/status/99999", "client_request_id": "e2e-confirm"}')
-echo "$CONFIRM" | python3 -m json.tool 2>/dev/null | head -5 || echo "$CONFIRM"
+  -d '{"reply_url": "https://x.com/founder/status/99999", "client_request_id": "e2e-confirm"}') || { echo "❌ Confirm failed"; exit 1; }
+(echo "$CONFIRM" | python3 -m json.tool 2>/dev/null | head -5) || echo "$CONFIRM"
+echo "✓ Reply confirmed, follow-up timer starting"
 echo ""
 
 # Wait for follow-up timer (immediate with FOLLOWUP_DELAY_DAYS=0)
