@@ -115,6 +115,9 @@ class FakeReplyAgent(ReplyAgentPort):
             claim_gate=claim_gate,
             steers_applied=steers,
             token_count=len(base_text.split()),
+            # S-2: Realistic token usage for budget tracking
+            input_tokens=600,  # Approximate: post + materials + prompt
+            output_tokens=150,  # Approximate: draft length
             model_used="fake-model",
         )
         

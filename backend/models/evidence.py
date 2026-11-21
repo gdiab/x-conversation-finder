@@ -42,6 +42,9 @@ class Draft:
     steers_applied: List[str] = field(default_factory=list)
     token_count: int = 0
     model_used: str = ""
+    # S-2: Real token usage from model
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass

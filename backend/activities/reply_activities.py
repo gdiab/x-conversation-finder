@@ -107,7 +107,9 @@ class ReplyActivities:
         if evidence.draft:
             activity.logger.info(
                 f"Draft complete: {len(evidence.draft.text)} chars, "
-                f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}"
+                f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
+                f"tokens={evidence.draft.input_tokens}/{evidence.draft.output_tokens} (in/out), "
+                f"reserved=800/100"
             )
         
         return evidence
