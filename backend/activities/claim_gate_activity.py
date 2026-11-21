@@ -74,6 +74,13 @@ def find_product_capability_sentences(text: str) -> List[str]:
     Detects sentences with:
     - "we"/"our"/"my" + capability verbs (help, provide, enable, etc.)
     - Pronoun/implicit subjects: "it"/"this"/"the app"/"the tool"/"the product"/product-name + capability verbs
+    - Third-party claims: "they"/"X" + capability verbs (SF-5: catches "They offer a free tier")
+    - Integration claims: "works with"/"integrates with" (SF-5: catches "This works with Kafka")
+    
+    Known limits (acceptable false positives):
+    - "They work hard on reliability" (blocked - contains 'they' + capability verb)
+    - "It works better now" (blocked - contains pronoun + capability verb)
+    - "This helps me understand" (blocked - user statement, not product claim)
     
     Returns list of sentences that are likely product capability claims.
     """
@@ -87,18 +94,25 @@ def find_product_capability_sentences(text: str) -> List[str]:
         if not sentence:
             continue
         
-        # Check if sentence contains first-person or pronoun/implicit subject
+        # Check if sentence contains first-person, pronoun/implicit subject, or third-party claims
         has_first_person = bool(re.search(r'\b(?:we|our|my)\b', sentence, re.IGNORECASE))
         has_pronoun_subject = bool(re.search(
             r'\b(?:it|this|the (?:app|tool|product|platform|system|service))\b', 
             sentence, 
             re.IGNORECASE
         ))
+        has_third_party = bool(re.search(r'\b(?:they|he|she)\b', sentence, re.IGNORECASE))
+        has_integration_claim = bool(re.search(r'\bworks?\s+with\b', sentence, re.IGNORECASE))
         
-        if not (has_first_person or has_pronoun_subject):
+        if not (has_first_person or has_pronoun_subject or has_third_party or has_integration_claim):
             continue
         
-        # Check if sentence contains a capability verb
+        # "works with" is itself a capability pattern, so no additional verb check needed
+        if has_integration_claim:
+            capability_sentences.append(sentence.strip())
+            continue
+        
+        # For other subjects, check if sentence contains a capability verb
         has_capability_verb = False
         for verb_pattern in CAPABILITY_VERB_PATTERNS:
             if re.search(verb_pattern, sentence, re.IGNORECASE):

@@ -15,6 +15,19 @@ from backend.ports import XClientPort
 class FakeXClient(XClientPort):
     """Fake X client for testing and CI."""
     
+    # Explicit reply-to-parent mapping (replaces formula-based derivation)
+    # Maps reply post IDs to their conversation/parent IDs
+    REPLY_TO_PARENT_MAP = {
+        "9999": "1001",  # E2E test compatibility
+        "99999": "e2e_9999",  # Special E2E case
+        # 10000-19999 range: replies to 1001-1009
+        "10001": "1001", "10002": "1002", "10003": "1003", "10004": "1004", "10005": "1005",
+        "10006": "1006", "10007": "1007", "10008": "1008", "10009": "1009",
+        # 20000-29999 range: replies to 2001-2009
+        "20001": "2001", "20002": "2002", "20003": "2003", "20004": "2004", "20005": "2005",
+        # Add more as needed for specific test cases
+    }
+    
     def __init__(self):
         self.posts_database = self._generate_fake_posts()
         self.call_count = 0
@@ -59,29 +72,8 @@ class FakeXClient(XClientPort):
                 return post
         
         # If not found, generate a synthetic reply post for testing
-        # This allows tests to verify replies without pre-populating the database
-        # Map reply IDs to their conversation IDs intelligently:
-        # - 99999: special e2e test case
-        # - 9999: maps to 1001 (original e2e pattern)
-        # - 10001-19999: replies to 1001
-        # - 20001-29999: replies to 1002
-        # - 30001-39999: replies to 1003
-        # - etc.
-        if post_id == "99999":
-            conversation_id = "e2e_9999"
-        elif post_id == "9999":
-            conversation_id = "1001"  # Maintain backward compatibility
-        else:
-            post_id_int = int(post_id)
-            if post_id_int >= 10000:
-                # Derive parent from ten-thousands digit
-                # 10005 -> 1000, 20003 -> 2000, etc.
-                parent_base = (post_id_int // 10000) * 1000
-                # Add the last digit to get actual parent ID
-                # 10005 -> 1005, 20003 -> 2003
-                conversation_id = str(parent_base + (post_id_int % 10))
-            else:
-                conversation_id = post_id
+        # Use explicit mapping from REPLY_TO_PARENT_MAP instead of formula
+        conversation_id = self.REPLY_TO_PARENT_MAP.get(post_id, post_id)
         
         return Post(
             id=post_id,

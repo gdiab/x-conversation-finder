@@ -474,3 +474,98 @@ async def test_capability_sentence_with_pronoun_subject_blocked():
     
     assert not result.passed
     assert "product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_third_party_claim_blocked():
+    """SF-5: Third-party claims like 'They offer a free tier' are blocked without evidence."""
+    draft_text = "They offer a free tier for developers."
+    
+    materials = [
+        FounderMaterial(
+            source="product_brief",
+            passage="We build great tools.",
+            relevance="medium",
+            passage_id="passage_0",
+        )
+    ]
+    
+    # No claims covering the third-party statement
+    claims = []
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_third_party_free_tier",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_integration_claim_blocked():
+    """SF-5: Integration claims like 'This works with Kafka' are blocked without evidence."""
+    draft_text = "This works with Kafka and other streaming platforms."
+    
+    materials = [
+        FounderMaterial(
+            source="product_brief",
+            passage="We integrate with many systems.",
+            relevance="medium",
+            passage_id="passage_0",
+        )
+    ]
+    
+    # No specific claim about Kafka
+    claims = []
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_works_with_kafka",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert not result.passed
+    assert "product capability" in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+async def test_third_party_claim_allowed_with_evidence():
+    """SF-5: Third-party claims are allowed when backed by founder material."""
+    draft_text = "They offer a free tier for startups."
+    
+    materials = [
+        FounderMaterial(
+            source="product_website",
+            passage="We offer a free tier for startups with up to 10 users.",
+            relevance="high",
+            passage_id="passage_0",
+        )
+    ]
+    
+    claims = [
+        Claim(
+            text="They offer a free tier for startups",
+            cited_passage_ids=["passage_0"],
+            quoted_spans=["free tier for startups"],
+        )
+    ]
+    
+    input_data = ClaimGateInput(
+        draft_text=draft_text,
+        claims=claims,
+        founder_materials=materials,
+        idempotency_key="test_third_party_with_evidence",
+    )
+    
+    result = await claim_gate(input_data)
+    
+    assert result.passed
+    assert "1 product capability" in result.reasoning.lower()
