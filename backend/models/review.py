@@ -58,6 +58,7 @@ class ReviewCard:
                 "reply_count": self.post.reply_count,
             },
             "evidence": {
+                "post_id": self.evidence.post_id,
                 "matched_topic": self.evidence.matched_topic,
                 "why_it_fits": self.evidence.why_it_fits,
                 "confidence_score": self.evidence.confidence_score,
@@ -74,16 +75,36 @@ class ReviewCard:
                     "text": self.evidence.draft.text,
                     "claim_gate": {
                         "passed": self.evidence.draft.claim_gate.passed,
-                        "claims_checked": self.evidence.draft.claim_gate.claims_checked,
-                        "unsupported_claims": self.evidence.draft.claim_gate.unsupported_claims,
-                        "supported_claims": self.evidence.draft.claim_gate.supported_claims,
+                        "claims": [
+                            {
+                                "text": c.text,
+                                "cited_passage_ids": c.cited_passage_ids,
+                                "quoted_spans": c.quoted_spans,
+                            }
+                            for c in self.evidence.draft.claim_gate.claims
+                        ],
+                        "failed_claims": [
+                            {
+                                "claim": {
+                                    "text": c.text,
+                                    "cited_passage_ids": c.cited_passage_ids,
+                                    "quoted_spans": c.quoted_spans,
+                                },
+                                "reason": reason,
+                            }
+                            for c, reason in self.evidence.draft.claim_gate.failed_claims
+                        ],
                         "reasoning": self.evidence.draft.claim_gate.reasoning,
                     },
                     "steers_applied": self.evidence.draft.steers_applied,
+                    "token_count": self.evidence.draft.token_count,
+                    "model_used": self.evidence.draft.model_used,
+                    "input_tokens": self.evidence.draft.input_tokens,
+                    "output_tokens": self.evidence.draft.output_tokens,
                 } if self.evidence.draft else None,
                 "skip_reason": self.evidence.skip_reason,
             },
-            "status": self.status.value,
+            "status": self.status,  # R4-NN5: status is already a str (ReviewStatusStr), not enum
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "approved_by": self.approved_by,

@@ -110,6 +110,9 @@ class ReviewWorkflow:
         self.reply_post_id: Optional[str] = None
         self.skip_reason: Optional[str] = None
         self.client_request_id: Optional[str] = None
+        # R4-NN5: Store workflow metadata for get_card query
+        self.workflow_id: Optional[str] = None
+        self.created_at: Optional[str] = None
         # B9: Separate dedupe sets per handler
         self._approve_requests: set[str] = set()
         self._skip_requests: set[str] = set()
@@ -220,8 +223,9 @@ class ReviewWorkflow:
                 workflow.logger.error("No draft generated")
                 break
         
-        # Skip if claim gate failed after retries
+        # Skip if claim gate failed after retries (R4-NN5: set skipped flag)
         self.status = ReviewStatus.SKIPPED
+        self.skipped = True
         self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
         self.evidence = evidence
         workflow.logger.info(f"Skipped: claim gate failed after {claim_gate_attempts} attempts")
@@ -277,8 +281,12 @@ class ReviewWorkflow:
         # Determinism: Store input for access in handlers
         self.input = input
         
-        workflow_id = workflow.info().workflow_id
-        created_at = workflow.now().isoformat()
+        # R4-NN5: Store for get_card query
+        self.workflow_id = workflow.info().workflow_id
+        self.created_at = workflow.now().isoformat()
+        
+        workflow_id = self.workflow_id
+        created_at = self.created_at
         
         # Step 1: Research
         evidence = await self._research_post(workflow_id, created_at)
@@ -618,67 +626,23 @@ class ReviewWorkflow:
     @workflow.query
     def get_card(self) -> dict:
         """
-        Query to get the current card state.
+        R4-NN5: Query to get the current card state using _build_card helper.
         
         Returns a dict matching ReviewCard schema (see models/review.py).
         """
-        result = {
-            "status": self.status.value,
-            "approved": self.approved,
-            "confirmed": self.confirmed,
-            "posted_url": self.posted_url,
-            "reply_post_id": self.reply_post_id,
-            "skip_reason": self.skip_reason,
-        }
+        # Early returns for workflows that haven't stored metadata yet
+        if not self.workflow_id or not self.created_at:
+            return {
+                "status": self.status.value,
+                "evidence": None,
+            }
         
-        if not self.evidence:
-            result["evidence"] = None
-            return result
+        if not self.input:
+            return {
+                "status": self.status.value,
+                "evidence": None,
+            }
         
-        result["evidence"] = {
-            "post_id": self.evidence.post_id,
-            "matched_topic": self.evidence.matched_topic,
-            "why_it_fits": self.evidence.why_it_fits,
-            "confidence_score": self.evidence.confidence_score,
-            "confidence_inputs": self.evidence.confidence_inputs,
-            "founder_materials": [
-                {
-                    "source": m.source,
-                    "passage": m.passage,
-                    "relevance": m.relevance,
-                }
-                for m in self.evidence.founder_materials
-            ],
-            "draft": {
-                "text": self.evidence.draft.text,
-                "claim_gate": {
-                    "passed": self.evidence.draft.claim_gate.passed,
-                    "claims": [
-                        {
-                            "text": c.text,
-                            "cited_passage_ids": c.cited_passage_ids,
-                            "quoted_spans": c.quoted_spans,
-                        }
-                        for c in self.evidence.draft.claim_gate.claims
-                    ],
-                    "failed_claims": [
-                        {
-                            "claim": {
-                                "text": c.text,
-                                "cited_passage_ids": c.cited_passage_ids,
-                                "quoted_spans": c.quoted_spans,
-                            },
-                            "reason": reason,
-                        }
-                        for c, reason in self.evidence.draft.claim_gate.failed_claims
-                    ],
-                    "reasoning": self.evidence.draft.claim_gate.reasoning,
-                },
-                "steers_applied": self.evidence.draft.steers_applied,
-                "token_count": self.evidence.draft.token_count,
-                "model_used": self.evidence.draft.model_used,
-            } if self.evidence.draft else None,
-            "skip_reason": self.evidence.skip_reason,
-        }
-        
-        return result
+        # Use _build_card helper to ensure consistency with ReviewCard structure
+        card = self._build_card(self.workflow_id, self.input.post, self.created_at)
+        return card.to_dict()
