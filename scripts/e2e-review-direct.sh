@@ -18,7 +18,7 @@ export X_CLIENT_ADAPTER=fake
 export REPLY_AGENT_ADAPTER=fake
 export DATABASE_URL="sqlite:////tmp/x-finder-e2e.db"
 export TEMPORAL_ADDRESS=localhost:7233
-export FOLLOWUP_DELAY_DAYS=0  # Immediate followup
+export FOLLOWUP_DELAY_SECONDS=8  # Real durable timer (8 seconds)
 export REVIEW_TIMEOUT_HOURS=1
 export ACTIVITY_TIMEOUT_SHORT_SEC=10
 export ACTIVITY_TIMEOUT_MEDIUM_SEC=30
@@ -31,7 +31,7 @@ export DAILY_INFERENCE_LIMIT_USD=50.0
 export X_POST_READ_COST=0.005
 export BUDGET_KILL_SWITCH=false
 
-echo "Configuration: ADAPTERS=fake, followup delay=0 days (immediate)"
+echo "Configuration: ADAPTERS=fake, followup delay=${FOLLOWUP_DELAY_SECONDS}s (real durable timer)"
 echo ""
 
 # Initialize database
@@ -254,9 +254,10 @@ echo "$CONFIRM_BODY" | python3 -m json.tool 2>/dev/null || echo "$CONFIRM_BODY"
 echo "✓ Reply confirmed, follow-up timer starting"
 echo ""
 
-# Wait for follow-up timer (immediate with FOLLOWUP_DELAY_DAYS=0)
-echo "[6] Waiting 8 seconds for follow-up timer to fire..."
-sleep 8
+# Wait for follow-up timer
+WAIT_TIME=$((FOLLOWUP_DELAY_SECONDS + 4))
+echo "[6] Waiting ${WAIT_TIME}s for follow-up timer (${FOLLOWUP_DELAY_SECONDS}s) to fire..."
+sleep $WAIT_TIME
 echo ""
 
 # Check final status
@@ -287,7 +288,7 @@ echo "✓ Review workflow started"
 echo "✓ Card created with draft"
 echo "✓ Review approved"
 echo "✓ Posted reply confirmed"
-echo "✓ Follow-up timer fired (immediate with delay=0)"
+echo "✓ Follow-up timer fired (${FOLLOWUP_DELAY_SECONDS}s - real durable timer)"
 echo "✓ check_followup activity executed"
 echo ""
 echo "All operations used fake adapters (no real X API calls)"
