@@ -13,7 +13,9 @@ from temporalio.worker import Worker
 from backend.workflows.topic_watch import TopicWatchWorkflow, TopicWatchInput
 from backend.workflows.review import ReviewWorkflow
 from backend.activities import XActivities, ReplyActivities
+from backend.activities import x_activity_funcs, reply_activity_funcs
 from backend.activities.store_activities import store_card, update_card
+from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
 
 
@@ -29,11 +31,12 @@ async def test_topic_watch_workflow_single_iteration(product_brief):
             task_queue="test",
             workflows=[TopicWatchWorkflow, ReviewWorkflow],
             activities=[
-                x_activities.search_recent,
-                x_activities.lookup_post,
-                x_activities.check_followup,
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                x_activity_funcs.search_recent,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
             ],
@@ -76,11 +79,12 @@ async def test_topic_watch_workflow_spawns_reviews(product_brief):
             task_queue="test",
             workflows=[TopicWatchWorkflow, ReviewWorkflow],
             activities=[
-                x_activities.search_recent,
-                x_activities.lookup_post,
-                x_activities.check_followup,
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                x_activity_funcs.search_recent,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
             ],
@@ -123,11 +127,12 @@ async def test_topic_watch_workflow_continue_as_new(product_brief):
             task_queue="test",
             workflows=[TopicWatchWorkflow, ReviewWorkflow],
             activities=[
-                x_activities.search_recent,
-                x_activities.lookup_post,
-                x_activities.check_followup,
-                reply_activities.research_post,
-                reply_activities.draft_reply,
+                x_activity_funcs.search_recent,
+                x_activity_funcs.lookup_post,
+                x_activity_funcs.check_followup,
+                reply_activity_funcs.research_post,
+                reply_activity_funcs.draft_reply,
+                claim_gate,
                 store_card,
                 update_card,
             ],

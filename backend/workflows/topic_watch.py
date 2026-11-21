@@ -144,7 +144,8 @@ class TopicWatchWorkflow:
                     except workflow.exceptions.ChildWorkflowError as e:
                         workflow.logger.error(f"Failed to start Review: {e}")
                     
-                    seen_post_ids.add(post.id)
+                    if post.id not in seen_post_ids:
+                        seen_post_ids.append(post.id)
                 
                 if search_result.newest_id:
                     since_id = search_result.newest_id
