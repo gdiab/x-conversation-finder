@@ -85,6 +85,45 @@ async def test_has_unresolved_referent():
 
 
 @pytest.mark.asyncio
+async def test_qa_r12_unresolved_referent_enhanced():
+    """
+    QA R12: Enhanced unresolved-referent detection.
+    
+    - Strip leading quotes/brackets/punctuation
+    - Skip discourse markers
+    - Add new referents: Both, The former, The latter, Which, Which means, Here
+    - Keep flagged: It's, That's, They're, Its
+    """
+    # Specified test cases
+    assert has_unresolved_referent('"It is ok."')  # Leading quote stripped, then "It" flagged
+    assert has_unresolved_referent('However, it ships.')  # Discourse marker skipped, "it" flagged
+    assert has_unresolved_referent('Both are supported.')  # New referent
+    assert has_unresolved_referent('The former is faster.')  # New referent
+    assert has_unresolved_referent('And it works.')  # Skip "And", then "it" flagged
+    assert has_unresolved_referent('Which means it scales.')  # "Which means" is a referent
+    
+    # Additional cases for discourse markers
+    assert has_unresolved_referent('Also, it provides redundancy.')
+    assert has_unresolved_referent('But it handles failover.')
+    assert has_unresolved_referent('So this works well.')
+    assert has_unresolved_referent('Moreover, that scales.')
+    
+    # Leading punctuation stripping
+    assert has_unresolved_referent('[It works]')
+    assert has_unresolved_referent('(This is great)')
+    
+    # Keep flagged: It's, That's, They're, Its
+    assert has_unresolved_referent("It's shipped.")
+    assert has_unresolved_referent("That's ok.")
+    assert has_unresolved_referent("They're supported.")
+    assert has_unresolved_referent("Its performance is great.")
+    
+    # Not referents (valid starts)
+    assert not has_unresolved_referent("Our product ships quickly.")
+    assert not has_unresolved_referent("The platform scales well.")
+
+
+@pytest.mark.asyncio
 async def test_claim_gate_rejects_unresolved_referent():
     """QA R11 B: Claim gate must reject sentences starting with unresolved referents."""
     materials = [

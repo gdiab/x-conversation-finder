@@ -131,6 +131,8 @@ def has_unresolved_referent(text: str) -> bool:
     """
     Check if a sentence starts with an unresolved referent.
     
+    QA R12: Enhanced to strip leading punctuation/quotes and skip discourse markers.
+    
     Per Architect decision 2026-11-21 (B):
     Quoted claim sentences must stand alone. A passage sentence that opens
     with an unresolved referent (It/This/That/These/They/Its/Such/"The above")
@@ -138,22 +140,49 @@ def has_unresolved_referent(text: str) -> bool:
     
     Returns True if the sentence starts with an unresolved referent.
     """
-    # Normalize for checking
-    normalized = text.strip().lower()
+    # Strip leading straight/curly quotes, brackets, and punctuation
+    normalized = text.strip()
+    normalized = re.sub(r'^["\'\[\(\{'"'"«»‹›]+', '', normalized)
+    normalized = normalized.strip().lower()
+    
+    # Skip leading conjunctions and discourse markers (with optional comma)
+    discourse_markers = [
+        r'^and\s+,?\s*',
+        r'^also\s+,?\s*',
+        r'^but\s+,?\s*',
+        r'^so\s+,?\s*',
+        r'^however\s+,?\s*',
+        r'^plus\s+,?\s*',
+        r'^then\s+,?\s*',
+        r'^additionally\s+,?\s*',
+        r'^moreover\s+,?\s*',
+    ]
+    for marker in discourse_markers:
+        normalized = re.sub(marker, '', normalized, count=1)
     
     # Unresolved referent patterns at the start of a sentence
+    # Note: "It's", "That's", "They're" and "Its" remain flagged
     unresolved_patterns = [
         r'^it\b',
+        r'^it\'s\b',
         r'^its\b',
         r'^this\b',
         r'^that\b',
+        r'^that\'s\b',
         r'^these\b',
         r'^those\b',
         r'^they\b',
+        r'^they\'re\b',
         r'^them\b',
         r'^their\b',
         r'^such\b',
         r'^the above\b',
+        r'^both\b',
+        r'^the former\b',
+        r'^the latter\b',
+        r'^which\b',
+        r'^which means\b',
+        r'^here\b',
     ]
     
     for pattern in unresolved_patterns:
