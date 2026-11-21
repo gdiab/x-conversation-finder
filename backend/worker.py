@@ -20,6 +20,7 @@ from backend.activities import (
     store_card,
     update_card,
     get_card,
+    claim_gate,
 )
 
 
@@ -52,6 +53,7 @@ async def main():
             store_card,
             update_card,
             get_card,
+            claim_gate,
         ],
     )
     

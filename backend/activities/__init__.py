@@ -23,6 +23,10 @@ from .store_activities import (
     UpdateCardInput,
     GetCardInput,
 )
+from .claim_gate_activity import (
+    claim_gate,
+    ClaimGateInput,
+)
 
 __all__ = [
     "search_recent",
@@ -42,4 +46,6 @@ __all__ = [
     "StoreCardInput",
     "UpdateCardInput",
     "GetCardInput",
+    "claim_gate",
+    "ClaimGateInput",
 ]
