@@ -118,12 +118,12 @@ class ReviewWorkflow:
         self._nudge_requests: set[str] = set()
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
-        """Helper to build a ReviewCard from current state."""
+        """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
         return ReviewCard(
             workflow_id=workflow_id,
             post=post,
             evidence=self.evidence,
-            status=self.status,
+            status=self.status.value,  # R4-B1: Convert enum to plain str at boundary
             created_at=created_at,
             updated_at=workflow.now().isoformat(),
             skip_reason=self.skip_reason if self.skipped else None,
