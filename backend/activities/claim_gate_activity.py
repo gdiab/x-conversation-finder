@@ -289,6 +289,7 @@ class SentenceGateResult:
     kept_segment: bool  # True if verbatim match to gated segment
     source_passage_id: Optional[str] = None
     sentence_index: Optional[int] = None
+    phrase_id: Optional[str] = None  # QA R13: Fixed phrase ID for non_claims
 
 
 @activity.defn(name="verify_edited_text")
@@ -388,16 +389,19 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
             activity.logger.info(f"Sentence '{sentence[:50]}...' matched passage sentence")
             continue
         
-        # Check if it's a closed-set non_claim
-        if is_closed_set_non_claim(sentence):
+        # QA R13: Check if it's a fixed phrase (exact match only, no frames)
+        from backend.gate.non_claim_set import find_phrase_by_text
+        phrase = find_phrase_by_text(sentence)
+        if phrase:
             results.append(SentenceGateResult(
                 sentence=sentence,
                 passed=True,
                 kind="non_claim",
                 reason="",
-                kept_segment=False
+                kept_segment=False,
+                phrase_id=phrase.id
             ))
-            activity.logger.info(f"Sentence '{sentence[:50]}...' is closed-set non_claim")
+            activity.logger.info(f"Sentence '{sentence[:50]}...' matched phrase {phrase.id}")
             continue
         
         # Failed - not a passage sentence, not a gated segment, not a non_claim
