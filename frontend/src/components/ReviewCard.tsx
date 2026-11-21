@@ -225,21 +225,45 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         {card.evidence.founder_materials.length > 0 && (
           <div style={{ marginBottom: '12px' }}>
             <strong>Supporting Material:</strong>
-            {card.evidence.founder_materials.map((material, idx) => (
-              <div key={idx} style={{
-                backgroundColor: '#f9f9f9',
-                padding: '8px',
-                borderRadius: '4px',
-                marginTop: '8px',
-                fontSize: '14px',
-              }}>
-                <div style={{ fontStyle: 'italic', color: '#666' }}>{material.source}</div>
-                <div>{material.passage}</div>
-                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                  {material.relevance}
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px', marginBottom: '8px' }}>
+              Sentences starting with unresolved referents (it/this/that/etc.) cannot be selected as claims.
+            </div>
+            {card.evidence.founder_materials.map((material, idx) => {
+              // Check if any failed sentences mention unresolved referents in this passage
+              const hasUnresolvedReferents = card.evidence.draft?.claim_gate.failed_sentences.some(
+                (failure) => failure.reason.toLowerCase().includes('unresolved referent')
+              );
+              
+              return (
+                <div key={idx} style={{
+                  backgroundColor: '#f9f9f9',
+                  padding: '8px',
+                  borderRadius: '4px',
+                  marginTop: '8px',
+                  fontSize: '14px',
+                  border: hasUnresolvedReferents ? '1px solid #ff9800' : 'none',
+                }}>
+                  <div style={{ fontStyle: 'italic', color: '#666' }}>{material.source}</div>
+                  <div>{material.passage}</div>
+                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                    {material.relevance}
+                  </div>
+                  {hasUnresolvedReferents && (
+                    <div style={{
+                      marginTop: '8px',
+                      padding: '6px',
+                      backgroundColor: '#fff3e0',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      color: '#e65100',
+                    }}>
+                      ⚠️ Note: Some sentences in this material start with unresolved referents and cannot be used as claims.
+                      See "Failed Sentences" below for details.
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -464,10 +488,43 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         </div>
       )}
 
-      {/* Edited Text Gate Results (ADR-0006 Amendment E) */}
+      {/* Edited Text Gate Results (ADR-0006 Amendment E + QA R11 B2/C) */}
       {card.edited_text_gate_results && card.edited_text_gate_results.length > 0 && (
         <div style={{ marginBottom: '20px', borderTop: '1px solid #eee', paddingTop: '20px' }}>
           <h4>Edited Text Gate Results</h4>
+          
+          {/* Gate State Badge */}
+          {card.edited_text_gate_state && (
+            <div style={{ marginBottom: '12px' }}>
+              <span style={{
+                display: 'inline-block',
+                padding: '6px 12px',
+                borderRadius: '4px',
+                fontSize: '14px',
+                fontWeight: 'bold',
+                backgroundColor: 
+                  card.edited_text_gate_state === 'passed' ? '#4caf50' :
+                  card.edited_text_gate_state === 'failed' ? '#f44336' : '#ff9800',
+                color: '#fff',
+              }}>
+                Gate State: {card.edited_text_gate_state.toUpperCase()}
+              </span>
+              {(card.edited_text_gate_state === 'failed' || card.edited_text_gate_state === 'not_checked') && (
+                <div style={{ 
+                  marginTop: '8px',
+                  padding: '8px 12px',
+                  backgroundColor: '#fff3e0',
+                  borderRadius: '4px',
+                  fontSize: '13px',
+                  color: '#e65100',
+                }}>
+                  ⚠️ Approval requires "Post anyway" acknowledgement
+                  {card.edited_text_gate_state === 'not_checked' && ' (gate check failed - retries exhausted)'}
+                </div>
+              )}
+            </div>
+          )}
+          
           <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
             Each sentence from the edited text is re-verified against the strict claim gate.
           </div>
@@ -641,7 +698,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
               Approve
             </button>
             
-            {/* Post Anyway confirmation (ADR-0006 Amendment E) */}
+            {/* Post Anyway confirmation (ADR-0006 Amendment E + QA R11 B2/C) */}
             {showPostAnywayConfirm && (
               <div style={{
                 marginTop: '12px',
@@ -651,10 +708,15 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 border: '1px solid #ff9800',
               }}>
                 <div style={{ fontWeight: 'bold', color: '#e65100', marginBottom: '8px' }}>
-                  ⚠️ Edited text has failing sentences
+                  ⚠️ Edited text requires acknowledgement
                 </div>
                 <div style={{ fontSize: '14px', marginBottom: '12px' }}>
-                  The edited text contains claims that failed the claim gate. 
+                  {card.edited_text_gate_state === 'failed' && 
+                    'The edited text contains claims that failed the claim gate. '
+                  }
+                  {card.edited_text_gate_state === 'not_checked' && 
+                    'The gate check failed (retries exhausted). '
+                  }
                   You can override this and post anyway by confirming below.
                 </div>
                 <button

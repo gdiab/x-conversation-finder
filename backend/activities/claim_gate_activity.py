@@ -35,40 +35,65 @@ def split_into_sentences(text: str) -> List[str]:
     """
     Split text into sentences.
     
-    Fixed to not break on:
-    - Decimals like 99.99%
-    - Common abbreviations: Inc., Ltd., e.g., i.e., Mr., Dr., vs., etc., Ph.D.
+    Simple deterministic rule:
+    - Never split after a known abbreviation when the next character is lowercase, digit, or end of text
+    - When abbreviation is followed by space + uppercase, split only for sentence-final-capable
+      abbreviations (Inc., Ltd., Corp., etc., Ph.D., U.S.), not titles (Mr., Dr.) or mid-sentence
+      markers (e.g., i.e., vs.)
+    - Don't split on decimals (99.99%)
     
-    Splits on sentence-ending punctuation (. ! ?) followed by space,
-    but not on decimals or common abbreviations.
     Returns non-empty sentences.
     """
-    # Replace common abbreviations with placeholders to protect them during splitting
-    # We replace the ENTIRE abbreviation including periods
-    replacements = {}
-    abbrevs = [
-        'Inc.', 'Ltd.', 'Co.', 'Corp.',
-        'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.',
-        'Ph.D.', 'e.g.', 'i.e.', 'vs.', 'etc.', 'approx.', 'ca.',
-    ]
+    # Sentence-final-capable abbreviations (can end a sentence)
+    final_abbrevs = ['Inc.', 'Ltd.', 'Co.', 'Corp.', 'etc.', 'Ph.D.', 'U.S.']
     
-    for i, abbrev in enumerate(abbrevs):
+    # Mid-sentence abbreviations (never end sentences)
+    mid_abbrevs = ['e.g.', 'i.e.', 'vs.', 'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.', 'approx.', 'ca.']
+    
+    all_abbrevs = final_abbrevs + mid_abbrevs
+    
+    # Replace abbreviations with placeholders, tracking which type
+    replacements = {}
+    for i, abbrev in enumerate(all_abbrevs):
         placeholder = f'__ABBR{i}__'
-        # Case-insensitive replacement with word boundaries
+        is_final = abbrev in final_abbrevs
         pattern = r'\b' + re.escape(abbrev)
         matches = list(re.finditer(pattern, text, re.IGNORECASE))
-        # Store the actual matched text for restoration (preserves case)
-        for match in reversed(matches):  # Reverse to maintain positions
+        for match in reversed(matches):
             actual_text = match.group(0)
-            text = text[:match.start()] + placeholder + text[match.end():]
+            # Check what follows
+            next_pos = match.end()
+            if next_pos < len(text):
+                next_char = text[next_pos] if next_pos < len(text) else ''
+                # If next is space + uppercase, mark for possible split
+                if next_char == ' ' and next_pos + 1 < len(text) and text[next_pos + 1].isupper():
+                    if is_final:
+                        # This abbreviation CAN end a sentence - use special marker
+                        text = text[:match.start()] + placeholder + '___SPLIT___' + text[match.end():]
+                    else:
+                        # Mid-sentence abbreviation - don't split
+                        text = text[:match.start()] + placeholder + text[match.end():]
+                else:
+                    # Next is lowercase/digit/end - never split
+                    text = text[:match.start()] + placeholder + text[match.end():]
+            else:
+                # End of text
+                text = text[:match.start()] + placeholder + text[match.end():]
+            
             if placeholder not in replacements:
                 replacements[placeholder] = actual_text
     
-    # Now split on sentence-ending punctuation
+    # Now split on:
+    # - ___SPLIT___ markers (abbreviations that can end sentences)
+    # - Regular punctuation + space (but not decimals)
+    # First handle split markers
+    text = text.replace('___SPLIT___', '.')
+    
+    # Split on sentence-ending punctuation followed by space
     # Don't split if period is between digits (decimals)
     sentences = re.split(r'(?<!\d)[.!?]+\s+', text)
     
-    # Restore abbreviations in each sentence
+    # Restore abbreviations
     result = []
     for sent in sentences:
         if sent.strip():

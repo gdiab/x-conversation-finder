@@ -397,15 +397,17 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
             await asyncio.sleep(0.1)  # Small delay to ensure activity is truly blocked
             
             # NOW try to approve while edit gate is in flight
-            # S-3: This should raise an exception because _edit_in_flight is True
-            # The validator checks `if self._edit_in_flight: raise ValueError("Cannot approve while edit gate is in progress...")`
+            # S-3: This should raise WorkflowUpdateFailedError because _edit_in_flight_count > 0
+            # The validator checks and raises ValueError with specific message
+            from temporalio.exceptions import WorkflowUpdateFailedError
             client_request_id2 = str(uuid.uuid4())
-            with pytest.raises(Exception):
+            with pytest.raises(WorkflowUpdateFailedError) as exc_info:
                 await handle.execute_update(
                     "approve",
                     args=["https://x.com/test/status/999", client_request_id2, False]
                 )
-            # Exception was raised, proving concurrent approve is rejected
+            # Verify the error message
+            assert "edit gate is in progress" in str(exc_info.value).lower()
             
             # Release the block so edit can complete
             gate_block_event.set()

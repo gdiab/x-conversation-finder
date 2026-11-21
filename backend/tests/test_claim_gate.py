@@ -209,11 +209,27 @@ async def test_contains_number():
 
 @pytest.mark.asyncio
 async def test_matches_backstop_pattern_numbers():
-    """Backstop patterns (numbers) override non_claim tags."""
+    """
+    Updated for Architect's (A): Backstop catches compact number patterns.
+    
+    Number words ("twenty") and simple digits ("5") are caught by _contains_number,
+    not backstop. Backstop catches compact patterns like "10k", "99.9%".
+    
+    Reason: Under NEW architecture, _contains_number is the primary number check.
+    Backstop is for pattern-based overrides.
+    """
+    # Backstop catches compact number patterns
     assert _matches_backstop_pattern("10k requests")
     assert _matches_backstop_pattern("99.9% uptime")
-    assert _matches_backstop_pattern("The product has twenty integrations.")
-    assert _matches_backstop_pattern("5 GB storage")
+    
+    # Number words and simple digits are caught by _contains_number, not backstop
+    # (These would fail backstop, but pass _contains_number)
+    assert not _matches_backstop_pattern("The product has twenty integrations.")
+    assert not _matches_backstop_pattern("5 GB storage")
+    
+    # Verify those ARE caught by _contains_number
+    assert _contains_number("The product has twenty integrations.")
+    assert _contains_number("5 GB storage")
 
 
 @pytest.mark.asyncio
@@ -435,15 +451,25 @@ async def test_regression_order_swap_rejected():
 
 @pytest.mark.asyncio
 async def test_b5b_its_handling():
-    """B5b: 'it's' without claim indicators stays non_claim, with claim indicators is a claim."""
-    # "it's" with opinion frame, no claim indicators → non_claim
-    assert is_closed_set_non_claim("I think it's a great question.")
-    assert is_closed_set_non_claim("In my opinion it's really interesting.")
+    """
+    Updated for Architect's (A): Under the NEW closed-set rules, "it" is not in the allowlist
+    because it's often a product reference. Opinion frames with "it's" are rejected.
     
-    # "it's" with claim indicators (comparative, number) → NOT non_claim (claim)
+    Reason: The NEW rules are deliberately conservative. "it" tokenizes separately from "'s",
+    and "it" is not allowlisted to avoid product-reference laundering through opinion frames.
+    """
+    # "it's" is not allowlisted (even in opinion frames) - "it" not in ALLOWLIST_WORDS
+    assert not is_closed_set_non_claim("I think it's a great question.")
+    assert not is_closed_set_non_claim("In my opinion it's really interesting.")
+    
+    # "it's" with claim indicators → definitely NOT non_claim
     assert not is_closed_set_non_claim("I think it's way cheaper.")
     assert not is_closed_set_non_claim("It's 10x faster.")
     assert not is_closed_set_non_claim("It's better than the alternatives.")
+    
+    # But "this" IS allowlisted, so opinion frames with "this" pass
+    assert is_closed_set_non_claim("I think this is a great question.")
+    assert is_closed_set_non_claim("I think this is really interesting.")
 
 
 @pytest.mark.asyncio
@@ -612,3 +638,30 @@ async def test_regression_paraphrase_rejected():
     ))
     
     assert not result.passed  # Backstop catches "SSO", requires citation
+
+
+@pytest.mark.asyncio
+async def test_nfkc_handles_fullwidth_and_mathematical():
+    """
+    QA R11: Confirm NFKC handles fullwidth and mathematical alphanumerics.
+    
+    NFKC normalization (in normalize_for_closed_set) handles:
+    - Fullwidth characters (e.g., ＳＯＣ２ → SOC2)
+    - Mathematical alphanumerics (e.g., 𝐒𝐎𝐂𝟐 → SOC2)
+    """
+    from gate.non_claim_set import normalize_for_closed_set
+    
+    # Fullwidth SOC2
+    fullwidth = "ＳＯＣ２"
+    normalized = normalize_for_closed_set(fullwidth)
+    assert "soc2" in normalized.lower()
+    
+    # Mathematical bold SOC2
+    math_bold = "𝐒𝐎𝐂𝟐"
+    normalized_math = normalize_for_closed_set(math_bold)
+    assert "soc2" in normalized_math.lower()
+    
+    # Verify these get caught by backstop
+    from gate.non_claim_set import _matches_backstop_pattern
+    assert _matches_backstop_pattern(fullwidth)
+    assert _matches_backstop_pattern(math_bold)

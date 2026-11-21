@@ -95,7 +95,7 @@ export interface ReviewCard {
     author: string;
     url: string;
   }> | null;
-  // Edit re-gate fields (ADR-0006 Amendment E)
+  // Edit re-gate fields (ADR-0006 Amendment E + QA R11 B2/C)
   edited_text_gate_results: Array<{
     sentence: string;
     passed: boolean;
@@ -103,6 +103,7 @@ export interface ReviewCard {
     reason: string;
     kept_segment: boolean;
   }> | null;
+  edited_text_gate_state: "passed" | "failed" | "not_checked" | null;
   post_anyway: boolean | null;
   post_anyway_failing_sentences: string[] | null;
 }
