@@ -493,11 +493,14 @@ class ReviewWorkflow:
         Validator for approve Update.
         
         Per ADR-0006 Amendment E: Rejects approve without post_anyway=True when edited text fails gate.
+        S-3: The edit Update completes (and sets self.edited_text_gate_results) before returning,
+        so by the time approve is called, the latest edit's gate result is already recorded in workflow memory.
         """
         if self.status not in ["pending", "approved"]:
             raise ValueError(f"Cannot approve in status {self.status}")
         
         # Check if edited text exists and has failing sentences
+        # S-3: This check happens after edit completes, so we see the latest gate results
         if self.edited_text_gate_results:
             has_failures = any(not r.passed for r in self.edited_text_gate_results)
             if has_failures and not post_anyway:
@@ -601,13 +604,14 @@ class ReviewWorkflow:
     
     @confirm_posted.validator
     def validate_confirm_posted(self, reply_url: str, client_request_id: str) -> None:
-        """Validator for confirm_posted Update - checks state and URL format."""
+        """Validator for confirm_posted Update - checks state and URL format. S-4: Fix .value reference."""
         # Check state
         if not self.approved:
             raise ValueError("Cannot confirm: draft not approved yet")
         
+        # S-4: status is already a string, not an enum
         if self.status != "approved":
-            raise ValueError(f"Cannot confirm in status {self.status.value}")
+            raise ValueError(f"Cannot confirm in status {self.status}")
         
         # Validate URL format
         match = re.search(r'/status/(\d+)', reply_url)
@@ -677,9 +681,14 @@ class ReviewWorkflow:
     
     @edit.validator
     def validate_edit(self, new_text: str, client_request_id: str) -> None:
-        """Validator for edit Update - checks state and input."""
-        if self.status not in ["pending", "approved"]:
-            raise ValueError(f"Cannot edit in status {self.status.value}")
+        """Validator for edit Update - checks state and input. S-1: Reject edits once approved. S-4: Fix AttributeError."""
+        # S-4: Use string comparison, not .value (status is already a string)
+        if self.status == "approved":
+            # S-1: Reject edits once approved
+            raise ValueError("Cannot edit after approval")
+        
+        if self.status not in ["pending"]:
+            raise ValueError(f"Cannot edit in status {self.status}")
         
         if not self.evidence or not self.evidence.draft:
             raise ValueError("No draft to edit")
@@ -726,9 +735,10 @@ class ReviewWorkflow:
     
     @nudge.validator
     def validate_nudge(self, instruction: str, client_request_id: str) -> None:
-        """Validator for nudge Update - checks state and input (B9)."""
+        """Validator for nudge Update - checks state and input. S-4: Fix .value reference."""
+        # S-4: status is already a string, not an enum
         if self.status not in ["pending", "approved"]:
-            raise ValueError(f"Cannot nudge in status {self.status.value}")
+            raise ValueError(f"Cannot nudge in status {self.status}")
         
         if not self.evidence or not self.evidence.draft:
             raise ValueError("No draft to nudge")
@@ -742,17 +752,19 @@ class ReviewWorkflow:
         R4-NN5: Query to get the current card state using _build_card helper.
         
         Returns a dict matching ReviewCard schema (see models/review.py).
+        S-4: Fix .value references - status is already a string.
         """
         # Early returns for workflows that haven't stored metadata yet
+        # S-4: status is already a string, not an enum
         if not self.workflow_id or not self.created_at:
             return {
-                "status": self.status.value,
+                "status": self.status,
                 "evidence": None,
             }
         
         if not self.input:
             return {
-                "status": self.status.value,
+                "status": self.status,
                 "evidence": None,
             }
         

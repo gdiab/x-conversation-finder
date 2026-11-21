@@ -54,7 +54,8 @@ class FakeReplyAgent(ReplyAgentPort):
             founder_materials=[
                 FounderMaterial(
                     source="product_brief.md",
-                    passage="Our product helps developers build reliable systems with automatic failover and strong consistency guarantees.",
+                    # Per Architect: short, standalone, claim-ready sentences
+                    passage="Our product helps developers build reliable systems. It provides automatic failover. It guarantees strong consistency.",
                     relevance="Directly relevant to the post's discussion of reliability",
                     passage_id="passage_0",
                 )
@@ -82,62 +83,75 @@ class FakeReplyAgent(ReplyAgentPort):
         if steer:
             steers = steers + [steer]
         
+        # Per Architect: Claims have {kind:'claim', source_passage_id, sentence_index} with NO text
+        # Non-claims have {kind:'non_claim', text}
         # Build segments based on steer
         if "shorter" in (steer or "").lower():
             segments = [
                 Segment(
-                    text=f"Great point about {evidence.matched_topic}.",
-                    kind="non_claim"
+                    kind="non_claim",
+                    text=f"Great point about {evidence.matched_topic}."
                 ),
                 Segment(
-                    text="Our product helps developers build reliable systems.",
                     kind="claim",
                     source_passage_id="passage_0",
-                    quote="product helps developers build reliable systems"
+                    sentence_index=0  # "Our product helps developers build reliable systems."
                 ),
                 Segment(
-                    text="Happy to share more.",
-                    kind="non_claim"
+                    kind="non_claim",
+                    text="Happy to share more."
                 ),
             ]
         elif "technical" in (steer or "").lower():
             segments = [
                 Segment(
-                    text=f"Re: {evidence.matched_topic} - ",
-                    kind="non_claim"
+                    kind="non_claim",
+                    text=f"Re: {evidence.matched_topic} - "
                 ),
                 Segment(
-                    text="our system provides strong consistency guarantees.",
                     kind="claim",
                     source_passage_id="passage_0",
-                    quote="strong consistency guarantees"
+                    sentence_index=2  # "It guarantees strong consistency."
                 ),
                 Segment(
-                    text="Details in our docs.",
-                    kind="non_claim"
+                    kind="non_claim",
+                    text="Details in our docs."
                 ),
             ]
         else:
             # Default segments
             segments = [
                 Segment(
-                    text=f"Thanks for raising this point about {evidence.matched_topic}.",
-                    kind="non_claim"
+                    kind="non_claim",
+                    text=f"Thanks for raising this point about {evidence.matched_topic}."
                 ),
                 Segment(
-                    text="Our product helps developers build reliable systems.",
                     kind="claim",
                     source_passage_id="passage_0",
-                    quote="product helps developers build reliable systems"
+                    sentence_index=0  # "Our product helps developers build reliable systems."
                 ),
                 Segment(
-                    text="Would be happy to share more details if useful.",
-                    kind="non_claim"
+                    kind="non_claim",
+                    text="Would be happy to share more details if useful."
                 ),
             ]
         
-        # Construct draft text from segments
-        draft_text = ' '.join(seg.text for seg in segments)
+        # Construct draft text from segments by inserting claim sentences
+        # (claim_gate will do this validation, but we need text for the draft)
+        from backend.activities.claim_gate_activity import split_into_sentences
+        
+        text_parts = []
+        for seg in segments:
+            if seg.kind == "claim":
+                # Insert the sentence from the passage
+                passage = evidence.founder_materials[0].passage  # Simple: use first material
+                sentences = split_into_sentences(passage)
+                if seg.sentence_index is not None and 0 <= seg.sentence_index < len(sentences):
+                    text_parts.append(sentences[seg.sentence_index].rstrip('.!?'))
+            else:
+                text_parts.append(seg.text)
+        
+        draft_text = ' '.join(text_parts)
         
         claim_gate = ClaimGateResult(
             passed=True,

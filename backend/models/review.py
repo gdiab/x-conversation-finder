@@ -19,6 +19,8 @@ class SentenceGateResult:
     kind: str  # "claim" or "non_claim"
     reason: str  # Failure reason or empty if passed
     kept_segment: bool  # True if verbatim match to gated segment
+    source_passage_id: Optional[str] = None
+    sentence_index: Optional[int] = None
 
 
 @dataclass
@@ -77,10 +79,10 @@ class ReviewCard:
                     "text": self.evidence.draft.text,
                     "segments": [
                         {
-                            "text": s.text,
                             "kind": s.kind,
+                            "text": s.text,
                             "source_passage_id": s.source_passage_id,
-                            "quote": s.quote,
+                            "sentence_index": s.sentence_index,
                         }
                         for s in self.evidence.draft.segments
                     ],
@@ -88,10 +90,10 @@ class ReviewCard:
                         "passed": self.evidence.draft.claim_gate.passed,
                         "segments": [
                             {
-                                "text": s.text,
                                 "kind": s.kind,
+                                "text": s.text,
                                 "source_passage_id": s.source_passage_id,
-                                "quote": s.quote,
+                                "sentence_index": s.sentence_index,
                             }
                             for s in self.evidence.draft.claim_gate.segments
                         ],
@@ -147,6 +149,8 @@ class ReviewCard:
                     "kind": r.kind,
                     "reason": r.reason,
                     "kept_segment": r.kept_segment,
+                    "source_passage_id": r.source_passage_id,
+                    "sentence_index": r.sentence_index,
                 }
                 for r in self.edited_text_gate_results
             ] if self.edited_text_gate_results else None,

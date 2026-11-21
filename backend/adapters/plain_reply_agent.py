@@ -123,32 +123,35 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
         
         steer_text = f"\n\nAdditional instruction: {steer}" if steer else ""
         
-        prompt = f"""Draft a reply to this post as structured segments. Every product claim must be supported by the founder materials below.
+        prompt = f"""Draft a reply to this post as structured segments.
+
+CRITICAL RULES:
+- Claims are QUOTED, not paraphrased. You reference a passage sentence by its index (0-based).
+- For claims: output ONLY {{"kind": "claim", "source_passage_id": "passage_X", "sentence_index": N}}
+- For non-claims: output {{"kind": "non_claim", "text": "your text here"}}
+- The code will insert the exact passage sentence for claims. You do NOT write claim text.
+- All non-claim text must be: questions, greetings/thanks, or first-person opinion without product claims.
 
 Why this post fits: {evidence.why_it_fits}
 
-Founder Materials:
+Founder Materials (sentence indices shown):
 {materials_text}
 {steer_text}
 
 Return JSON with:
-- segments: list of objects with:
-  - text: the segment text (a phrase or sentence)
-  - kind: "claim" or "non_claim" (use these exact string values)
-  - source_passage_id: the passage ID (required for claims, e.g., "passage_0")
-  - quote: exact quote from that passage supporting the claim (required for claims)
+- segments: list of objects:
+  - For claims: {{"kind": "claim", "source_passage_id": "passage_X", "sentence_index": N}}
+  - For non-claims: {{"kind": "non_claim", "text": "your text"}}
 
-Example segments:
+Example:
 [
-  {{"text": "Thanks for raising this!", "kind": "non_claim"}},
-  {{"text": "Our platform handles distributed systems.", "kind": "claim", "source_passage_id": "passage_0", "quote": "distributed systems support"}},
-  {{"text": "Happy to share more details.", "kind": "non_claim"}}
+  {{"kind": "non_claim", "text": "Thanks for raising this!"}},
+  {{"kind": "claim", "source_passage_id": "passage_0", "sentence_index": 0}},
+  {{"kind": "non_claim", "text": "Happy to share more details."}}
 ]
 
-Be conversational, honest, and never invent features. Every claim MUST have source_passage_id and quote.
-The segments will be joined with spaces to form the final draft (max 280 chars total).
-Use "claim" for any statement about product capabilities, features, or characteristics.
-Use "non_claim" for greetings, questions, or generic responses."""
+Be conversational and honest. Never invent features. Reference founder material by sentence index only.
+Max 280 chars total after sentence insertion."""
 
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -162,19 +165,45 @@ Use "non_claim" for greetings, questions, or generic responses."""
         result = json.loads(response.choices[0].message.content)
         
         from backend.models import Segment
+        from backend.activities.claim_gate_activity import split_into_sentences
         
-        segments = [
-            Segment(
-                text=s["text"],
-                kind=s["kind"],  # str literal "claim" or "non_claim"
-                source_passage_id=s.get("source_passage_id"),
-                quote=s.get("quote"),
-            )
-            for s in result.get("segments", [])
-        ]
+        # Per Architect: Claims have {kind, source_passage_id, sentence_index}, non-claims have {kind, text}
+        segments = []
+        for s in result.get("segments", []):
+            if s["kind"] == "claim":
+                segments.append(Segment(
+                    kind="claim",
+                    source_passage_id=s.get("source_passage_id"),
+                    sentence_index=s.get("sentence_index")
+                ))
+            else:
+                segments.append(Segment(
+                    kind="non_claim",
+                    text=s.get("text")
+                ))
         
-        # Construct draft text from segments
-        draft_text = ' '.join(seg.text for seg in segments)
+        # Construct draft text by inserting claim sentences
+        # (claim_gate will validate, but we need text for the draft)
+        text_parts = []
+        for seg in segments:
+            if seg.kind == "claim":
+                # Insert the sentence from the passage
+                if seg.source_passage_id and seg.sentence_index is not None:
+                    # Find the passage
+                    passage = None
+                    for m in evidence.founder_materials:
+                        if m.passage_id == seg.source_passage_id:
+                            passage = m.passage
+                            break
+                    if passage:
+                        sentences = split_into_sentences(passage)
+                        if 0 <= seg.sentence_index < len(sentences):
+                            text_parts.append(sentences[seg.sentence_index].rstrip('.!?'))
+            else:
+                if seg.text:
+                    text_parts.append(seg.text)
+        
+        draft_text = ' '.join(text_parts)
         
         claim_gate = ClaimGateResult(
             passed=True,

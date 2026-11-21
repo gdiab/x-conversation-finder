@@ -19,17 +19,25 @@ class Segment:
     """
     A segment of reply text with its classification.
     
-    Per ADR-0006 Amendment 2026-11-21:
-    - text: the segment text
-    - kind: 'claim' or 'non_claim' (str literal, not enum - Temporal activity boundary requirement)
-    - source_passage_id: ID of the founder material passage (for claims)
-    - quote: exact quote from the cited passage (for claims)
+    Per Architect decision 2026-11-21:
+    Claims are QUOTED, not paraphrased. The reply agent returns:
+    - For claims: {kind: 'claim', source_passage_id, sentence_index} with NO text
+    - For non_claims: {kind: 'non_claim', text}
+    
+    Code splits the founder passage into sentences and inserts the exact sentence
+    as the segment text (trailing punctuation trimmed for flow).
+    
+    Fields:
+    - kind: 'claim' or 'non_claim' (str literal, not enum)
+    - text: segment text (inserted by code for claims, provided for non_claims)
+    - source_passage_id: passage ID (for claims)
+    - sentence_index: 0-based index into passage sentences (for claims)
     """
     
-    text: str
     kind: Literal["claim", "non_claim"]
+    text: Optional[str] = None
     source_passage_id: Optional[str] = None
-    quote: Optional[str] = None
+    sentence_index: Optional[int] = None
 
 
 @dataclass

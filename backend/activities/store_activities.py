@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import asyncio
+from sqlalchemy.orm.attributes import flag_modified
 
 from backend.models import ReviewCard, Evidence
 from backend.database import get_db, ReviewCardDB
@@ -107,10 +108,10 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "text": card.evidence.draft.text,
                 "segments": [
                     {
-                        "text": s.text,
                         "kind": s.kind,
+                        "text": s.text,
                         "source_passage_id": s.source_passage_id,
-                        "quote": s.quote,
+                        "sentence_index": s.sentence_index,
                     }
                     for s in card.evidence.draft.segments
                 ],
@@ -118,10 +119,10 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                     "passed": card.evidence.draft.claim_gate.passed,
                     "segments": [
                         {
-                            "text": s.text,
                             "kind": s.kind,
+                            "text": s.text,
                             "source_passage_id": s.source_passage_id,
-                            "quote": s.quote,
+                            "sentence_index": s.sentence_index,
                         }
                         for s in card.evidence.draft.claim_gate.segments
                     ],
@@ -178,6 +179,8 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "kind": r.kind,
                 "reason": r.reason,
                 "kept_segment": r.kept_segment,
+                "source_passage_id": r.source_passage_id,
+                "sentence_index": r.sentence_index,
             }
             for r in card.edited_text_gate_results
         ] if card.edited_text_gate_results else None,
@@ -253,17 +256,17 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
             elif key == "post_anyway_failing_sentences":
                 card_db.post_anyway_failing_sentences = value if value else None
             elif key == "evidence":
-                # Update evidence_data JSON
-                evidence_data = card_db.evidence_data
+                # B2: Update evidence_data JSON with flag_modified to ensure SQLAlchemy persists it
+                evidence_data = card_db.evidence_data.copy()  # Make a new dict
                 if hasattr(value, 'draft') and value.draft:
                     evidence_data["draft"] = {
                         "text": value.draft.text,
                         "segments": [
                             {
-                                "text": s.text,
                                 "kind": s.kind,
+                                "text": s.text,
                                 "source_passage_id": s.source_passage_id,
-                                "quote": s.quote,
+                                "sentence_index": s.sentence_index,
                             }
                             for s in value.draft.segments
                         ],
@@ -271,10 +274,10 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                             "passed": value.draft.claim_gate.passed,
                             "segments": [
                                 {
-                                    "text": s.text,
                                     "kind": s.kind,
+                                    "text": s.text,
                                     "source_passage_id": s.source_passage_id,
-                                    "quote": s.quote,
+                                    "sentence_index": s.sentence_index,
                                 }
                                 for s in value.draft.claim_gate.segments
                             ],
@@ -314,6 +317,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                         "output_tokens": value.draft.output_tokens,
                     }
                 card_db.evidence_data = evidence_data
+                flag_modified(card_db, "evidence_data")
         
         db.commit()
         return True
@@ -438,7 +442,7 @@ async def delete_post_text(input: DeletePostTextInput) -> bool:
 
 
 def get_all_cards() -> List[Dict]:
-    """Get all cards (for API access)."""
+    """Get all cards (for API access). B2: Include edited_text_gate_results and post_anyway."""
     db = get_db()
     try:
         cards = db.query(ReviewCardDB).all()
@@ -456,6 +460,10 @@ def get_all_cards() -> List[Dict]:
                 "reply_post_id": card.reply_post_id,
                 "skip_reason": card.skip_reason,
                 "followup_replies": card.followup_replies if card.followup_replies else None,
+                # B2: Include edit re-gate fields
+                "edited_text_gate_results": card.edited_text_gate_results if card.edited_text_gate_results else None,
+                "post_anyway": card.post_anyway,
+                "post_anyway_failing_sentences": card.post_anyway_failing_sentences if card.post_anyway_failing_sentences else None,
             }
             for card in cards
         ]

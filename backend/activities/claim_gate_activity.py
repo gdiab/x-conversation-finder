@@ -1,17 +1,17 @@
 """
 Claim gate activity - deterministic claim verification.
 
-Per ADR-0006 Amendment 2026-11-21: Segments-based claim gate.
-- Model returns structured segments {text, kind, source_passage_id?, quote?}
-- Activity payloads use plain str Literals, not str-Enums
-- Code joins segments into draft, re-splits into sentences, verifies mapping
-- Coverage: near-verbatim support against quote, passage must exist
-- Closed-set non_claim: questions, greetings/thanks, explicit first-person opinion only
-- Opinion/question frames that mention product with comparatives/numbers/capabilities are claims
+Per Architect decision 2026-11-21:
+Claims are QUOTED, not paraphrased. A claim segment references a founder passage
+and a sentence index; code inserts that sentence verbatim (trailing punctuation aside).
+The model never authors claim wording. All other text must match the closed set of
+non-claim forms (questions, greetings or thanks, explicit first-person opinion or
+experience that does not mention the product with a comparative, number, capability
+or competitor), with the keyword backstop overriding any non_claim tag.
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from temporalio import activity
 import re
 import unicodedata
@@ -28,120 +28,24 @@ class ClaimGateInput:
     idempotency_key: str
 
 
-# Closed-set non_claim patterns: code decides, not the model
-# A segment is non_claim ONLY if it matches one of these closed forms
-NON_CLAIM_PATTERNS = [
-    # Questions (simple heuristic: ends with ?)
-    r'\?$',
-    # Greetings and thanks (including "happy to help", "glad to help", etc.)
-    r'\b(?:thanks|thank you|hi|hello|hey|greetings|appreciate|happy to|glad to|pleased to)\b',
-    # Explicit first-person opinion/experience frames
-    r'\b(?:I think|I believe|I feel|In my (?:opinion|experience|view)|I\'ve found|I found|I\'d say|personally)\b',
-]
-
-# Product mention patterns: if a sentence mentions the product along with these, it's a claim
-# even if it looks like an opinion/question
-PRODUCT_INDICATORS = [
-    r'\b(?:we|our|my|it|this|the tool|the product|the platform|the service|the app|the system)\b',
-]
-
-# Claim indicators that combine with product mention to override non_claim
-CLAIM_INDICATORS = [
-    # Comparatives and superlatives
-    r'\b(?:better|worse|faster|slower|more|less|best|worst|fastest|slowest|most|least|than|compared to)\b',
-    # Numbers and quantifications
-    r'\b\d+\.?\d*\s*(?:%|percent|pct|times|x|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|k|K|M|B)?\b',
-    # Capability verbs
-    r'\b(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates|cut|cuts|reduce|reduces|eliminate|eliminates|beat|beats|work|works|ship|ships|come|comes)\b',
-    # Competitor/alternative mentions
-    r'\b(?:Temporal|Kubernetes|AWS|Azure|GCP|Docker|Jenkins|CircleCI|GitHub Actions|Slack|Teams|Jira|Confluence)\b',
-]
-
-# Pattern backstop: these patterns override a non_claim tag (always claims, regardless of context)
-BACKSTOP_PATTERNS = [
-    # Any digit or unit (without opinion frame)
-    r'\b\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|k|K|M|B)\b',
-    # Compliance/security terms
-    r'\b(?:SOC2|SSO|RBAC|HIPAA|GDPR|encrypted|encryption|compliance|compliant|certified|certification|audit|auditing|audit logs|role-based access control)\b',
-    # Availability terms
-    r'\b(?:24/7|uptime|availability|downtime|SLA|99\.?\d*%)\b',
-    # Legacy risky patterns  
-    r'\b(?:always|never|guarantee[sd]?|best|fastest|most|only|all|every|unlimited|instant(?:ly)?|zero|exactly-once)\b',
-]
-
-
-def is_closed_set_non_claim(text: str) -> bool:
+def split_into_sentences(text: str) -> List[str]:
     """
-    Check if text is a closed-set non_claim (question, greeting/thanks, explicit opinion).
-    Returns True only if it matches one of the closed forms.
-    """
-    for pattern in NON_CLAIM_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
-            return True
-    return False
-
-
-def mentions_product_with_claim_indicator(text: str) -> bool:
-    """
-    Check if text mentions the product along with a claim indicator.
-    If yes, it's a claim even if it looks like an opinion/question.
-    """
-    # Check for product mention
-    has_product = any(re.search(p, text, re.IGNORECASE) for p in PRODUCT_INDICATORS)
-    if not has_product:
-        return False
+    Split text into sentences.
     
-    # Check for claim indicator
-    has_claim_indicator = any(re.search(p, text, re.IGNORECASE) for p in CLAIM_INDICATORS)
-    return has_claim_indicator
-
-
-def matches_backstop_pattern(text: str) -> bool:
+    S-5: Fixed to not break on decimals like 99.99%.
+    Splits on sentence-ending punctuation (. ! ?) followed by space or end,
+    but not on decimals (digit before and after the period).
+    Returns non-empty sentences.
     """
-    Check if text matches any backstop pattern.
-    These patterns always indicate a claim, overriding any non_claim tag.
-    """
-    for pattern in BACKSTOP_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
-            return True
-    return False
-
-
-def determine_effective_kind(segment_text: str, model_kind: str) -> str:
-    """
-    Determine the effective kind of a segment using code rules.
-    
-    Rules (in order):
-    1. If matches backstop pattern → claim (numbers, compliance, availability, risky words)
-    2. If mentions product with claim indicator → claim (overrides opinion/question frames)
-    3. If closed-set non_claim pattern (and not caught by rules 1-2) → non_claim
-    4. Otherwise → claim (must cite a passage)
-    
-    The model's tag is only a proposal; code decides.
-    Per requirement B: Opinion/question frames don't launder claims.
-    """
-    # Rule 1: Backstop patterns always make it a claim
-    if matches_backstop_pattern(segment_text):
-        return "claim"
-    
-    # Rule 2: Product mention with claim indicator → claim
-    # This MUST come before closed-set check to prevent opinion/question laundering
-    if mentions_product_with_claim_indicator(segment_text):
-        return "claim"
-    
-    # Rule 3: Closed-set non_claim patterns (only if not caught above)
-    if is_closed_set_non_claim(segment_text):
-        return "non_claim"
-    
-    # Rule 4: Default to claim (anything else must cite a passage)
-    return "claim"
+    # Use negative lookbehind and lookahead to avoid splitting decimals
+    # Don't split if period is between digits
+    sentences = re.split(r'(?<!\d)[.!?]+(?!\d)\s*', text)
+    return [s.strip() for s in sentences if s.strip()]
 
 
 def normalize_text(text: str) -> str:
     """
-    Normalize text for comparison: NFKC, casefold, collapse whitespace, normalize quotes.
-    
-    Per ADR-0006 Amendment 2026-11-21: NFKC normalization plus casefold.
+    Normalize text for comparison: NFKC, casefold, collapse whitespace.
     """
     # NFKC normalization (compatibility decomposition + canonical composition)
     text = unicodedata.normalize('NFKC', text)
@@ -156,218 +60,206 @@ def normalize_text(text: str) -> str:
     return ' '.join(text.split())
 
 
-def split_into_sentences(text: str) -> List[str]:
+def apply_confusables_skeleton(text: str) -> str:
     """
-    Split text into sentences.
+    B5a: Apply confusables skeleton fold to detect homoglyphs.
     
-    Simple split on . ! ? followed by space or end of string.
-    Returns non-empty sentences.
+    Replaces common Cyrillic/Greek lookalikes with ASCII equivalents.
+    This catches bypasses like "Ѕupports ЅЅO" (Cyrillic S).
     """
-    # Split on sentence boundaries
-    sentences = re.split(r'[.!?]+\s*', text)
-    return [s.strip() for s in sentences if s.strip()]
-
-
-def check_quote_in_passage(quote: str, passage: str) -> bool:
-    """Check if quote appears as a normalized substring in passage."""
-    norm_quote = normalize_text(quote)
-    norm_passage = normalize_text(passage)
-    return norm_quote in norm_passage
-
-
-def light_stem(word: str) -> str:
-    """
-    Light stemming: remove common English suffixes for matching.
-    Just handles basic plural/verb forms, not full Porter stemming.
-    """
-    # Remove trailing 's' for plurals (but not for words ending in 'ss')
-    if word.endswith('s') and len(word) > 3 and not word.endswith('ss'):
-        return word[:-1]
-    # Remove 'ing' suffix
-    if word.endswith('ing') and len(word) > 5:
-        return word[:-3]
-    # Remove 'ed' suffix
-    if word.endswith('ed') and len(word) > 4:
-        return word[:-2]
-    return word
-
-
-def extract_content_words(text: str) -> Set[str]:
-    """
-    Extract content words from text: words of 3+ chars, excluding common stopwords.
-    Returns normalized and lightly stemmed forms.
-    """
-    # Common stopwords to exclude
-    stopwords = {
-        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-        'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'be',
-        'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'can',
-        'could', 'will', 'would', 'should', 'may', 'might', 'must', 'shall',
-        'this', 'that', 'these', 'those', 'it', 'its', 'what', 'which', 'who',
-        'when', 'where', 'why', 'how', 'all', 'each', 'every', 'some', 'any',
-        'you', 'your', 'we', 'our'
+    # Common Cyrillic confusables (this is a basic set; expand as needed)
+    confusables = {
+        'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H',
+        'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'Х': 'X', 'Ѕ': 'S',
+        'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x',
     }
     
-    norm_text = normalize_text(text)
-    words = re.findall(r'\b[a-z]{3,}\b', norm_text)
+    result = []
+    for char in text:
+        result.append(confusables.get(char, char))
     
-    # Filter stopwords and apply light stemming
-    content_words = set()
-    for word in words:
-        if word not in stopwords:
-            stemmed = light_stem(word)
-            content_words.add(stemmed)
-    
-    return content_words
+    return ''.join(result)
 
 
-def extract_numbers(text: str) -> Set[str]:
-    """Extract all numbers from text, normalized."""
-    norm_text = normalize_text(text)
-    # Match numbers including decimals, percentages, and common units
-    numbers = re.findall(r'\d+\.?\d*', norm_text)
-    return set(numbers)
+# B5a: Closed-set non_claim patterns (WHOLE sentence)
+# A sentence is non_claim ONLY if, after stripping leading greeting/thanks,
+# the REMAINDER is:
+# - Empty
+# - A question with no product+comparative/number/capability/competitor
+# - An explicit first-person opinion that doesn't launder a claim
+
+GREETING_THANKS_PATTERNS = [
+    r'^(?:thanks|thank you|hi|hello|hey|greetings|appreciate|happy to|glad to|pleased to)[,!.\s]*',
+]
+
+OPINION_PATTERNS = [
+    r'^(?:I think|I believe|I feel|In my (?:opinion|experience|view)|I\'ve found|I found|I\'d say|personally)\b',
+]
+
+# B5a: Product words (expanded to include ours/us/our/we)
+PRODUCT_INDICATORS = [
+    r'\b(?:we|our|ours|us|my|it|this|the tool|the product|the platform|the service|the app|the system)\b',
+]
+
+# Claim indicators that combine with product mention to make it a claim
+CLAIM_INDICATORS = [
+    # Comparatives and superlatives
+    r'\b(?:better|worse|faster|slower|more|less|best|worst|fastest|slowest|most|least|than|compared to|cheaper|quicker)\b',
+    # Numbers and quantifications
+    r'\b\d+\.?\d*\s*(?:%|percent|pct|times|x|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)?\b',
+    # Capability verbs
+    r'\b(?:get|gets|give|gives|support|supports|provide|provides|handle|handles|include|includes|offer|offers|integrate|integrates|deliver|delivers|enable|enables|build|builds|create|creates|manage|manages|monitor|monitors|track|tracks|analyze|analyzes|solve|solves|fix|fixes|improve|improves|optimize|optimizes|ensure|ensures|automate|automates|cut|cuts|reduce|reduces|eliminate|eliminates|beat|beats|work|works|ship|ships|come|comes|switch|switched)\b',
+    # Competitor/alternative mentions
+    r'\b(?:Temporal|Kubernetes|Kafka|AWS|Azure|GCP|Docker|Jenkins|CircleCI|GitHub Actions|Slack|Teams|Jira|Confluence)\b',
+]
+
+# Pattern backstop: these patterns always classify a segment as a claim
+# (overriding any non_claim tag from the model)
+BACKSTOP_PATTERNS = [
+    # Any digit or unit
+    r'\b\d+\.?\d*\s*(?:%|percent|pct|ms|sec|seconds|min|minutes|hours|days|GB|MB|KB|TB|PB|requests|ops|transactions|users|integrations|k|K|M|B)\b',
+    # Compliance/security terms
+    r'\b(?:SOC2|SSO|RBAC|HIPAA|GDPR|encrypted|encryption|compliance|compliant|certified|certification|audit|auditing|audit logs|role-based access control)\b',
+    # Availability terms
+    r'\b(?:24/7|uptime|availability|downtime|SLA|99\.?\d*%)\b',
+    # Risky absolutes
+    r'\b(?:always|never|guarantee[sd]?|best|fastest|most|only|all|every|unlimited|instant(?:ly)?|zero|exactly-once)\b',
+]
 
 
-def extract_negations(text: str) -> Set[str]:
-    """Extract negation words from text."""
-    norm_text = normalize_text(text)
-    negations = {'not', 'no', 'never', 'none', 'nothing', 'nowhere', 'neither', "n't"}
-    found = set()
-    
-    # Check for negation words
-    words = set(re.findall(r'\b[a-z]+\b', norm_text))
-    for neg in negations:
-        if neg in words or any(w.endswith("n't") for w in words):
-            found.add(neg)
-    
-    return found
-
-
-def check_near_verbatim_support(segment_text: str, quote: str) -> tuple[bool, str]:
+def strip_leading_greeting_thanks(text: str) -> str:
     """
-    Near-verbatim support check against the QUOTE (not the passage).
-    
-    Per ADR-0006 Amendment 2026-11-21:
-    - Every content word in the segment must appear in the quote (after NFKC + casefold + light stemming)
-    - Every number in the segment must appear in the quote
-    - Every negation in the segment must appear in the quote (and vice versa)
-    
-    Returns (passed, failure_reason).
+    B5a: Strip leading greeting/thanks clause from text.
+    Returns the remainder.
     """
-    segment_content = extract_content_words(segment_text)
-    quote_content = extract_content_words(quote)
-    
-    segment_numbers = extract_numbers(segment_text)
-    quote_numbers = extract_numbers(quote)
-    
-    segment_negations = extract_negations(segment_text)
-    quote_negations = extract_negations(quote)
-    
-    # Check negations FIRST (must match in both directions) - this is critical
-    if segment_negations != quote_negations:
-        return False, f"Negation mismatch: segment has {segment_negations or 'none'}, quote has {quote_negations or 'none'}"
-    
-    # Check numbers
-    missing_numbers = segment_numbers - quote_numbers
-    if missing_numbers:
-        return False, f"Numbers in segment not found in quote: {', '.join(sorted(missing_numbers))}"
-    
-    # Check content words
-    missing_words = segment_content - quote_content
-    if missing_words:
-        return False, f"Content words in segment not found in quote: {', '.join(sorted(missing_words)[:5])}"
-    
-    return True, ""
+    for pattern in GREETING_THANKS_PATTERNS:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    return text.strip()
 
 
-def verify_segment_coverage(
+def is_pure_question(text: str) -> bool:
+    """
+    B5a: Check if text is a pure question (ends with ?) with no claim indicators.
+    A trailing '?' must not make a claim-bearing sentence a question non_claim.
+    """
+    if not text.endswith('?'):
+        return False
+    
+    # Check if it has product + claim indicator (makes it a claim, not a non_claim question)
+    has_product = any(re.search(p, text, re.IGNORECASE) for p in PRODUCT_INDICATORS)
+    if not has_product:
+        return True  # No product mention, pure question
+    
+    # Has product - check for claim indicators
+    has_claim_indicator = any(re.search(p, text, re.IGNORECASE) for p in CLAIM_INDICATORS)
+    return not has_claim_indicator  # Pure question only if no claim indicators
+
+
+def is_opinion_without_product_claim(text: str) -> bool:
+    """
+    B5a: Check if text is an explicit first-person opinion that doesn't launder a claim.
+    Opinion frames that mention product with comparatives/numbers/capabilities are claims.
+    """
+    # Check for opinion pattern
+    has_opinion = any(re.search(p, text, re.IGNORECASE) for p in OPINION_PATTERNS)
+    if not has_opinion:
+        return False
+    
+    # Check if it mentions product with claim indicator (makes it a claim)
+    has_product = any(re.search(p, text, re.IGNORECASE) for p in PRODUCT_INDICATORS)
+    if not has_product:
+        return True  # Opinion without product mention
+    
+    # Has product - check for claim indicators
+    has_claim_indicator = any(re.search(p, text, re.IGNORECASE) for p in CLAIM_INDICATORS)
+    return not has_claim_indicator  # Opinion non_claim only if no claim indicators
+
+
+def matches_backstop_pattern(text: str) -> bool:
+    """
+    Check if text matches any backstop pattern.
+    These patterns always indicate a claim, overriding any non_claim tag.
+    """
+    # B5a: Apply confusables skeleton before matching
+    text_skeleton = apply_confusables_skeleton(text)
+    
+    for pattern in BACKSTOP_PATTERNS:
+        if re.search(pattern, text_skeleton, re.IGNORECASE):
+            return True
+    return False
+
+
+def is_closed_set_non_claim(text: str) -> bool:
+    """
+    B5a: Check if text is a closed-set non_claim (WHOLE sentence).
+    
+    A sentence is non_claim ONLY if, after stripping a leading greeting/thanks clause,
+    the REMAINDER is:
+    - Empty
+    - A pure question (ends with ?, no product+claim_indicator)
+    - An explicit first-person opinion that doesn't mention product with claim indicators
+    
+    AND it doesn't match any backstop pattern (which overrides non_claim).
+    """
+    # First check backstop (overrides everything)
+    if matches_backstop_pattern(text):
+        return False
+    
+    # Strip leading greeting/thanks
+    remainder = strip_leading_greeting_thanks(text)
+    
+    # Empty remainder after stripping greeting
+    if not remainder:
+        return True
+    
+    # Pure question (no product+claim_indicator)
+    if is_pure_question(remainder):
+        return True
+    
+    # Opinion without product claim
+    if is_opinion_without_product_claim(remainder):
+        return True
+    
+    return False
+
+
+def insert_claim_sentence(
     segment: Segment,
     materials_by_id: Dict[str, FounderMaterial]
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """
-    Verify coverage for a claim segment.
+    Insert the claim sentence from the founder passage.
     
-    Per ADR-0006 Amendment 2026-11-21:
-    1. source_passage_id must exist in founder material
-    2. quote must be a normalized substring of that passage
-    3. near-verbatim support: every content word, number, and negation in the segment
-       must appear in the quote (after NFKC + casefold + light stemming)
-    
-    Returns (passed, failure_reason).
+    Returns (success, inserted_text, error_reason).
     """
-    if segment.kind != "claim":
-        # Non-claims don't need coverage
-        return True, ""
-    
-    # Check source_passage_id exists
     if not segment.source_passage_id:
-        return False, "No source_passage_id provided"
+        return False, "", "No source_passage_id provided"
     
     if segment.source_passage_id not in materials_by_id:
-        return False, f"source_passage_id '{segment.source_passage_id}' not found in founder materials"
+        return False, "", f"source_passage_id '{segment.source_passage_id}' not found"
+    
+    if segment.sentence_index is None:
+        return False, "", "No sentence_index provided"
     
     passage = materials_by_id[segment.source_passage_id].passage
+    sentences = split_into_sentences(passage)
     
-    # Check quote is provided
-    if not segment.quote:
-        return False, "No quote provided for claim"
+    if segment.sentence_index < 0 or segment.sentence_index >= len(sentences):
+        return False, "", f"sentence_index {segment.sentence_index} out of range (0-{len(sentences)-1})"
     
-    # Check quote appears in passage (normalized)
-    if not check_quote_in_passage(segment.quote, passage):
-        return False, f"Quote '{segment.quote}' not found in cited passage"
+    sentence = sentences[segment.sentence_index]
     
-    # Near-verbatim support check against the quote
-    supported, reason = check_near_verbatim_support(segment.text, segment.quote)
-    if not supported:
-        return False, f"Near-verbatim support failed: {reason}"
+    # Only normalization: trim trailing punctuation for flow
+    sentence = sentence.rstrip('.!?')
     
-    return True, ""
-
-
-def verify_claim_in_passages(
-    claim_text: str,
-    materials: List[FounderMaterial]
-) -> tuple[bool, str]:
-    """
-    Verify a claim sentence (without quote) appears in founder material.
-    
-    Per founder-edit re-gate requirement:
-    A claim passes if all its content words, numbers, and negations 
-    appear within a SINGLE founder passage.
-    
-    Returns (passed, failure_reason).
-    """
-    if not materials:
-        return False, "No founder materials available"
-    
-    claim_content = extract_content_words(claim_text)
-    claim_numbers = extract_numbers(claim_text)
-    claim_negations = extract_negations(claim_text)
-    
-    # Try each passage
-    for material in materials:
-        passage_content = extract_content_words(material.passage)
-        passage_numbers = extract_numbers(material.passage)
-        passage_negations = extract_negations(material.passage)
-        
-        # Check if all claim elements are in this passage
-        content_covered = claim_content.issubset(passage_content)
-        numbers_covered = claim_numbers.issubset(passage_numbers)
-        negations_match = claim_negations == passage_negations
-        
-        if content_covered and numbers_covered and negations_match:
-            return True, ""
-    
-    # Failed - report what's missing
-    return False, "Content words/numbers/negations not found in any single founder passage"
+    return True, sentence, ""
 
 
 @dataclass
 class EditedTextGateInput:
     """Input for verifying edited free text."""
     edited_text: str
-    gated_segments: List[Segment]  # Previously gated segments for verbatim matching
+    gated_segments: List[Segment]  # Previously gated segments
     founder_materials: List[FounderMaterial]
     idempotency_key: str
 
@@ -380,6 +272,8 @@ class SentenceGateResult:
     kind: str  # "claim" or "non_claim"
     reason: str  # Failure reason or empty if passed
     kept_segment: bool  # True if verbatim match to gated segment
+    source_passage_id: Optional[str] = None
+    sentence_index: Optional[int] = None
 
 
 @activity.defn(name="verify_edited_text")
@@ -387,22 +281,38 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     """
     Verify edited free text using the strict claim gate.
     
-    Per founder-edit re-gate requirement (ADR-0006 Amendment E):
+    Per founder-edit re-gate requirement:
     1. Split edited text into sentences
     2. For each sentence:
-       - If it verbatim matches a previously gated segment, keep that verdict
-       - Otherwise, classify with closed-set non_claim rules
-       - Claims without quotes must have all content words/numbers/negations in a single passage
+       - If it verbatim matches a previously gated segment (B4: exact match after normalization), keep verdict
+       - If it's a verbatim passage sentence, pass as claim
+       - If it's a closed-set non_claim, pass
+       - Otherwise, fail
     3. Return per-sentence results (evidence trail)
     
-    This is NOT a hard block - results are stored, and approve requires post_anyway=True if any fail.
+    This is NOT a hard block - results are stored, approve requires post_anyway=True if any fail.
     """
     activity.logger.info(
         f"Verifying edited text: {len(input.edited_text)} chars, "
         f"{len(input.gated_segments)} gated segments (key: {input.idempotency_key})"
     )
     
-    # Split into sentences
+    # Build materials lookup
+    materials_by_id = {}
+    for i, material in enumerate(input.founder_materials):
+        passage_id = material.passage_id or f"passage_{i}"
+        materials_by_id[passage_id] = material
+    
+    # Build passage sentence lookup for verbatim matching
+    passage_sentences = {}
+    for passage_id, material in materials_by_id.items():
+        sentences = split_into_sentences(material.passage)
+        for i, sent in enumerate(sentences):
+            # Normalize for comparison (B4: NFKC+casefold+whitespace)
+            norm_sent = normalize_text(sent.rstrip('.!?'))
+            passage_sentences[norm_sent] = (passage_id, i, sent.rstrip('.!?'))
+    
+    # Split edited text into sentences
     sentences = split_into_sentences(input.edited_text)
     activity.logger.info(f"Split edited text into {len(sentences)} sentences")
     
@@ -411,33 +321,46 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     for sentence in sentences:
         norm_sentence = normalize_text(sentence)
         
-        # Check if this sentence verbatim matches a gated segment
-        # Use fuzzy matching (substring containment) like claim_gate does
+        # B4: Check if this sentence exactly matches a previously gated segment (exact after normalization)
         matched_seg = None
         for seg in input.gated_segments:
-            norm_seg = normalize_text(seg.text)
-            # Sentence maps to segment if either contains the other (fuzzy match)
-            if norm_sentence in norm_seg or norm_seg in norm_sentence:
-                matched_seg = seg
-                break
+            if seg.text:
+                norm_seg = normalize_text(seg.text)
+                if norm_sentence == norm_seg:
+                    matched_seg = seg
+                    break
         
         if matched_seg:
             # Keep the segment's verdict
             results.append(SentenceGateResult(
                 sentence=sentence,
-                passed=True,  # Previously gated segments are trusted
+                passed=True,
                 kind=matched_seg.kind,
                 reason="",
-                kept_segment=True
+                kept_segment=True,
+                source_passage_id=matched_seg.source_passage_id,
+                sentence_index=matched_seg.sentence_index
             ))
             activity.logger.info(f"Sentence '{sentence[:50]}...' kept gated segment verdict ({matched_seg.kind})")
             continue
         
-        # New sentence - classify with strict rules
-        effective_kind = determine_effective_kind(sentence, "claim")  # Default to claim
+        # Check if it's a verbatim passage sentence
+        if norm_sentence in passage_sentences:
+            passage_id, sent_idx, sent_text = passage_sentences[norm_sentence]
+            results.append(SentenceGateResult(
+                sentence=sentence,
+                passed=True,
+                kind="claim",
+                reason="",
+                kept_segment=False,
+                source_passage_id=passage_id,
+                sentence_index=sent_idx
+            ))
+            activity.logger.info(f"Sentence '{sentence[:50]}...' matched passage sentence")
+            continue
         
-        if effective_kind == "non_claim":
-            # Non-claims always pass
+        # Check if it's a closed-set non_claim
+        if is_closed_set_non_claim(sentence):
             results.append(SentenceGateResult(
                 sentence=sentence,
                 passed=True,
@@ -445,21 +368,18 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
                 reason="",
                 kept_segment=False
             ))
-            activity.logger.info(f"Sentence '{sentence[:50]}...' classified as non_claim")
-        else:
-            # Claim - verify coverage in founder materials
-            passed, reason = verify_claim_in_passages(sentence, input.founder_materials)
-            results.append(SentenceGateResult(
-                sentence=sentence,
-                passed=passed,
-                kind="claim",
-                reason=reason if not passed else "",
-                kept_segment=False
-            ))
-            if not passed:
-                activity.logger.warning(f"Sentence '{sentence[:50]}...' failed: {reason}")
-            else:
-                activity.logger.info(f"Sentence '{sentence[:50]}...' passed coverage check")
+            activity.logger.info(f"Sentence '{sentence[:50]}...' is closed-set non_claim")
+            continue
+        
+        # Failed - not a passage sentence, not a gated segment, not a non_claim
+        results.append(SentenceGateResult(
+            sentence=sentence,
+            passed=False,
+            kind="claim",
+            reason="Not a verbatim passage sentence, not a closed-set non_claim",
+            kept_segment=False
+        ))
+        activity.logger.warning(f"Sentence '{sentence[:50]}...' failed gate")
     
     passed_count = sum(1 for r in results if r.passed)
     activity.logger.info(
@@ -472,22 +392,21 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
 @activity.defn(name="claim_gate")
 async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     """
-    Segment-based claim gate (ADR-0006 Amendment 2026-11-21).
+    Segment-based claim gate (Architect decision 2026-11-21).
     
-    1. Join segments into draft text
-    2. Re-split into sentences
-    3. Verify each sentence maps to a segment
-    4. Verify coverage for claim segments
-    5. Apply pattern backstop (overrides non_claim tag)
-    6. Return per-sentence failures
+    1. For each claim segment: insert the exact sentence from the passage
+    2. For each non_claim segment: verify it passes closed-set rules (with backstop override)
+    3. Join segments into draft text
+    4. Re-split into sentences and verify mapping
+    5. Return per-sentence failures
     """
     activity.logger.info(
-        f"Running segment-based claim gate: "
+        f"Running claim gate: "
         f"{len(input.segments)} segments, "
         f"{len(input.founder_materials)} materials (key: {input.idempotency_key})"
     )
     
-    # QA r9 item 3b: Reject empty segment list
+    # Reject empty segment list
     if not input.segments:
         return ClaimGateResult(
             passed=False,
@@ -496,78 +415,83 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
             reasoning="Empty segment list rejected",
         )
     
-    # QA r9 item 3b: Reject empty segment text
-    for seg in input.segments:
-        if not seg.text or not seg.text.strip():
-            return ClaimGateResult(
-                passed=False,
-                segments=input.segments,
-                failed_sentences=[],
-                reasoning="Empty segment text rejected",
-            )
-    
     # Build materials lookup
     materials_by_id = {}
     for i, material in enumerate(input.founder_materials):
         passage_id = material.passage_id or f"passage_{i}"
         materials_by_id[passage_id] = material
     
-    # Step 1: Join segments to construct draft
-    draft_text = ' '.join(seg.text for seg in input.segments)
-    activity.logger.info(f"Constructed draft: {len(draft_text)} chars")
+    # Process segments: insert claim sentences, validate non_claims
+    processed_segments = []
+    failed_sentences = []
     
-    # Step 2: Re-split into sentences
+    for seg in input.segments:
+        if seg.kind == "claim":
+            # Insert sentence from passage
+            success, inserted_text, error = insert_claim_sentence(seg, materials_by_id)
+            if not success:
+                failed_sentences.append((f"[claim segment]", error))
+                activity.logger.warning(f"Failed to insert claim sentence: {error}")
+                continue
+            
+            # Create processed segment with inserted text
+            processed_seg = Segment(
+                kind="claim",
+                text=inserted_text,
+                source_passage_id=seg.source_passage_id,
+                sentence_index=seg.sentence_index
+            )
+            processed_segments.append(processed_seg)
+            
+        else:  # non_claim
+            # Validate non_claim text exists
+            if not seg.text or not seg.text.strip():
+                failed_sentences.append((f"[non_claim segment]", "Empty non_claim text"))
+                activity.logger.warning("Empty non_claim segment text")
+                continue
+            
+            # Validate it passes closed-set rules (with backstop override)
+            if not is_closed_set_non_claim(seg.text):
+                failed_sentences.append(
+                    (seg.text, "Does not match closed-set non_claim patterns (or matches backstop)")
+                )
+                activity.logger.warning(f"Non_claim segment failed closed-set: '{seg.text[:50]}...'")
+                continue
+            
+            processed_segments.append(seg)
+    
+    # Join processed segments to construct draft
+    if not processed_segments:
+        return ClaimGateResult(
+            passed=False,
+            segments=input.segments,
+            failed_sentences=failed_sentences,
+            reasoning="No valid segments after processing",
+        )
+    
+    draft_text = ' '.join(seg.text for seg in processed_segments if seg.text)
+    activity.logger.info(f"Constructed draft: {len(draft_text)} chars from {len(processed_segments)} segments")
+    
+    # Re-split into sentences and verify mapping
     sentences = split_into_sentences(draft_text)
     activity.logger.info(f"Split into {len(sentences)} sentences")
     
-    # Step 3: Verify each sentence maps to a segment
-    failed_sentences = []
-    
     for sentence in sentences:
-        # Find which segment(s) contain this sentence
         norm_sentence = normalize_text(sentence)
         
-        # Find segments that contain this sentence (or vice versa)
-        matching_segments = []
-        for seg in input.segments:
-            norm_seg = normalize_text(seg.text)
-            # Sentence maps to segment if either contains the other (fuzzy match)
-            if norm_sentence in norm_seg or norm_seg in norm_sentence:
-                matching_segments.append(seg)
+        # Find which segment contains this sentence
+        found = False
+        for seg in processed_segments:
+            if seg.text:
+                norm_seg = normalize_text(seg.text)
+                # Sentence maps to segment if either contains the other
+                if norm_sentence in norm_seg or norm_seg in norm_sentence:
+                    found = True
+                    break
         
-        if not matching_segments:
+        if not found:
             failed_sentences.append((sentence, "Sentence does not map to any segment"))
             activity.logger.warning(f"Unmapped sentence: '{sentence[:50]}...'")
-            continue
-        
-        # Step 4: Determine effective kind using code rules
-        # Take the first matching segment (in practice, should be 1-to-1)
-        segment = matching_segments[0]
-        
-        # Step 5: Determine effective kind (code decides, not the model)
-        effective_kind = determine_effective_kind(segment.text, segment.kind)
-        
-        if effective_kind != segment.kind:
-            activity.logger.info(
-                f"Code override: segment '{segment.text[:50]}...' "
-                f"tagged as {segment.kind} but determined as {effective_kind}"
-            )
-        
-        # Verify coverage if it's a claim
-        if effective_kind == "claim":
-            # Create a segment with effective kind for verification
-            verify_seg = Segment(
-                text=segment.text,
-                kind="claim",
-                source_passage_id=segment.source_passage_id,
-                quote=segment.quote
-            )
-            passed, reason = verify_segment_coverage(verify_seg, materials_by_id)
-            if not passed:
-                failed_sentences.append((sentence, reason))
-                activity.logger.warning(
-                    f"Sentence failed coverage: '{sentence[:50]}...' - {reason}"
-                )
     
     # Determine overall pass/fail
     gate_passed = len(failed_sentences) == 0
@@ -575,13 +499,13 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     if gate_passed:
         reasoning = f"All {len(sentences)} sentences verified and mapped to segments"
     else:
-        reasoning = f"{len(failed_sentences)} of {len(sentences)} sentences failed: {failed_sentences[0][1] if failed_sentences else 'unknown'}"
+        reasoning = f"{len(failed_sentences)} failures: {failed_sentences[0][1] if failed_sentences else 'unknown'}"
     
     activity.logger.info(f"Claim gate: {'PASS' if gate_passed else 'FAIL'} - {reasoning}")
     
     return ClaimGateResult(
         passed=gate_passed,
-        segments=input.segments,
+        segments=processed_segments,  # Return processed segments with inserted text
         failed_sentences=failed_sentences,
         reasoning=reasoning,
     )
