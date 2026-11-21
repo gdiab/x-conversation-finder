@@ -670,10 +670,6 @@ class ReviewWorkflow:
         # and incorrectly allows approval. The counter ensures A's validator rejects until all edits complete.
         self._edit_in_flight_count += 1
         
-        # QA R13: Increment edit_seq for this edit
-        self._edit_seq += 1
-        current_edit_seq = self._edit_seq
-        
         try:
             # Re-gate edited text (ADR-0006 Amendment E)
             workflow.logger.info(f"Running re-gate on edited text")
@@ -722,6 +718,12 @@ class ReviewWorkflow:
             self.edited_text_gate_state = gate_state
             
             # QA R12: Hash removed (dead code, see validate_approve)
+            
+            # QA R12+R13: Increment edit_seq AFTER gate completes, so last-to-finish wins
+            # This implements "last-writer-wins by finish order" (R12) while preventing
+            # stale writes (R13): whichever edit finishes last gets highest edit_seq.
+            self._edit_seq += 1
+            current_edit_seq = self._edit_seq
             
             # QA R13: Update card with edited text, gate results, and edit_seq
             await workflow.execute_activity(

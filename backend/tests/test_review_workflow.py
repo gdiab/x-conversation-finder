@@ -442,15 +442,15 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             return evidence
         
         async def draft(self, evidence, steer=None, idempotency_key=None) -> Evidence:
-            """Generate draft with unsupported claim (99.99% uptime guaranteed)."""
+            """Generate draft with invalid segment structure (has text field on non_claim)."""
             from backend.models import Segment
             
-            # Per ADR-0006 Amendment: Claims use sentence_index, non_claims have text
-            # This will fail because it's a non_claim with backstop patterns (numbers)
+            # QA R13: Per Architect decision 3, non_claim segments must have phrase_id only, NO text
+            # This will fail gate validation because it has a text field
             segments = [
                 Segment(
                     text="We guarantee 99.99% uptime with zero downtime.",
-                    kind="non_claim",  # Model tagged as non_claim, but has backstop (99.99%)
+                    kind="non_claim",  # Invalid: non_claim with text field instead of phrase_id
                 )
             ]
             draft_text = segments[0].text
@@ -515,7 +515,9 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             assert card["status"] == "skipped"
             # Skip reason includes gate failure details
             assert "not enough evidence" in card["skip_reason"].lower()
-            assert "closed-set" in card["skip_reason"].lower() or "backstop" in card["skip_reason"].lower()
+            # QA R13: New architecture - segments must not have text field
+            # The gate now rejects non_claim segments with text field (phrase_id only)
+            assert "phrase_id" in card["skip_reason"].lower() or "text" in card["skip_reason"].lower()
             
             # Verify failed sentences are recorded in evidence
             assert card["evidence"]["draft"] is not None
@@ -526,8 +528,8 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
                 assert "sentence" in failure
                 assert "reason" in failure
                 assert len(failure["sentence"]) > 0
-                # Backstop pattern failure message
-                assert "closed-set" in failure["reason"].lower() or "backstop" in failure["reason"].lower()
+                # QA R13: Segment structure validation failure message
+                assert "phrase_id" in failure["reason"].lower() or "text" in failure["reason"].lower()
             # Verify this is more than what's in skip_reason (which is capped at 3 with 30 char limit)
             assert card["skip_reason"] is not None
 

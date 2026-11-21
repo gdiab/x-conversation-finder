@@ -49,8 +49,9 @@ def split_into_sentences(text: str) -> List[str]:
     abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'Inc.', 'Ltd.', 'Co.', 
                'Corp.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
     
-    # Build case-insensitive pattern for abbreviations
-    abbrev_pattern = '|'.join(re.escape(a) for a in abbrevs)
+    # Build case-insensitive pattern for abbreviations with word boundaries
+    # Use \b before each abbreviation to ensure whole-word match only
+    abbrev_pattern = '|'.join(r'\b' + re.escape(a) for a in abbrevs)
     
     result = []
     current = []
