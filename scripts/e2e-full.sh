@@ -238,6 +238,9 @@ try:
         print(f\"Draft: {card.get('evidence', {}).get('draft', {}).get('text', 'N/A')[:80]}...\")
         print(f\"Posted URL: {card.get('posted_url', 'N/A')}\")
         print(f\"Reply Post ID: {card.get('reply_post_id', 'N/A')}\")
+        # S-6: Verify followup_replies is populated (proves check_followup ran)
+        followup_count = len(card.get('followup_replies', []) or [])
+        print(f\"Followup replies: {followup_count}\")
     else:
         print('No cards found')
 except Exception as e:
@@ -260,6 +263,24 @@ if [ "$FINAL_STATUS" != "followup_due" ]; then
     echo "⚠️ Final status is '$FINAL_STATUS', expected 'followup_due'"
 else
     echo "✓ Final status verified: followup_due"
+fi
+
+# S-6: Verify check_followup actually ran by checking followup_replies
+FOLLOWUP_COUNT=$(echo "$FINAL_REVIEWS" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if data.get('cards'):
+        replies = data['cards'][0].get('followup_replies', []) or []
+        print(len(replies))
+except:
+    print(0)
+" 2>/dev/null)
+
+if [ "$FOLLOWUP_COUNT" -gt 0 ]; then
+    echo "✓ check_followup executed ($FOLLOWUP_COUNT replies fetched)"
+else
+    echo "⚠️ check_followup may not have executed (no followup_replies)"
 fi
 echo ""
 
