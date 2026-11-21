@@ -183,7 +183,8 @@ try:
         print(f\"✓ Card created\")
         print(f\"  Status: {card['status']}\")
         print(f\"  Post: {card['post']['text'][:50]}...\")
-        print(f\"  Draft: {card['draft'][:80]}...\")
+        draft_text = card.get('evidence', {}).get('draft', {}).get('text', 'N/A')
+        print(f\"  Draft: {draft_text[:80] if draft_text != 'N/A' else draft_text}...\")
     else:
         print('❌ No card found')
         sys.exit(1)
