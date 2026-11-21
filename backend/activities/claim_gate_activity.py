@@ -366,7 +366,8 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
         for i, sent in enumerate(sentences):
             # Normalize for comparison (B4: NFKC+casefold+whitespace)
             norm_sent = normalize_text(sent.rstrip('.!?'))
-            passage_sentences[norm_sent] = (passage_id, i, sent.rstrip('.!?'))
+            # S2 (QA R14): Store original sentence for abbreviation and question checks
+            passage_sentences[norm_sent] = (passage_id, i, sent)
     
     # Split edited text into sentences
     sentences = split_into_sentences(input.edited_text)
@@ -401,7 +402,7 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
                     break
         
         if matched_seg:
-            # Keep the segment's verdict
+            # Keep the segment's verdict (S2: preserve phrase_id for composition validation)
             results.append(SentenceGateResult(
                 sentence=sentence,
                 passed=True,
@@ -409,7 +410,8 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
                 reason="",
                 kept_segment=True,
                 source_passage_id=matched_seg.source_passage_id,
-                sentence_index=matched_seg.sentence_index
+                sentence_index=matched_seg.sentence_index,
+                phrase_id=matched_seg.phrase_id
             ))
             activity.logger.info(f"Sentence '{sentence[:50]}...' kept gated segment verdict ({matched_seg.kind})")
             continue
@@ -418,6 +420,20 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
         # S2 (QA R14): Apply same checks as model path on passage-match branch
         if norm_sentence in passage_sentences:
             passage_id, sent_idx, sent_text = passage_sentences[norm_sentence]
+            
+            # S2: Check terminal punctuation type (question vs statement)
+            # A question matches only a question. A passage question keeps its '?'.
+            passage_is_question = sent_text.rstrip().endswith('?')
+            if is_question != passage_is_question:
+                results.append(SentenceGateResult(
+                    sentence=sentence,
+                    passed=False,
+                    kind="claim",
+                    reason="Terminal punctuation type mismatch (question vs statement)",
+                    kept_segment=False
+                ))
+                activity.logger.warning(f"Sentence '{sentence[:50]}...' terminal punctuation mismatch")
+                continue
             
             # S2: Apply referent rule
             if has_unresolved_referent(sent_text):

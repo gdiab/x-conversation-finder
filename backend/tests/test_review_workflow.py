@@ -641,10 +641,13 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
             
-            # Verify all failed sentences are recorded (3 in this case)
+            # Verify failed sentence is recorded (composition violation)
+            # R14: Non-claim segments without phrase_id trigger composition violation
             assert card["evidence"]["draft"] is not None
             failed_sentences = card["evidence"]["draft"]["claim_gate"]["failed_sentences"]
-            assert len(failed_sentences) == 3  # All three claims failed
+            assert len(failed_sentences) == 1  # Composition violation
+            assert failed_sentences[0]["sentence"] == "[draft composition]"
+            assert "phrase_id" in failed_sentences[0]["reason"]
             
             # Verify full evidence is stored
             for failure in failed_sentences:

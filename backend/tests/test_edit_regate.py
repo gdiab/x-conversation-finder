@@ -59,7 +59,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             original_text = card["evidence"]["draft"]["text"]
             
             # Edit to valid text (closed-set non_claims + verbatim passage sentence)
-            edited_text = "Thanks! Our product helps developers build reliable distributed systems. Happy to share more details."
+            edited_text = "Thanks! Our product helps developers build reliable distributed systems. Happy to share details."
             client_request_id = str(uuid.uuid4())
             result_text = await handle.execute_update(
                 "edit",
@@ -888,31 +888,33 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
 @pytest.mark.asyncio
 async def test_r14_s5_store_ignores_lower_edit_seq():
     """S5 (QA R14): Store activity ignores writes with lower edit_seq than stored."""
-    from backend.activities.store_activities import UpdateCardInput
+    from backend.activities.store_activities import UpdateCardInput, update_card
     from backend.database import ReviewCardDB, get_db
+    from datetime import datetime, timezone
     
-    # First, create a card with edit_seq=2
+    # First, create a card with edit_seq=2 and skip_reason="Version 2"
     db = get_db()
+    card_db = None
     try:
         card_db = ReviewCardDB(
-            id=uuid.uuid4(),
             workflow_id="test_s5_store",
-            post_id="12345",
+            post_data={"id": "12345", "text": "test post"},
             status="pending",
-            evidence_data={"draft": {"text": "Version 2"}},
+            evidence_data={"draft": {"text": "test"}},
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            skip_reason="Version 2",
             edit_seq=2  # Current seq is 2
         )
         db.add(card_db)
         db.commit()
         db.refresh(card_db)
         
-        card_id = card_db.id
-        
         # Try to update with edit_seq=1 (lower than stored 2)
         input_stale = UpdateCardInput(
             workflow_id="test_s5_store",
-            post_id="12345",
-            evidence_data={"draft": {"text": "Stale version 1"}},
+            idempotency_key="stale_write",
+            skip_reason="Stale version 1",
             edit_seq=1  # Lower than stored seq
         )
         
@@ -920,14 +922,14 @@ async def test_r14_s5_store_ignores_lower_edit_seq():
         
         # Verify card still has version 2 (stale write was ignored)
         db.refresh(card_db)
-        assert card_db.evidence_data["draft"]["text"] == "Version 2"
+        assert card_db.skip_reason == "Version 2"
         assert card_db.edit_seq == 2
         
         # Now update with edit_seq=3 (higher than stored 2)
         input_new = UpdateCardInput(
             workflow_id="test_s5_store",
-            post_id="12345",
-            evidence_data={"draft": {"text": "Version 3"}},
+            idempotency_key="new_write",
+            skip_reason="Version 3",
             edit_seq=3
         )
         
@@ -935,7 +937,7 @@ async def test_r14_s5_store_ignores_lower_edit_seq():
         
         # Verify card now has version 3
         db.refresh(card_db)
-        assert card_db.evidence_data["draft"]["text"] == "Version 3"
+        assert card_db.skip_reason == "Version 3"
         assert card_db.edit_seq == 3
         
     finally:
