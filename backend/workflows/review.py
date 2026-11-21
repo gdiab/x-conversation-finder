@@ -121,7 +121,7 @@ class ReviewWorkflow:
                 self.status = ReviewStatus.SKIPPED
                 self.skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
                 self.evidence = evidence
-                workflow.logger.info(f"Skipped: {self.skip_reason}")
+                workflow.logger.info(f"Skipped: low confidence {evidence.confidence_score:.2f}")
                 
                 card = self._build_card(workflow_id, input.post, created_at)
                 
@@ -185,7 +185,7 @@ class ReviewWorkflow:
                 self.status = ReviewStatus.SKIPPED
                 self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
                 self.evidence = evidence
-                workflow.logger.info(f"Skipped: {self.skip_reason}")
+                workflow.logger.info(f"Skipped: claim gate failed after {claim_gate_attempts} attempts")
                 
                 card = self._build_card(workflow_id, input.post, created_at)
                 
@@ -514,7 +514,7 @@ class ReviewWorkflow:
         if not self.evidence:
             raise ValueError("No evidence to nudge")
         
-        workflow.logger.info(f"Received nudge update: {instruction}")
+        workflow.logger.info(f"Received nudge update: {len(instruction)} chars")
         self._processed_requests.add(client_request_id)
         
         self.evidence = await workflow.execute_activity(
