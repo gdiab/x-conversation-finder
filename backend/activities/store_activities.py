@@ -50,6 +50,14 @@ class GetCardInput:
 
 def _card_to_db(card: ReviewCard) -> ReviewCardDB:
     """Convert ReviewCard to database model."""
+    # Handle status - it might be an enum or a string due to serialization
+    if isinstance(card.status, str):
+        status_str = card.status
+    elif hasattr(card.status, 'value'):
+        status_str = card.status.value
+    else:
+        status_str = str(card.status)
+    
     return ReviewCardDB(
         workflow_id=card.workflow_id,
         post_data=json.dumps({
@@ -101,7 +109,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
             } if card.evidence.draft else None,
             "skip_reason": card.evidence.skip_reason,
         }),
-        status=card.status.value,
+        status=status_str,
         created_at=card.created_at,
         updated_at=card.updated_at,
         approved_by=card.approved_by,
