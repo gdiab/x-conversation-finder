@@ -336,7 +336,6 @@ async def test_review_workflow_approved_not_confirmed(sample_post, product_brief
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Need to implement Update validator for URL validation")
 async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_brief):
     """Test confirm_posted rejects invalid URL."""
     x_activities = XActivities(FakeXClient())
@@ -386,23 +385,18 @@ async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_b
             # Try to confirm with invalid URL
             client_request_id = str(uuid.uuid4())
             from temporalio.client import WorkflowUpdateFailedError
-            import asyncio
             try:
-                await asyncio.wait_for(
-                    handle.execute_update(
-                        "confirm_posted",
-                        args=["https://invalid-url.com/foo", client_request_id]
-                    ),
-                    timeout=5.0
+                await handle.execute_update(
+                    "confirm_posted",
+                    args=["https://invalid-url.com/foo", client_request_id]
                 )
                 assert False, "Should have raised WorkflowUpdateFailedError"
-            except (WorkflowUpdateFailedError, asyncio.TimeoutError) as e:
-                # Either the update fails with validation error or times out
-                if isinstance(e, asyncio.TimeoutError):
-                    # This is expected for now - the workflow fails non-deterministically
-                    pass
-                else:
-                    assert "Invalid X post URL" in str(e)
+            except WorkflowUpdateFailedError as e:
+                # Validator should reject bad URL
+                error_msg = str(e)
+                if e.__cause__:
+                    error_msg += " " + str(e.__cause__)
+                assert "Invalid X post URL" in error_msg
 
 
 @pytest.mark.asyncio
@@ -465,29 +459,30 @@ async def test_review_workflow_duplicate_approve_ignored(sample_post, product_br
             assert card["status"] == "approved"
 
 
-@pytest.mark.skip(reason="Need to mock claim_gate activity to return FAIL")
 @pytest.mark.asyncio  
 async def test_review_workflow_claim_gate_regenerate_then_skip(sample_post, product_brief):
     """Test claim gate failure triggers regenerate, then skip after max attempts."""
-    from backend.adapters.fake_reply_agent import FakeReplyAgent as CustomFakeReplyAgent
-    from backend.models import ClaimGateResult
+    from backend.activities.claim_gate_activity import ClaimGateInput, ClaimGateResult
+    from temporalio import activity
     
-    # Custom fake agent that always returns FAIL for claim gate
-    class FailingReplyAgent(CustomFakeReplyAgent):
-        async def draft_reply(self, *args, **kwargs):
-            result = await super().draft_reply(*args, **kwargs)
-            # Override claim gate to always fail
-            result.claim_gate = ClaimGateResult(
-                passed=False,
-                claims_checked=["Test claim"],
-                unsupported_claims=["Test claim"],
-                supported_claims={},
-                reasoning="Draft makes unsupported claims",
-            )
-            return result
+    # Test-only claim gate activity that always fails
+    fail_count = {"count": 0}
+    
+    @activity.defn(name="claim_gate")
+    async def failing_claim_gate(input: ClaimGateInput) -> ClaimGateResult:
+        """Claim gate that always fails for testing."""
+        fail_count["count"] += 1
+        activity.logger.info(f"Claim gate attempt {fail_count['count']} - returning FAIL")
+        return ClaimGateResult(
+            passed=False,
+            claims_checked=["Test claim about our product"],
+            unsupported_claims=["Test claim about our product"],
+            supported_claims={},
+            reasoning="No founder materials support this claim",
+        )
     
     x_activities = XActivities(FakeXClient())
-    reply_activities = ReplyActivities(FailingReplyAgent())
+    reply_activities = ReplyActivities(FakeReplyAgent())
     
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -497,7 +492,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(sample_post, prod
             activities=[
                 reply_activity_funcs.research_post,
                 reply_activity_funcs.draft_reply,
-                claim_gate,
+                failing_claim_gate,  # Use test-only failing claim gate
                 store_card,
                 update_card,
                 x_activity_funcs.lookup_post,
@@ -523,7 +518,10 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(sample_post, prod
             result = await handle.result()
             assert result == "skipped"
             
+            # Verify claim gate was called 2 times (max attempts)
+            assert fail_count["count"] == 2
+            
             # Query the card to verify final status
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
-            assert card["skip_reason"] == "claim_gate_failed"
+            assert "claim gate failed" in card["skip_reason"].lower()

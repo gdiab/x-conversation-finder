@@ -395,23 +395,12 @@ class ReviewWorkflow:
             workflow.logger.info(f"Ignoring duplicate confirm_posted: {client_request_id}")
             return f"Already confirmed reply {self.reply_post_id}"
         
-        # Validate
-        if not self.approved:
-            raise ValueError("Cannot confirm: draft not approved yet")
-        
-        if self.status != ReviewStatus.APPROVED:
-            raise ValueError(f"Cannot confirm in status {self.status.value}")
-        
         workflow.logger.info(f"Received confirm_posted: {reply_url}")
-        
-        # Parse reply post ID from URL (validate before modifying state)
-        # Expected format: https://x.com/username/status/1234567890
-        match = re.search(r'/status/(\d+)', reply_url)
-        if not match:
-            raise ValueError(f"Invalid X post URL: {reply_url}")
         
         self._processed_requests.add(client_request_id)
         
+        # Parse reply post ID from URL (already validated by validator)
+        match = re.search(r'/status/(\d+)', reply_url)
         reply_post_id = match.group(1)
         
         # Lookup the reply post to verify it exists
@@ -456,6 +445,21 @@ class ReviewWorkflow:
         
         return f"Confirmed reply {reply_post_id}"
     
+    @confirm_posted.validator
+    def validate_confirm_posted(self, reply_url: str, client_request_id: str) -> None:
+        """Validator for confirm_posted Update - checks state and URL format."""
+        # Check state
+        if not self.approved:
+            raise ValueError("Cannot confirm: draft not approved yet")
+        
+        if self.status != ReviewStatus.APPROVED:
+            raise ValueError(f"Cannot confirm in status {self.status.value}")
+        
+        # Validate URL format
+        match = re.search(r'/status/(\d+)', reply_url)
+        if not match:
+            raise ValueError(f"Invalid X post URL: {reply_url}")
+    
     @workflow.update
     async def edit(self, new_text: str, client_request_id: str) -> str:
         """Edit update - founder edits the draft."""
@@ -463,13 +467,6 @@ class ReviewWorkflow:
         if client_request_id in self._processed_requests:
             workflow.logger.info(f"Ignoring duplicate edit: {client_request_id}")
             return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
-        
-        # Validate
-        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
-            raise ValueError(f"Cannot edit in status {self.status.value}")
-        
-        if not self.evidence or not self.evidence.draft:
-            raise ValueError("No draft to edit")
         
         workflow.logger.info(f"Received edit update: {len(new_text)} chars")
         self._processed_requests.add(client_request_id)
@@ -491,6 +488,18 @@ class ReviewWorkflow:
         
         return self.evidence.draft.text
     
+    @edit.validator
+    def validate_edit(self, new_text: str, client_request_id: str) -> None:
+        """Validator for edit Update - checks state and input."""
+        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
+            raise ValueError(f"Cannot edit in status {self.status.value}")
+        
+        if not self.evidence or not self.evidence.draft:
+            raise ValueError("No draft to edit")
+        
+        if not new_text or not new_text.strip():
+            raise ValueError("New text cannot be empty")
+    
     @workflow.update
     async def nudge(self, instruction: str, client_request_id: str) -> str:
         """Nudge update - steer a redraft."""
@@ -498,13 +507,6 @@ class ReviewWorkflow:
         if client_request_id in self._processed_requests:
             workflow.logger.info(f"Ignoring duplicate nudge: {client_request_id}")
             return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
-        
-        # Validate
-        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
-            raise ValueError(f"Cannot nudge in status {self.status.value}")
-        
-        if not self.evidence:
-            raise ValueError("No evidence to nudge")
         
         workflow.logger.info(f"Received nudge update: {len(instruction)} chars")
         self._processed_requests.add(client_request_id)
@@ -515,7 +517,7 @@ class ReviewWorkflow:
             DraftReplyInput(
                 evidence=self.evidence,
                 steer=instruction,
-                idempotency_key=f"{workflow.info().workflow_id}:nudge:{client_request_id}",
+                idempotency_key=f"{self.evidence.post_id}:nudge:{client_request_id}",
             ),
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
@@ -530,10 +532,11 @@ class ReviewWorkflow:
                 updates={"evidence": self.evidence},
                 idempotency_key=f"{workflow_id}:update:nudge:{client_request_id}",
             ),
-            start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
+            start_to_close_timeout=timedelta(seconds=10),
         )
         
-        return self.evidence.draft.text if self.evidence.draft else ""
+        return self.evidence.draft.text
+    
     
     @workflow.query
     def get_card(self) -> dict:
