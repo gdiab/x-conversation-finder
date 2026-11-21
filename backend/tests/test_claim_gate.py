@@ -304,6 +304,19 @@ async def test_regression_order_swap_rejected():
 
 
 @pytest.mark.asyncio
+async def test_b5b_its_handling():
+    """B5b: 'it's' without claim indicators stays non_claim, with claim indicators is a claim."""
+    # "it's" with opinion frame, no claim indicators → non_claim
+    assert is_closed_set_non_claim("I think it's a great question.")
+    assert is_closed_set_non_claim("In my opinion it's really interesting.")
+    
+    # "it's" with claim indicators (comparative, number) → NOT non_claim (claim)
+    assert not is_closed_set_non_claim("I think it's way cheaper.")
+    assert not is_closed_set_non_claim("It's 10x faster.")
+    assert not is_closed_set_non_claim("It's better than the alternatives.")
+
+
+@pytest.mark.asyncio
 async def test_regression_paraphrase_rejected():
     """Regression: Paraphrased claims (not verbatim) must be rejected.
     
