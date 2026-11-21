@@ -113,6 +113,7 @@ class ReviewWorkflow:
                 ),
                 start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
                 retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
+                result_type=Evidence,
             )
             
             workflow.logger.info(f"Research complete: confidence={evidence.confidence_score:.2f}")
@@ -152,6 +153,7 @@ class ReviewWorkflow:
                     ),
                     start_to_close_timeout=timedelta(seconds=settings.activity_timeout_long_sec),
                     retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
+                    result_type=Evidence,
                 )
                 
                 # Run deterministic claim gate
@@ -312,6 +314,7 @@ class ReviewWorkflow:
                 ),
                 start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
                 retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
+                result_type=List[Post],
             )
             
             workflow.logger.info(f"Found {len(followup_posts)} follow-up replies")
@@ -412,6 +415,7 @@ class ReviewWorkflow:
             ),
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_short_sec),
             retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
+            result_type=Optional[Post],
         )
         
         if not reply_post:
@@ -520,6 +524,7 @@ class ReviewWorkflow:
             ),
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
+            result_type=Evidence,
         )
         
         workflow_id = workflow.info().workflow_id

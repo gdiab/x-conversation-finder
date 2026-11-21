@@ -18,7 +18,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from backend.activities import SearchRecentInput
+    from backend.activities import SearchRecentInput, SearchRecentOutput
     from backend.workflows.review import ReviewWorkflow, ReviewInput
     from temporalio.workflow import ParentClosePolicy
     from backend.config import get_settings
@@ -103,6 +103,7 @@ class TopicWatchWorkflow:
                     ),
                     start_to_close_timeout=timedelta(seconds=settings.activity_timeout_medium_sec),
                     retry_policy=RetryPolicy(maximum_attempts=settings.activity_max_attempts),
+                    result_type=SearchRecentOutput,
                 )
                 
                 workflow.logger.info(
