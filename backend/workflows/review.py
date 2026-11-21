@@ -127,7 +127,7 @@ class ReviewWorkflow:
             workflow_id=workflow_id,
             post=post,
             evidence=self.evidence,
-            status=self.status.value,  # R4-B1: Convert enum to plain str at boundary
+            status=self.status,  # R5-N1: Now using string literals, not enum
             created_at=created_at,
             updated_at=workflow.now().isoformat(),
             skip_reason=self.skip_reason if self.skipped else None,
