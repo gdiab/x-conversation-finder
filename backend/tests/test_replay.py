@@ -13,14 +13,13 @@ from temporalio.worker import Worker, Replayer
 from backend.workflows.review import ReviewWorkflow, ReviewInput
 from backend.workflows.topic_watch import TopicWatchWorkflow, TopicWatchInput
 from backend.activities import XActivities, ReplyActivities
-from backend.activities import x_activity_funcs, reply_activity_funcs
 from backend.activities.store_activities import store_card, update_card
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_replay(sample_post, product_brief):
+async def test_review_workflow_replay(sample_post, product_brief, x_activities, reply_activities):
     """Test Review workflow replay from recorded history."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -28,13 +27,14 @@ async def test_review_workflow_replay(sample_post, product_brief):
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activity_funcs.research_post,
-                reply_activity_funcs.draft_reply,
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activity_funcs.lookup_post,
-                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_replay"
@@ -75,7 +75,7 @@ async def test_review_workflow_replay(sample_post, product_brief):
 
 
 @pytest.mark.asyncio
-async def test_topic_watch_workflow_replay(product_brief):
+async def test_topic_watch_workflow_replay(product_brief, x_activities, reply_activities):
     """Test TopicWatch workflow replay from recorded history."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -83,11 +83,11 @@ async def test_topic_watch_workflow_replay(product_brief):
             task_queue="test",
             workflows=[TopicWatchWorkflow, ReviewWorkflow],
             activities=[
-                x_activity_funcs.search_recent,
-                x_activity_funcs.lookup_post,
-                x_activity_funcs.check_followup,
-                reply_activity_funcs.research_post,
-                reply_activity_funcs.draft_reply,
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
@@ -132,7 +132,7 @@ async def test_topic_watch_workflow_replay(product_brief):
 
 
 @pytest.mark.asyncio
-async def test_review_workflow_replay_with_skip(sample_post, product_brief):
+async def test_review_workflow_replay_with_skip(sample_post, product_brief, x_activities, reply_activities):
     """Test Review workflow replay with skip signal."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -140,13 +140,14 @@ async def test_review_workflow_replay_with_skip(sample_post, product_brief):
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
-                reply_activity_funcs.research_post,
-                reply_activity_funcs.draft_reply,
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
                 claim_gate,
                 store_card,
                 update_card,
-                x_activity_funcs.lookup_post,
-                x_activity_funcs.check_followup,
             ],
         ):
             workflow_id = f"review:test:{sample_post.id}_replay_skip"
