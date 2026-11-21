@@ -384,11 +384,12 @@ async def test_review_workflow_confirm_posted_invalid_url(sample_post, product_b
             
             # Try to confirm with invalid URL
             client_request_id = str(uuid.uuid4())
+            from temporalio.client import WorkflowUpdateFailedError
             try:
                 await handle.execute_update(
                     "confirm_posted",
                     args=["https://invalid-url.com/foo", client_request_id]
                 )
-                assert False, "Should have raised ValueError"
-            except Exception as e:
+                assert False, "Should have raised WorkflowUpdateFailedError"
+            except WorkflowUpdateFailedError as e:
                 assert "Invalid X post URL" in str(e)

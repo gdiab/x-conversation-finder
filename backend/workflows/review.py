@@ -403,13 +403,14 @@ class ReviewWorkflow:
             raise ValueError(f"Cannot confirm in status {self.status.value}")
         
         workflow.logger.info(f"Received confirm_posted: {reply_url}")
-        self._processed_requests.add(client_request_id)
         
-        # Parse reply post ID from URL
+        # Parse reply post ID from URL (validate before modifying state)
         # Expected format: https://x.com/username/status/1234567890
         match = re.search(r'/status/(\d+)', reply_url)
         if not match:
             raise ValueError(f"Invalid X post URL: {reply_url}")
+        
+        self._processed_requests.add(client_request_id)
         
         reply_post_id = match.group(1)
         
