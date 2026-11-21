@@ -11,17 +11,14 @@ Per ADR-0002:
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional, Set
+from typing import Optional
 import asyncio
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from backend.activities import (
-        search_recent,
-        SearchRecentInput,
-    )
+    from backend.activities import SearchRecentInput
     from backend.workflows.review import ReviewWorkflow, ReviewInput
     from temporalio.workflow import ParentClosePolicy
 
@@ -40,7 +37,7 @@ class TopicWatchInput:
     continue_as_new_after: int = 100
     since_id: Optional[str] = None
     iteration: int = 0
-    seen_post_ids: Optional[List[str]] = None
+    seen_post_ids: Optional[list[str]] = None
 
 
 @workflow.defn(name="TopicWatch")
@@ -95,7 +92,7 @@ class TopicWatchWorkflow:
             
             try:
                 search_result = await workflow.execute_activity(
-                    search_recent,
+                    "search_recent",
                     SearchRecentInput(
                         query=input.query,
                         since_id=since_id,

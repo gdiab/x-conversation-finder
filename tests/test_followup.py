@@ -9,7 +9,8 @@ from temporalio.worker import Worker
 from backend.workflows.review import ReviewWorkflow, ReviewInput
 from backend.models import Post, Author
 from backend.config import get_settings
-from tests.conftest import FakeXClient, FakeReplyAgent
+from backend.adapters.fake_x_client import FakeXClient
+from backend.adapters.fake_reply_agent import FakeReplyAgent
 
 
 @pytest.mark.asyncio
@@ -45,8 +46,25 @@ async def test_followup_timer_and_check():
         )
         
         # Import activities with injected adapters
-        from backend.activities import get_activities
-        activities = get_activities(x_client, reply_agent)
+        from backend.activities.x_activities import XActivities
+        from backend.activities.reply_activities import ReplyActivities
+        from backend.activities.store_activities import store_card, update_card, get_card
+        from backend.activities.claim_gate_activity import claim_gate
+        
+        x_activities = XActivities(x_client)
+        reply_activities = ReplyActivities(reply_agent)
+        
+        activities = [
+            x_activities.search_recent,
+            x_activities.lookup_post,
+            x_activities.check_followup,
+            reply_activities.research_post,
+            reply_activities.draft_reply,
+            store_card,
+            update_card,
+            get_card,
+            claim_gate,
+        ]
         
         # Start worker
         async with Worker(

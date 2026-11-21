@@ -9,7 +9,8 @@ from temporalio.worker import Worker
 from backend.workflows.review import ReviewWorkflow, ReviewInput
 from backend.models import Post, Author
 from backend.config import get_settings
-from tests.conftest import FakeXClient, FakeReplyAgent
+from backend.adapters.fake_x_client import FakeXClient
+from backend.adapters.fake_reply_agent import FakeReplyAgent
 
 
 @pytest.mark.asyncio
