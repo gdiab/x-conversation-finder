@@ -103,7 +103,7 @@ class ReviewWorkflow:
     
     def __init__(self):
         self.evidence: Optional[Evidence] = None
-        self.status = ReviewStatus.PENDING
+        self.status = "pending"
         self.approved = False
         self.confirmed = False
         self.skipped = False
@@ -156,7 +156,7 @@ class ReviewWorkflow:
         
         # Skip if low confidence
         if evidence.confidence_score < input.confidence_threshold:
-            self.status = ReviewStatus.SKIPPED
+            self.status = "skipped"
             self.skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
             self.evidence = evidence
             workflow.logger.info(f"Skipped: low confidence {evidence.confidence_score:.2f}")
@@ -225,7 +225,7 @@ class ReviewWorkflow:
                 break
         
         # Skip if claim gate failed after retries (R4-NN5: set skipped flag)
-        self.status = ReviewStatus.SKIPPED
+        self.status = "skipped"
         self.skipped = True
         self.skip_reason = "Not enough evidence - claim gate failed after regeneration"
         self.evidence = evidence
@@ -253,14 +253,14 @@ class ReviewWorkflow:
                 timeout=timedelta(hours=timeout_hours),
             )
         except asyncio.TimeoutError:
-            self.status = ReviewStatus.EXPIRED
+            self.status = "expired"
             workflow.logger.info(f"Review expired after {timeout_hours}h")
             
             await workflow.execute_activity(
                 update_card,
                 UpdateCardInput(
                     workflow_id=workflow_id,
-                    updates={"status": ReviewStatus.EXPIRED.value},
+                    updates={"status": "expired"},
                     idempotency_key=f"{workflow_id}:update:expire",
                 ),
                 start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
@@ -324,7 +324,7 @@ class ReviewWorkflow:
             UpdateCardInput(
                 workflow_id=workflow_id,
                 updates={
-                    "status": ReviewStatus.APPROVED.value,
+                    "status": "approved",
                     "posted_url": self.posted_url,
                 },
                 idempotency_key=f"{workflow_id}:update:approve",
@@ -342,14 +342,14 @@ class ReviewWorkflow:
                 timeout=timedelta(hours=timeout_hours),
             )
         except asyncio.TimeoutError:
-            self.status = ReviewStatus.APPROVED_NOT_CONFIRMED
+            self.status = "approved_not_confirmed"
             workflow.logger.info(f"Approved but not confirmed after {timeout_hours}h")
             
             await workflow.execute_activity(
                 update_card,
                 UpdateCardInput(
                     workflow_id=workflow_id,
-                    updates={"status": ReviewStatus.APPROVED_NOT_CONFIRMED.value},
+                    updates={"status": "approved_not_confirmed"},
                     idempotency_key=f"{workflow_id}:update:not_confirmed",
                 ),
                 start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
@@ -402,7 +402,7 @@ class ReviewWorkflow:
             UpdateCardInput(
                 workflow_id=workflow_id,
                 updates={
-                    "status": ReviewStatus.FOLLOWUP_DUE.value,
+                    "status": "followup_due",
                     "followup_replies": followup_replies,
                 },
                 idempotency_key=f"{workflow_id}:update:followup_due",
@@ -430,7 +430,7 @@ class ReviewWorkflow:
         
         self.approved = True
         self.posted_url = posted_url
-        self.status = ReviewStatus.APPROVED
+        self.status = "approved"
     
     @workflow.signal
     async def skip(self, reason: str, client_request_id: str):
@@ -445,7 +445,7 @@ class ReviewWorkflow:
         
         self.skipped = True
         self.skip_reason = reason
-        self.status = ReviewStatus.SKIPPED
+        self.status = "skipped"
     
     @workflow.update
     async def confirm_posted(self, reply_url: str, client_request_id: str) -> str:
@@ -531,7 +531,7 @@ class ReviewWorkflow:
         if not self.approved:
             raise ValueError("Cannot confirm: draft not approved yet")
         
-        if self.status != ReviewStatus.APPROVED:
+        if self.status != "approved":
             raise ValueError(f"Cannot confirm in status {self.status.value}")
         
         # Validate URL format
@@ -570,7 +570,7 @@ class ReviewWorkflow:
     @edit.validator
     def validate_edit(self, new_text: str, client_request_id: str) -> None:
         """Validator for edit Update - checks state and input."""
-        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
+        if self.status not in ["pending", "approved"]:
             raise ValueError(f"Cannot edit in status {self.status.value}")
         
         if not self.evidence or not self.evidence.draft:
@@ -619,7 +619,7 @@ class ReviewWorkflow:
     @nudge.validator
     def validate_nudge(self, instruction: str, client_request_id: str) -> None:
         """Validator for nudge Update - checks state and input (B9)."""
-        if self.status not in [ReviewStatus.PENDING, ReviewStatus.APPROVED]:
+        if self.status not in ["pending", "approved"]:
             raise ValueError(f"Cannot nudge in status {self.status.value}")
         
         if not self.evidence or not self.evidence.draft:
