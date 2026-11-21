@@ -60,6 +60,23 @@ class GlobalSettingsDB(Base):
     last_updated = Column(String, nullable=False)
 
 
+class BudgetReconciliationDB(Base):
+    """Track reconciliations for idempotency across activity retries."""
+    
+    __tablename__ = "budget_reconciliations"
+    
+    # Composite key: workflow_id + activity_id + attempt
+    reconciliation_key = Column(String, primary_key=True)
+    workflow_id = Column(String, nullable=False)
+    activity_id = Column(String, nullable=False)
+    attempt = Column(String, nullable=False)
+    reservation_date = Column(String, nullable=False)  # UTC date of reservation
+    reserved_amount = Column(Float, nullable=False)  # reads or tokens
+    actual_amount = Column(Float, nullable=False)  # actual used
+    reconciled_at = Column(String, nullable=False)
+    budget_type = Column(String, nullable=False)  # 'x_reads' or 'inference'
+
+
 # Global engine and session factory
 _engine = None
 _SessionLocal = None

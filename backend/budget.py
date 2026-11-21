@@ -12,7 +12,8 @@ Per NB3 and R3-B3: Atomic reserve-then-commit in one SQLite transaction (BEGIN I
 from datetime import datetime, timezone
 from sqlalchemy import text
 from temporalio.exceptions import ApplicationError
-from backend.database import get_db, BudgetLedgerDB, GlobalSettingsDB
+from typing import Tuple
+from backend.database import get_db, BudgetLedgerDB, GlobalSettingsDB, BudgetReconciliationDB
 from backend.config import get_settings
 
 
@@ -52,14 +53,14 @@ def _check_kill_switch(db):
         raise BudgetExceeded("Budget kill switch enabled in database")
 
 
-def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> float:
+def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> Tuple[float, str]:
     """
     Atomically reserve X API budget.
     
     Uses BEGIN IMMEDIATE transaction for atomic reserve-then-commit.
     Cap enforced on first call too.
     
-    Returns the cost in USD.
+    Returns (cost in USD, reservation date YYYY-MM-DD).
     
     Raises BudgetExceeded if:
     - Kill switch is active (env/config or DB)
@@ -116,7 +117,7 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> floa
             ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
         db.commit()
-        return cost
+        return cost, today
         
     except BudgetExceeded:
         db.rollback()
@@ -128,7 +129,7 @@ def reserve_x_budget(reads_needed: int = 1, cost_per_read: float = None) -> floa
         db.close()
 
 
-def reserve_inference_budget(input_tokens: int, output_tokens: int) -> float:
+def reserve_inference_budget(input_tokens: int, output_tokens: int) -> Tuple[float, str]:
     """
     Atomically reserve inference budget.
     
@@ -136,7 +137,7 @@ def reserve_inference_budget(input_tokens: int, output_tokens: int) -> float:
     Uses BEGIN IMMEDIATE transaction for atomic reserve-then-commit.
     Cap enforced on first call too.
     
-    Returns the cost in USD.
+    Returns (cost in USD, reservation date YYYY-MM-DD).
     
     Raises BudgetExceeded if:
     - Kill switch is active (env/config or DB)
@@ -185,7 +186,7 @@ def reserve_inference_budget(input_tokens: int, output_tokens: int) -> float:
             ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
         db.commit()
-        return cost
+        return cost, today
         
     except BudgetExceeded:
         db.rollback()
@@ -197,39 +198,93 @@ def reserve_inference_budget(input_tokens: int, output_tokens: int) -> float:
         db.close()
 
 
-def reconcile_x_reads(reserved_reads: int, actual_reads: int, cost_per_read: float = None) -> float:
+def reconcile_x_reads(
+    reserved_reads: int,
+    actual_reads: int,
+    reservation_date: str,
+    workflow_id: str,
+    activity_id: str,
+    attempt: int,
+    cost_per_read: float = None
+) -> float:
     """
-    Reconcile X budget after actual results known (R4-B2).
+    Reconcile X budget after actual results known (R5-B1: two-way with idempotency).
     
-    Refunds the difference if actual < reserved.
+    - Charges delta when actual > reserved
+    - Refunds delta when actual < reserved  
+    - Applies to reservation's own UTC day, not today
+    - Idempotent per activity attempt (workflow_id, activity_id, attempt)
+    - Never takes a day below zero
+    
     Returns the actual cost charged.
     """
-    if actual_reads >= reserved_reads:
-        # No reconciliation needed
-        return actual_reads * (cost_per_read or get_settings().x_post_read_cost)
-    
     settings = get_settings()
-    today = get_today_utc()
     
     if cost_per_read is None:
         cost_per_read = settings.x_post_read_cost
     
-    refund_reads = reserved_reads - actual_reads
-    refund_cost = refund_reads * cost_per_read
+    actual_cost = actual_reads * cost_per_read
+    reconciliation_key = f"{workflow_id}:{activity_id}:{attempt}:x_reads"
     
     db = get_db()
     try:
         db.execute(text("BEGIN IMMEDIATE"))
         
-        ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
+        # Check if already reconciled (idempotency)
+        existing = db.query(BudgetReconciliationDB).filter(
+            BudgetReconciliationDB.reconciliation_key == reconciliation_key
+        ).first()
         
-        if ledger:
-            ledger.x_reads -= refund_reads
-            ledger.x_cost_usd -= refund_cost
-            ledger.last_updated = datetime.now(timezone.utc).isoformat()
-            db.commit()
+        if existing:
+            # Already reconciled, return the actual cost
+            return actual_cost
         
-        return actual_reads * cost_per_read
+        # Get ledger for reservation date (not today)
+        ledger = db.query(BudgetLedgerDB).filter(
+            BudgetLedgerDB.date == reservation_date
+        ).first()
+        
+        if not ledger:
+            # Should not happen (reservation should have created it)
+            ledger = BudgetLedgerDB(
+                date=reservation_date,
+                x_reads=0.0,
+                x_cost_usd=0.0,
+                inference_calls=0,
+                inference_cost_usd=0.0,
+                last_updated=datetime.now(timezone.utc).isoformat(),
+            )
+            db.add(ledger)
+        
+        # Calculate delta
+        delta_reads = actual_reads - reserved_reads
+        delta_cost = delta_reads * cost_per_read
+        
+        # Apply delta (charge or refund)
+        new_reads = ledger.x_reads + delta_reads
+        new_cost = ledger.x_cost_usd + delta_cost
+        
+        # Clamp at zero (never go negative)
+        ledger.x_reads = max(0.0, new_reads)
+        ledger.x_cost_usd = max(0.0, new_cost)
+        ledger.last_updated = datetime.now(timezone.utc).isoformat()
+        
+        # Record reconciliation for idempotency
+        reconciliation = BudgetReconciliationDB(
+            reconciliation_key=reconciliation_key,
+            workflow_id=workflow_id,
+            activity_id=activity_id,
+            attempt=str(attempt),
+            reservation_date=reservation_date,
+            reserved_amount=float(reserved_reads),
+            actual_amount=float(actual_reads),
+            reconciled_at=datetime.now(timezone.utc).isoformat(),
+            budget_type='x_reads',
+        )
+        db.add(reconciliation)
+        
+        db.commit()
+        return actual_cost
         
     except Exception as e:
         db.rollback()
@@ -238,12 +293,25 @@ def reconcile_x_reads(reserved_reads: int, actual_reads: int, cost_per_read: flo
         db.close()
 
 
-def reconcile_inference_tokens(reserved_input: int, reserved_output: int, 
-                               actual_input: int, actual_output: int) -> float:
+def reconcile_inference_tokens(
+    reserved_input: int,
+    reserved_output: int,
+    actual_input: int,
+    actual_output: int,
+    reservation_date: str,
+    workflow_id: str,
+    activity_id: str,
+    attempt: int
+) -> float:
     """
-    Reconcile inference budget after actual usage known (R4-B2).
+    Reconcile inference budget after actual usage known (R5-B1: two-way with idempotency).
     
-    Refunds the difference if actual < reserved.
+    - Charges delta when actual > reserved
+    - Refunds delta when actual < reserved
+    - Applies to reservation's own UTC day, not today
+    - Idempotent per activity attempt (workflow_id, activity_id, attempt)
+    - Never takes a day below zero
+    
     Returns the actual cost charged.
     """
     settings = get_settings()
@@ -258,24 +326,65 @@ def reconcile_inference_tokens(reserved_input: int, reserved_output: int,
         actual_output * settings.inference_output_token_cost_usd
     )
     
-    if actual_cost >= reserved_cost:
-        # No reconciliation needed
-        return actual_cost
-    
-    refund_cost = reserved_cost - actual_cost
-    today = get_today_utc()
+    reconciliation_key = f"{workflow_id}:{activity_id}:{attempt}:inference"
     
     db = get_db()
     try:
         db.execute(text("BEGIN IMMEDIATE"))
         
-        ledger = db.query(BudgetLedgerDB).filter(BudgetLedgerDB.date == today).first()
+        # Check if already reconciled (idempotency)
+        existing = db.query(BudgetReconciliationDB).filter(
+            BudgetReconciliationDB.reconciliation_key == reconciliation_key
+        ).first()
         
-        if ledger:
-            ledger.inference_cost_usd -= refund_cost
-            ledger.last_updated = datetime.now(timezone.utc).isoformat()
-            db.commit()
+        if existing:
+            # Already reconciled, return the actual cost
+            return actual_cost
         
+        # Get ledger for reservation date (not today)
+        ledger = db.query(BudgetLedgerDB).filter(
+            BudgetLedgerDB.date == reservation_date
+        ).first()
+        
+        if not ledger:
+            # Should not happen (reservation should have created it)
+            ledger = BudgetLedgerDB(
+                date=reservation_date,
+                x_reads=0.0,
+                x_cost_usd=0.0,
+                inference_calls=0,
+                inference_cost_usd=0.0,
+                last_updated=datetime.now(timezone.utc).isoformat(),
+            )
+            db.add(ledger)
+        
+        # Calculate delta
+        delta_cost = actual_cost - reserved_cost
+        
+        # Apply delta (charge or refund)
+        new_cost = ledger.inference_cost_usd + delta_cost
+        
+        # Clamp at zero (never go negative)
+        ledger.inference_cost_usd = max(0.0, new_cost)
+        ledger.last_updated = datetime.now(timezone.utc).isoformat()
+        
+        # Record reconciliation for idempotency
+        total_reserved = reserved_input + reserved_output
+        total_actual = actual_input + actual_output
+        reconciliation = BudgetReconciliationDB(
+            reconciliation_key=reconciliation_key,
+            workflow_id=workflow_id,
+            activity_id=activity_id,
+            attempt=str(attempt),
+            reservation_date=reservation_date,
+            reserved_amount=float(total_reserved),
+            actual_amount=float(total_actual),
+            reconciled_at=datetime.now(timezone.utc).isoformat(),
+            budget_type='inference',
+        )
+        db.add(reconciliation)
+        
+        db.commit()
         return actual_cost
         
     except Exception as e:
