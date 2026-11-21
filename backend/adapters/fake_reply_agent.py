@@ -77,23 +77,27 @@ class FakeReplyAgent(ReplyAgentPort):
         if steer:
             steers = steers + [steer]
         
+        # R3-B1: Claim text must appear in draft
+        claim_text = "Our product helps developers build reliable systems"
+        
         base_text = (
             f"Thanks for raising this point about {evidence.matched_topic}. "
-            "Our product helps with exactly this kind of challenge. "
+            f"{claim_text}. "
             "Would be happy to share more details if useful."
         )
         
         if "shorter" in (steer or "").lower():
-            base_text = f"Great point about {evidence.matched_topic}. Our product addresses this. Happy to share more."
+            base_text = f"Great point about {evidence.matched_topic}. {claim_text}. Happy to share more."
         elif "technical" in (steer or "").lower():
             base_text = (
                 f"Re: {evidence.matched_topic} - our system uses distributed "
                 "consensus and eventual consistency to handle this. Details in our docs."
             )
+            claim_text = "system uses distributed consensus"
         
         claims = [
             Claim(
-                text="Our product helps with this kind of challenge",
+                text=claim_text,
                 cited_passage_ids=["passage_0"],
                 quoted_spans=["helps developers build reliable systems"],
             )
