@@ -83,8 +83,8 @@ class FakeReplyAgent(ReplyAgentPort):
         if steer:
             steers = steers + [steer]
         
-        # Per Architect: Claims have {kind:'claim', source_passage_id, sentence_index} with NO text
-        # Non-claims have {kind:'non_claim', text}
+        # QA R13: Claims have {kind:'claim', source_passage_id, sentence_index} with NO text
+        # Non-claims have {kind:'non_claim', phrase_id} with NO text
         # Build segments based on steer
         if "shorter" in (steer or "").lower():
             segments = [
@@ -95,7 +95,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    text="Happy to share more."
+                    phrase_id="offer.happy_to_share"
                 ),
             ]
         elif "technical" in (steer or "").lower():
@@ -107,7 +107,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    text="Happy to share more details."
+                    phrase_id="offer.share_details"
                 ),
             ]
         else:
@@ -115,7 +115,7 @@ class FakeReplyAgent(ReplyAgentPort):
             segments = [
                 Segment(
                     kind="non_claim",
-                    text="Thanks!"
+                    phrase_id="opener.thanks"
                 ),
                 Segment(
                     kind="claim",
@@ -124,30 +124,32 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    text="Happy to share more details."
+                    phrase_id="offer.share_details"
                 ),
             ]
         
-        # Construct draft text from segments by inserting claim sentences
-        # (claim_gate will do this validation, but we need text for the draft)
+        # QA R13: Construct draft text from segments (claim_gate will validate and insert text)
+        # For FakeReplyAgent, we need to construct the text ourselves for the draft
         from backend.activities.claim_gate_activity import split_into_sentences
+        from backend.gate.non_claim_set import get_phrase_text
         
         text_parts = []
         for seg in segments:
             if seg.kind == "claim":
                 # Insert the sentence from the passage WITH trailing period
-                # QA R12: Keep period so splitter can split correctly
-                passage = evidence.founder_materials[0].passage  # Simple: use first material
+                passage = evidence.founder_materials[0].passage
                 sentences = split_into_sentences(passage)
                 if seg.sentence_index is not None and 0 <= seg.sentence_index < len(sentences):
-                    # Don't strip punctuation - keep it for proper sentence splitting
                     text_parts.append(sentences[seg.sentence_index])
             else:
-                # Ensure non_claim text ends with punctuation
-                text = seg.text
-                if not text.endswith(('.', '!', '?')):
-                    text = text + '.'
-                text_parts.append(text)
+                # QA R13: Look up phrase by phrase_id
+                if seg.phrase_id:
+                    phrase_text = get_phrase_text(seg.phrase_id)
+                    if phrase_text:
+                        # Ensure phrase text ends with punctuation
+                        if not phrase_text.endswith(('.', '!', '?')):
+                            phrase_text = phrase_text + '.'
+                        text_parts.append(phrase_text)
         
         draft_text = ' '.join(text_parts)
         
