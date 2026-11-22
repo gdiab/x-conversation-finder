@@ -33,8 +33,12 @@ jobs:
         pytest -v --tb=short
     
     - name: Check for secrets in code
+      # Match secret *values*, not names: OpenAI-style keys, literal bearer
+      # tokens (not f-string placeholders), X app bearer tokens, and key/token
+      # variables assigned a non-placeholder string literal.
       run: |
-        if grep -r "X_API_KEY\|OPENAI_API_KEY\|Bearer\|sk-" --include="*.py" --include="*.ts" --include="*.tsx" backend/ frontend/ 2>/dev/null | grep -v "\.env\.example" | grep -v "your_.*_here" | grep -v "# "; then
+        PATTERN='sk-[A-Za-z0-9_-]{20,}|Bearer [A-Za-z0-9._~+/=-]{20,}|AAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]{20,}|(API_KEY|_TOKEN|SECRET)[A-Za-z_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9._~+/=-]{16,}["'"'"']'
+        if grep -rEin "$PATTERN" --include="*.py" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.json" --include="*.yml" --include="*.yaml" --include="*.env*" --exclude-dir=node_modules --exclude-dir=.git . | grep -v "\.env\.example:" | grep -viE "your_.*_here|placeholder|example|dummy|fake|test-key"; then
           echo "Error: Found potential secrets in code"
           exit 1
         else
