@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, cursor/** ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        cd backend
+        pip install -r requirements.txt
+    
+    - name: Run tests
+      run: |
+        cd backend
+        pytest -v --tb=short
+    
+    - name: Check for secrets in code
+      # Match secret *values*, not names: OpenAI-style keys, literal bearer
+      # tokens (not f-string placeholders), X app bearer tokens, and key/token
+      # variables assigned a non-placeholder string literal.
+      run: |
+        PATTERN='sk-[A-Za-z0-9_-]{20,}|Bearer [A-Za-z0-9._~+/=-]{20,}|AAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]{20,}|(API_KEY|_TOKEN|SECRET)[A-Za-z_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9._~+/=-]{16,}["'"'"']'
+        if grep -rEin "$PATTERN" --include="*.py" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.json" --include="*.yml" --include="*.yaml" --include="*.env*" --exclude-dir=node_modules --exclude-dir=.git . | grep -v "\.env\.example:" | grep -viE "your_.*_here|placeholder|example|dummy|fake|test-key"; then
+          echo "Error: Found potential secrets in code"
+          exit 1
+        else
+          echo "No secrets found in code"
+        fi
+  
+  test-integration:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install Python dependencies
+      run: |
+        cd backend
+        pip install -r requirements.txt
+    
+    - name: Install Temporal CLI
+      run: |
+        VERSION="1.1.1"
+        # Use GitHub releases URL instead of temporal.download (which returns 404)
+        curl -L "https://github.com/temporalio/cli/releases/download/v${VERSION}/temporal_cli_${VERSION}_linux_amd64.tar.gz" -o temporal.tar.gz
+        tar -xzf temporal.tar.gz -C /tmp
+        sudo mv /tmp/temporal /usr/local/bin/
+        temporal --version
+    
+    - name: Start Temporal dev server
+      run: |
+        temporal server start-dev &
+        # Wait for server to be ready (poll port 7233)
+        for i in {1..30}; do
+          if timeout 1 bash -c "echo > /dev/tcp/localhost/7233" 2>/dev/null; then
+            echo "Temporal server is ready"
+            break
+          fi
+          if [ $i -eq 30 ]; then
+            echo "Temporal server failed to start within 30s"
+            exit 1
+          fi
+          sleep 1
+        done
+    
+    - name: Run integration tests
+      run: |
+        cd backend
+        pytest -v -m integration --tb=short
+  
+  build-frontend:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Install dependencies
+      run: |
+        cd frontend
+        npm install
+    
+    - name: Build
+      run: |
+        cd frontend
+        npm run build

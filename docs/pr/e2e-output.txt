@@ -1,0 +1,188 @@
+=== X Conversation Finder Full E2E Test ===
+Sat Nov 21 12:22:40 PM UTC 2026
+
+Configuration:
+  ADAPTERS: X=fake, Reply=fake
+  Poll interval: 0 hours (immediate for testing)
+  Follow-up delay: 8s (real durable timer)
+
+✓ Database initialized
+
+Starting Temporal dev server...
+  PID: 6714
+Waiting for Temporal...
+✓ Temporal ready
+
+Starting worker...
+  PID: 6732
+✓ Worker running
+
+Starting API...
+  PID: 6740
+Waiting for API...
+✓ API ready
+
+=== Services Running ===
+  Temporal: PID 6714
+  Worker: PID 6732
+  API: PID 6740
+
+=== E2E Flow Execution ===
+
+[1] Starting TopicWatch...
+{
+    "workflow_id": "watch:e2e-full-test:distributed-systems",
+    "message": "Started watch for topic 'distributed-systems'"
+}
+
+[2] Waiting 10 seconds for poll and Review card creation...
+
+[3] Listing reviews...
+{
+    "cards": [
+        {
+            "workflow_id": "review:e2e-full-test:1001",
+            "post": {
+                "id": "1001",
+                "text": "Struggling with distributed systems reliability. How do you folks handle eventual consistency?",
+                "author": {
+                    "id": "45d0ad722c715986",
+                    "username": "alice_dev",
+                    "name": "Alice Developer",
+                    "followers_count": 5000,
+                    "verified": false
+                },
+                "created_at": "2026-11-21T10:22:41.434107+00:00",
+                "like_count": 3,
+                "reply_count": 2,
+                "repost_count": 11,
+                "quote_count": 1,
+                "conversation_id": "1001",
+                "in_reply_to_user_id": null,
+                "reply_settings": "everyone",
+                "url": "https://x.com/alice_dev/status/1001"
+            },
+            "evidence": {
+                "post_id": "1001",
+                "matched_topic": "distributed-systems",
+                "why_it_fits": "Post mentions 'distributed-systems' and discusses relevant themes.",
+                "confidence_score": 0.7275,
+                "confidence_inputs": {
+                    "author_reach": 0.025,
+                    "freshness": 1.0,
+                    "has_founder_material": 1.0,
+                    "lookup_succeeded": 1.0,
+                    "replies_open": 1.0,
+                    "topic_match_strength": 0.3
+                },
+                "founder_materials": [
+                    {
+                        "source": "product_brief.md",
+                        "passage": "Our product helps developers build reliable systems with automatic failover and strong consistency guarantees.",
+                        "relevance": "Directly relevant to the post's discussion of reliability",
+                        "passage_id": "passage_0"
+                    }
+                ],
+                "draft": {
+                    "text": "Thanks for raising this point about distributed-systems. Our product helps developers build reliable systems. Would be happy to share more details if useful.",
+                    "segments": [
+                        {
+                            "text": "Thanks for raising this point about distributed-systems.",
+                            "kind": "non_claim",
+                            "source_passage_id": null,
+                            "quote": null
+                        },
+                        {
+                            "text": "Our product helps developers build reliable systems.",
+                            "kind": "claim",
+                            "source_passage_id": "passage_0",
+                            "quote": "product helps developers build reliable systems"
+                        },
+                        {
+                            "text": "Would be happy to share more details if useful.",
+                            "kind": "non_claim",
+                            "source_passage_id": null,
+                            "quote": null
+                        }
+                    ],
+                    "claim_gate": {
+                        "passed": true,
+                        "segments": [
+                            {
+                                "text": "Thanks for raising this point about distributed-systems.",
+                                "kind": "non_claim",
+                                "source_passage_id": null,
+                                "quote": null
+                            },
+                            {
+                                "text": "Our product helps developers build reliable systems.",
+                                "kind": "claim",
+                                "source_passage_id": "passage_0",
+                                "quote": "product helps developers build reliable systems"
+                            },
+                            {
+                                "text": "Would be happy to share more details if useful.",
+                                "kind": "non_claim",
+                                "source_passage_id": null,
+                                "quote": null
+                            }
+                        ],
+                        "failed_sentences": [],
+                        "reasoning": "All 3 sentences verified and mapped to segments",
+                        "claims": [],
+                        "failed_claims": []
+                    },
+                    "steers_applied": [],
+                    "token_count": 23,
+                    "model_used": "fake-model",
+                    "input_tokens": 152,
+                    "output_tokens": 39
+                },
+
+✓ Found Review workflow: review:e2e-full-test:1001
+✓ Card status verified: pending
+
+[4] Approving review...
+{
+    "message": "Approved"
+}
+✓ Review approved
+
+[5] Confirming posted reply...
+{
+    "message": "Confirmed",
+    "result": "Confirmed reply 9999"
+}
+✓ Reply confirmed
+
+[6] Waiting 18s for follow-up timer (8s) + check_followup + status update...
+
+[7] Checking final card status...
+Status: followup_due
+Workflow: review:e2e-full-test:1001
+Draft: Thanks for raising this point about distributed-systems. Our product helps devel...
+Posted URL: https://x.com/founder/status/12345
+Reply Post ID: 9999
+Followup replies: 2
+
+✓ Final status verified: followup_due
+✓ check_followup executed (2 replies fetched)
+
+=== E2E Test Complete ===
+
+All assertions passed:
+  - TopicWatch started and polled
+  - Review child workflow spawned naturally
+  - Review card created with status 'pending'
+  - Review approved with posted URL
+  - Posted reply confirmed
+  - Follow-up timer fired (8s - real durable timer)
+  - check_followup activity executed (2 replies)
+  - Final status: followup_due
+
+All operations used fake adapters (no real X API calls)
+
+Sat Nov 21 12:23:18 PM UTC 2026
+
+=== Cleanup ===
+✓ Services stopped
