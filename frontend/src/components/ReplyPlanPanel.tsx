@@ -58,12 +58,12 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
             <span style={{ color: '#666' }}> — {plan.mention_product_reason}</span>
           )}
         </div>
-        {plan.mention_product === false && !rejected && edited && (
+        {plan.mention_product === false && !rejected && edited && evidence.draft && (
           <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
             The drafted reply had no product claim; the text below has since been edited (see the edit gate results).
           </div>
         )}
-        {plan.mention_product === false && !rejected && !edited && (
+        {plan.mention_product === false && !rejected && !edited && evidence.draft && !evidence.reply_plan_skip_rule && (
           <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
             No product claim: the draft below uses fixed phrases only.
             {(plan.reply_type === 'answer_question' || plan.reply_type === 'share_experience') && (

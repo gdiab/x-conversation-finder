@@ -887,11 +887,22 @@ def test_redact_post_text_copies_covers_issue_4_and_5_fields():
 
     evidence = {
         "why_it_fits": "The post says 'how do you track agents?'",
+        "founder_materials": [{"source": "b", "passage": "Our ledger records work.", "relevance": "They ask 'how do you track agents?'"}],
         "reply_fit": {"brief_problem_span": "track agents", "rejected_span": "agents?", "post_kind": "question"},
-        "reply_plan": {"target_point": "how do you track agents?", "reply_type": "answer_question"},
+        "reply_plan": {
+            "target_point": "how do you track agents?",
+            "reply_type": "answer_question",
+            "mention_product_reason": "They wrote 'how do you track agents?'",
+        },
         "matched_topic": "agents",
     }
     out = redact_post_text_copies(evidence)
+    assert out["founder_materials"][0]["relevance"] == POST_TEXT_REMOVED
+    assert out["founder_materials"][0]["passage"] == "Our ledger records work."
+    assert out["reply_plan"]["mention_product_reason"] == POST_TEXT_REMOVED
+    assert "track agents" not in str(out)
+    bogus = redact_post_text_copies({"reply_plan": {"reply_type": "how do you track agents?"}})
+    assert bogus["reply_plan"]["reply_type"] == POST_TEXT_REMOVED
     assert out["why_it_fits"] == POST_TEXT_REMOVED
     assert out["reply_fit"]["brief_problem_span"] == POST_TEXT_REMOVED
     assert out["reply_fit"]["rejected_span"] == POST_TEXT_REMOVED

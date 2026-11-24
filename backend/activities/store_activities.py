@@ -18,15 +18,25 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
     """Return a copy of a card's evidence dict with every copy of the post text removed.
 
     Used for the stored card (delete_post_text) and for the Review workflow's
-    get_card query, so both views redact the same fields:
-    - why_it_fits, which quotes the post;
+    get_card query, so both views redact the same fields. Every free-text
+    field a model wrote after reading the post can quote it:
+    - why_it_fits, and each founder material's relevance note;
     - issue #4: reply_fit.brief_problem_span and reply_fit.rejected_span;
-    - issue #5: reply_plan.target_point.
+    - issue #5: reply_plan.target_point, reply_plan.mention_product_reason,
+      and reply_plan.reply_type when it is not one of the known values.
     Pure and deterministic (the workflow calls it from a query).
     """
+    from backend.models.reply_plan import REPLY_TYPES
+
     evidence_data = dict(evidence_data or {})
     if evidence_data.get("why_it_fits"):
         evidence_data["why_it_fits"] = POST_TEXT_REMOVED
+    materials = evidence_data.get("founder_materials")
+    if isinstance(materials, list):
+        evidence_data["founder_materials"] = [
+            {**m, "relevance": POST_TEXT_REMOVED} if isinstance(m, dict) and m.get("relevance") else m
+            for m in materials
+        ]
     reply_fit = evidence_data.get("reply_fit")
     if isinstance(reply_fit, dict):
         evidence_data["reply_fit"] = {
@@ -38,8 +48,14 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
             },
         }
     reply_plan = evidence_data.get("reply_plan")
-    if isinstance(reply_plan, dict) and reply_plan.get("target_point"):
-        evidence_data["reply_plan"] = {**reply_plan, "target_point": POST_TEXT_REMOVED}
+    if isinstance(reply_plan, dict):
+        redacted = dict(reply_plan)
+        for key in ("target_point", "mention_product_reason"):
+            if redacted.get(key):
+                redacted[key] = POST_TEXT_REMOVED
+        if redacted.get("reply_type") and redacted["reply_type"] not in REPLY_TYPES:
+            redacted["reply_type"] = POST_TEXT_REMOVED
+        evidence_data["reply_plan"] = redacted
     return evidence_data
 from backend.database import get_db, ReviewCardDB
 

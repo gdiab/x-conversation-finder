@@ -179,9 +179,10 @@ def test_question_check_only_applies_to_answer_question():
 
 # ---------- other fields ----------
 
-def test_unknown_reply_type_fails():
-    errors = validate_reply_plan(plan(reply_type="pitch_product"), POST)
+def test_unknown_reply_type_fails_without_echoing_model_text():
+    errors = validate_reply_plan(plan(reply_type="How do you folks handle poison messages?"), POST)
     assert any("reply_type must be one of" in e for e in errors)
+    assert not any("poison" in e for e in errors)
 
 
 def test_non_boolean_mention_product_fails():

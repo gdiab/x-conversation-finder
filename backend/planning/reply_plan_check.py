@@ -81,9 +81,9 @@ def validate_reply_plan(plan: ReplyPlan, post_text: str) -> List[str]:
     errors: List[str] = []
 
     if plan.reply_type not in REPLY_TYPES:
-        errors.append(
-            f"reply_type must be one of {', '.join(REPLY_TYPES)} (got {plan.reply_type!r})"
-        )
+        # The model's value is not echoed: errors are stored on the card and
+        # in skip reasons, and model text can quote the post (removal duty).
+        errors.append(f"reply_type must be one of {', '.join(REPLY_TYPES)}")
 
     target = plan.target_point if isinstance(plan.target_point, str) else ""
     target_found = False
