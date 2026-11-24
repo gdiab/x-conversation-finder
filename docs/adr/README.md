@@ -9,7 +9,7 @@ All six are **Accepted** (2026-11-20, George: "looks good to me"). The GTM SaaS 
 | [0003](0003-agent-kit-behind-a-port.md) | The Agent Kit sits behind a port, and plain temporalio owns the spine | none |
 | [0004](0004-founder-posts-by-hand.md) | The founder posts by hand and approves every draft | none |
 | [0005](0005-x-access-pay-per-use-polling.md) | X access: pay-per-use, spend limit, polling | none |
-| [0006](0006-evidence-claim-gate-and-baseline-eval.md) | Evidence trail, claim gate, computed confidence, baseline eval | none |
+| [0006](0006-evidence-claim-gate-and-baseline-eval.md) | Evidence trail, claim gate, computed confidence, baseline eval | Amendment 2026-11-24 (written drafts): 2 open questions at its end |
 
 ## Decisions recorded (2026-11-20, George)
 | Q | Decision |
