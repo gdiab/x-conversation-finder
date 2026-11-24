@@ -123,3 +123,41 @@ Drafts are assembled, not written. A claim segment references a founder passage 
 - Edited sentence exactly matches gated segment (normalized, same type) → PASSES (edit path: reuse)
 
 **Why:** This design prevents circumvention through paraphrase (order swap, dropped qualifiers, modal changes) and opinion/question laundering, and ensures every product assertion is a verbatim quote from founder material, checked deterministically by code.
+
+## Amendment 2026-11-24: Written drafts, product claims checked against the brief
+
+**Status:** Proposed (2026-11-24). Supersedes the 2026-11-21 amendment's "drafts are assembled, not written" rule for the model-draft path once accepted. Everything else in that amendment stays.
+
+**Context:** The first live runs (2 watches, 20 posts, 2026-11-23) showed the cost the 2026-11-21 amendment predicted ("v1 replies are templated by design"). Every draft was a fixed opener, one verbatim brief sentence and a fixed question, for example "Thanks for sharing. <brief sentence>. What problem are you solving?" The drafts cannot react to what the post says, so they read as a product pitch dropped into a thread. George judged none of the 20 postable as written. The assembled format removed invented claims, but it also removed the conversation, which is the reason to reply at all.
+
+The 2026-11-21 amendment deferred two options to allow more than verbatim quotes: an independent verifier call per sentence, and scoping the hard gate to product-referencing sentences with founder review as the backstop. This amendment takes up both.
+
+**Decision:**
+
+1. **The model writes the reply as free text**: at most 3 sentences, at most 280 characters, at most 1 product claim (unchanged limits). It also returns, for each sentence that says anything about the product, the id of the brief sentence(s) that support it. That list is a hint for the checker, never a verdict.
+2. **Code decides which sentences are product claims, conservatively.** A sentence is checked as a product claim if either:
+   - a deterministic trigger fires: the product name or a declared alias, first-person-plural words about our side ("we", "our", "us", "ours"), any number, or a feature term listed in the brief; or
+   - the independent checker (step 3) classifies it as being about the product.
+   Triggers can only add sentences to the checked set; nothing the drafting model says can remove one. This answers ADR-0079's ban on self-attestation: the drafting model never decides what gets checked.
+3. **An independent checker call verifies each product sentence against the brief.** It is a separate model call with its own prompt. It sees only the sentence, the brief sentences, and the product name, not the post and not the drafting prompt. For each sentence it returns `supported` with the brief sentence ids that entail it, or `unsupported` with a reason. Code then confirms the cited ids exist and that each `supported` sentence cites at least one. Paraphrase is allowed only where the checker finds entailment; added specifics (numbers, integrations, customers, comparisons) that the cited sentences do not state are `unsupported`.
+4. **Non-product sentences are not gated against the brief.** They respond to the post: agreement, a question, an observation about the poster's point. Founder review is the backstop for them, as the 2026-11-21 amendment allowed. They may not contain numbers or comparisons (trigger in step 2 sends those to the checker).
+5. **Failure handling is unchanged:** one redraft with the checker's reasons as the steer, then skip as "not enough evidence" with reasons recorded. Founder edits run through the same steps 2-4; a failing edit still needs `post_anyway`, which is recorded.
+6. **The evidence card shows the check.** For each sentence: product claim or not, why it was checked (which trigger or the checker), verdict, and the supporting brief sentences. This replaces the per-segment display.
+7. **Both draft modes stay behind a setting** (`DRAFT_MODE=assembled|written`) until the switch criteria below pass, so the baseline eval can compare them.
+
+**Switch criteria (must pass before `written` becomes the default):**
+- Every must-REJECT case in the 2026-11-21 amendment's edit-path list is rejected by steps 2-4.
+- A new adversarial set is rejected: paraphrases that add a qualifier, drop a qualifier, change a modal ("can" to "will"), swap a comparison, attribute a brief claim to a different feature, or hide a claim in a question ("Did you know ours does X?").
+- A blind comparison of `assembled` against `written` on the same stored evidence (ADR-0006 eval), scored on would-the-founder-reply and traceability.
+
+**Alternatives considered:**
+- **Keep assembled drafts and improve the phrase list.** Rejected: more phrases cannot make a draft respond to the post's specific point.
+- **Lexical support checks over paraphrase.** Still rejected, for the reasons in the 2026-11-21 amendment.
+- **Let the drafting model label its own product sentences.** Rejected: self-attestation (ADR-0079). The label is only a hint.
+- **Use the same model call to draft and to check.** Rejected: the checker must not see the post or the drafting goal, so it has no reason to be lenient.
+
+**Consequences:**
+- Replies can engage with the post. The gate's guarantee changes from "every product claim is a verbatim brief sentence" to "every product claim was judged entailed by cited brief sentences by an independent call, and code checked the citations". This is weaker than verbatim and is the price of natural replies; the adversarial set measures it.
+- Each draft costs one more model call (the checker), under the ADR-0005 daily budget.
+- The brief no longer has to be written as standalone, claim-ready sentences, though short factual sentences still check more reliably.
+- **Open questions for George:** (a) whether the checker should use a different model or provider from the drafter; (b) whether the product-name alias list lives in the brief or in watch settings.
