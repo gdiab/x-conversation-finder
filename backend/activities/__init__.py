@@ -12,6 +12,8 @@ from .reply_activities import (
     ReplyActivities,
     ResearchPostInput,
     DraftReplyInput,
+    PlanReplyInput,
+    PlanReplyResult,
 )
 from .store_activities import (
     store_card,
@@ -38,6 +40,8 @@ __all__ = [
     "ReplyActivities",
     "ResearchPostInput",
     "DraftReplyInput",
+    "PlanReplyInput",
+    "PlanReplyResult",
     "store_card",
     "update_card",
     "get_card",

@@ -33,6 +33,7 @@ async def test_review_workflow_approve(make_review_input, x_activities, reply_ac
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -92,6 +93,7 @@ async def test_review_workflow_skip(make_review_input, x_activities, reply_activ
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -133,6 +135,7 @@ async def test_review_workflow_nudge(make_review_input, x_activities, reply_acti
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -195,6 +198,7 @@ async def test_review_workflow_timeout(make_review_input, x_activities, reply_ac
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -230,6 +234,7 @@ async def test_review_workflow_low_confidence(make_review_input, x_activities, r
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -265,6 +270,7 @@ async def test_review_workflow_approved_not_confirmed(make_review_input, x_activ
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -310,6 +316,7 @@ async def test_review_workflow_confirm_posted_invalid_url(make_review_input, x_a
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -367,6 +374,7 @@ async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_ac
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -421,8 +429,22 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
     from backend.models import Evidence, FounderMaterial, Claim, ClaimGateResult, Draft, ReplyFit
     from typing import Optional
     
-    class BadClaimReplyAgent(ReplyAgentPort):
+    class BadClaimReplyAgent(FakeReplyAgent):  # issue #5: inherits plan()
         """Fake agent that generates unsupported claims for testing."""
+        
+        async def plan(self, post, evidence, idempotency_key, feedback=None):
+            # issue #5: its drafts carry no claim segment, so plan no product
+            # mention, as an observation (an answer without a mention would be
+            # skipped by needs_written_drafts); this keeps the test about the
+            # claim gate alone.
+            from dataclasses import replace
+            base = await super().plan(post, evidence, idempotency_key, feedback)
+            return replace(
+                base,
+                reply_type="add_observation",
+                target_point="Struggling with distributed systems reliability.",
+                mention_product=False,
+            )
         
         async def research(self, post, topic, product_brief, idempotency_key) -> Evidence:
             """Generate fake evidence."""
@@ -450,7 +472,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             )
             return evidence
         
-        async def draft(self, evidence, steer=None, idempotency_key=None) -> Evidence:
+        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None) -> Evidence:
             """Generate draft with invalid segment structure (has text field on non_claim)."""
             from backend.models import Segment
             
@@ -497,6 +519,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             workflows=[ReviewWorkflow],
             activities=[
                 bad_reply_activities.research_post,
+                bad_reply_activities.plan_reply,
                 bad_reply_activities.draft_reply,
                 claim_gate,  # Use REAL claim gate (R3-B2)
                 store_card,
@@ -555,7 +578,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
     from backend.models import Evidence, FounderMaterial, Segment, ClaimGateResult, Draft, ReplyFit
     from typing import Optional
     
-    class AlwaysFailingClaimAgent(ReplyAgentPort):
+    class AlwaysFailingClaimAgent(FakeReplyAgent):  # issue #5: inherits plan()
         """Agent that generates drafts with valid composition that fail the gate."""
         
         def __init__(self):
@@ -587,7 +610,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             )
             return evidence
         
-        async def draft(self, evidence, steer=None, idempotency_key=None) -> Evidence:
+        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None) -> Evidence:
             """
             Generate draft with valid composition that fails gate at insertion.
             
@@ -637,6 +660,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             workflows=[ReviewWorkflow],
             activities=[
                 failing_activities.research_post,
+                failing_activities.plan_reply,
                 failing_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -727,6 +751,7 @@ async def test_review_workflow_confirm_posted_with_post_1005(x_activities, reply
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,

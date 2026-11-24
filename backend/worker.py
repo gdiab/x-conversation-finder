@@ -93,6 +93,7 @@ async def main():
             x_activities.check_followup,
             x_activities.notify,
             reply_activities.research_post,
+            reply_activities.plan_reply,
             reply_activities.draft_reply,
             # Standalone activity functions
             store_card,

@@ -412,13 +412,14 @@ def test_broadcast_post_with_a_quoted_question_is_not_skipped_as_broadcast():
     assert evidence.confidence_score < question.confidence_score - 0.3
 
 
-# --- workflow: a skipped post never reaches draft_reply ----------------------
+# --- workflow: a skipped post never reaches plan_reply or draft_reply --------
 
 class CountingFakeAgent(FakeReplyAgent):
     def __init__(self, fit: ReplyFit, passage: str = MATERIALS[0]["passage"]):
         self.fit = fit
         self.passage = passage
         self.draft_calls = 0
+        self.plan_calls = 0  # issue #5: the plan step runs after these skip rules
 
     async def research(self, post, topic, product_brief, idempotency_key):
         evidence = await super().research(post, topic, product_brief, idempotency_key)
@@ -429,9 +430,13 @@ class CountingFakeAgent(FakeReplyAgent):
         ]
         return evidence
 
-    async def draft(self, evidence, steer=None, idempotency_key=None):
+    async def plan(self, post, evidence, idempotency_key, feedback=None):
+        self.plan_calls += 1
+        return await super().plan(post, evidence, idempotency_key, feedback)
+
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
         self.draft_calls += 1
-        return await super().draft(evidence, steer, idempotency_key)
+        return await super().draft(evidence, steer, idempotency_key, plan)
 
 
 def _fresh_post(text: str) -> Post:
@@ -454,6 +459,7 @@ async def _run_review(agent, make_review_input, x_activities, post, suffix):
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -485,6 +491,7 @@ async def test_skipped_post_makes_no_draft_call(make_review_input, x_activities)
     result, card = await _run_review(agent, make_review_input, x_activities, post, "vendor")
 
     assert result == "skipped"
+    assert agent.plan_calls == 0
     assert agent.draft_calls == 0
     assert card["status"] == "skipped"
     assert card["skip_reason"].startswith("Vendor post")
@@ -513,6 +520,7 @@ async def test_low_confidence_skip_records_reason_and_makes_no_draft_call(make_r
     result, card = await _run_review(agent, make_review_input, x_activities, post, "lowconf")
 
     assert result == "skipped"
+    assert agent.plan_calls == 0
     assert agent.draft_calls == 0
     assert card["skip_reason"].startswith("Low confidence")
     assert card["evidence"]["reply_fit"]["skip_rule"] is None
@@ -536,6 +544,7 @@ async def test_passing_post_is_drafted(make_review_input, x_activities):
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,
@@ -552,7 +561,9 @@ async def test_passing_post_is_drafted(make_review_input, x_activities):
             await env.sleep(1)
             card = await handle.query("get_card")
             assert card["status"] == "pending"
+            assert agent.plan_calls == 1
             assert agent.draft_calls == 1
+            assert card["evidence"]["reply_plan"]["reply_type"] == "answer_question"
             assert card["evidence"]["confidence_score"] >= CONFIDENCE_THRESHOLD
             assert card["evidence"]["reply_fit"]["span_check"] == "ok"
             await handle.signal("skip", args=["done", str(uuid.uuid4())])
@@ -609,13 +620,18 @@ async def test_legacy_research_result_without_reply_fit_is_not_drafted(make_revi
         draft_calls.append(1)
         raise RuntimeError("draft_reply must not run")
 
+    @temporal_activity.defn(name="plan_reply")
+    async def plan_reply(input):
+        draft_calls.append("plan")
+        raise RuntimeError("plan_reply must not run")
+
     post = _fresh_post("Our agent toolkit is 40% off this week only. Link below.")
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue="test",
             workflows=[ReviewWorkflow],
-            activities=[legacy_research_post, draft_reply, claim_gate, store_card, update_card,
+            activities=[legacy_research_post, plan_reply, draft_reply, claim_gate, store_card, update_card,
                         x_activities.lookup_post, x_activities.check_followup],
         ):
             handle = await env.client.start_workflow(

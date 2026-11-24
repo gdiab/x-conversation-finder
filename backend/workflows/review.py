@@ -17,21 +17,37 @@ import re
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 # Constants
 SECONDS_PER_DAY = 86400
 QUICK_ACTIVITY_TIMEOUT_SEC = 10
+
+# --- Reply plan (issue #5) ---
+# Patch id guarding the plan step. Review workflows started before the step
+# existed replay without it: workflow.patched() is False for their history.
+REPLY_PLAN_PATCH_ID = "reply-plan-step-v1"
+# The first plan request plus one re-request; then the post is skipped.
+REPLY_PLAN_MAX_ATTEMPTS = 2
+# Patch id: a 404 on the founder's reply URL no longer deletes the target
+# post's text (found in the issue #5 review).
+KEEP_TARGET_ON_REPLY_404_PATCH_ID = "keep-target-on-reply-404-v1"
+# --- end reply plan ---
 
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
         ReviewCard,
         Post,
         Evidence,
+        ClaimGateResult,
+        ReplyPlan,
         SentenceGateResult,
     )
     from backend.activities import (
         ResearchPostInput,
         DraftReplyInput,
+        PlanReplyInput,
+        PlanReplyResult,
         StoreCardInput,
         UpdateCardInput,
         LookupPostInput,
@@ -43,7 +59,12 @@ with workflow.unsafe.imports_passed_through():
         EditedTextGateInput,
         verify_edited_text,
     )
-    from backend.activities.store_activities import store_card, update_card
+    from backend.activities.store_activities import (
+        store_card,
+        update_card,
+        POST_TEXT_REMOVED,
+        redact_post_text_copies,
+    )
     from backend.config.confidence import CONFIDENCE_THRESHOLD
 
 
@@ -100,7 +121,8 @@ class ReviewWorkflow:
     
     Steps:
     1. Research the post
-    2. Draft a reply
+    1b. Plan the reply (issue #5): reply type, target point, product mention
+    2. Draft a reply (steered by the plan)
     3. Run claim gate
     4. Wait for human (approve/skip/edit/nudge)
     5. If approved, wait for confirm_posted with reply URL
@@ -137,6 +159,12 @@ class ReviewWorkflow:
         self._edit_in_flight_count = 0
         # QA R13: Monotonic edit sequence to prevent stale card writes
         self._edit_seq = 0
+        # issue #5: set once delete_post_text ran, so get_card stops returning
+        # the post text and the reply plan's copied target_point
+        self._post_text_removed = False
+        # issue #5: nudges and edits change the draft across activity awaits;
+        # validators use this to serialize them (and to block approve)
+        self._nudge_in_flight_count = 0
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -212,6 +240,74 @@ class ReviewWorkflow:
         
         return evidence
 
+    async def _plan_reply(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
+        """
+        Plan the reply before drafting (issue #5). Returns None if the post is skipped.
+        
+        The plan_reply activity asks the reply agent for a plan and validates it
+        in code (target_point is a substring of the post; answer_question needs a
+        question). An invalid plan is re-requested once with the errors as
+        feedback; a second invalid plan skips the post with the reasons recorded.
+        """
+        input = self.input
+        result: Optional[PlanReplyResult] = None
+        feedback: Optional[List[str]] = None
+        attempts = 0
+        
+        while attempts < REPLY_PLAN_MAX_ATTEMPTS:
+            attempts += 1
+            result = await workflow.execute_activity(
+                "plan_reply",
+                PlanReplyInput(
+                    post=input.post,
+                    evidence=evidence,
+                    idempotency_key=f"{input.post.id}:plan:attempt{attempts}",
+                    feedback=feedback,
+                ),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+                result_type=PlanReplyResult,
+            )
+            if not result.errors:
+                break
+            workflow.logger.warning(f"Reply plan invalid on attempt {attempts}: {result.errors}")
+            feedback = list(result.errors)
+        
+        evidence.reply_plan = result.plan
+        evidence.reply_plan_errors = list(result.errors)
+        evidence.reply_plan_attempts = attempts
+        
+        if not result.errors and not result.skip_reason:
+            workflow.logger.info(
+                f"Reply plan: {result.plan.reply_type}, mention_product={result.plan.mention_product}"
+            )
+            return evidence
+        
+        if result.errors:
+            skip_reason = f"Reply plan invalid after {attempts} attempts: " + "; ".join(result.errors[:3])
+            store_key = f"{workflow_id}:store:plan_invalid"
+        else:
+            # A valid plan that a plan-stage skip rule rejects (needs_written_drafts);
+            # the verdict comes from the plan_reply activity result.
+            evidence.reply_plan_skip_rule = result.skip_rule
+            skip_reason = result.skip_reason
+            store_key = f"{workflow_id}:store:plan_skip"
+        
+        self.status = "skipped"
+        self.skipped = True
+        self.skip_reason = skip_reason
+        evidence.skip_reason = skip_reason
+        self.evidence = evidence
+        workflow.logger.info(f"Skipped: {self.skip_reason}")
+        
+        card = self._build_card(workflow_id, input.post, created_at)
+        await workflow.execute_activity(
+            store_card,
+            StoreCardInput(card=card, idempotency_key=store_key),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
+        )
+        return None
+
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
         """
         Draft reply with claim gate validation retries. Returns None if validation fails.
@@ -224,16 +320,18 @@ class ReviewWorkflow:
         input = self.input
         claim_gate_attempts = 0
         max_claim_gate_attempts = input.config.claim_gate_max_attempts
-        last_gate_result = None
+        # (sentence, reason) pairs from the last failed attempt: claim-gate
+        # failures, preceded by reply-plan failures (issue #5) when there is a plan
+        last_failures: List[tuple] = []
         
         while claim_gate_attempts < max_claim_gate_attempts:
             claim_gate_attempts += 1
             
-            # Build steer from last gate result's per-sentence failures
+            # Build steer from the last attempt's per-sentence failures
             steer = None
-            if claim_gate_attempts > 1 and last_gate_result and last_gate_result.failed_sentences:
+            if claim_gate_attempts > 1 and last_failures:
                 reasons = []
-                for sentence, reason in last_gate_result.failed_sentences[:3]:  # Limit to first 3 for brevity
+                for sentence, reason in last_failures[:3]:  # Limit to first 3 for brevity
                     reasons.append(f"'{sentence[:50]}...': {reason}")
                 steer = f"Previous draft failed claim gate. Fix these issues: {'; '.join(reasons)}"
             
@@ -244,11 +342,28 @@ class ReviewWorkflow:
                     evidence=evidence,
                     steer=steer,
                     idempotency_key=f"{input.post.id}:draft:attempt{claim_gate_attempts}",
+                    plan=evidence.reply_plan,
                 ),
                 start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
                 retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
                 result_type=Evidence,
             )
+            
+            # issue #5: does the draft follow the reply plan? The verdict comes
+            # from the draft_reply activity result (draft.plan_conformance_failures,
+            # kept separate from the claim-gate verdict) and is only consulted
+            # when there is a plan, so pre-plan workflows replay as before. A
+            # non-conforming draft counts as a failed attempt: one redraft with
+            # the reasons as the steer, then skip. Plan reasons come first so
+            # the steer and skip reason (cut to 3 entries) always carry them.
+            plan_failures: List[tuple] = []
+            if evidence.reply_plan is not None:
+                reasons = (
+                    list(evidence.draft.plan_conformance_failures)
+                    if evidence.draft
+                    else ["the draft is missing"]
+                )
+                plan_failures = [("[reply plan]", r) for r in reasons]
             
             # Run deterministic claim gate with segments
             if evidence.draft and evidence.draft.segments:
@@ -269,27 +384,43 @@ class ReviewWorkflow:
                     evidence.draft.text = claim_gate_result.draft_text
                 # Update segments with processed versions (text filled in)
                 evidence.draft.segments = claim_gate_result.segments
-                last_gate_result = claim_gate_result
+                last_failures = plan_failures + list(claim_gate_result.failed_sentences)
                 
-                if claim_gate_result.passed:
+                if claim_gate_result.passed and not plan_failures:
                     workflow.logger.info(f"Claim gate passed on attempt {claim_gate_attempts}")
                     return evidence
                 else:
                     workflow.logger.warning(
-                        f"Claim gate failed on attempt {claim_gate_attempts}: "
-                        f"{len(claim_gate_result.failed_sentences)} failed sentences"
+                        f"Draft failed on attempt {claim_gate_attempts}: "
+                        f"{len(claim_gate_result.failed_sentences)} failed sentences, "
+                        f"{len(plan_failures)} reply-plan failures"
                     )
+            elif plan_failures:
+                # issue #5: an empty draft under a plan is redrafted, not ended.
+                # The claim gate did not run; say so instead of keeping the
+                # adapter's placeholder result.
+                last_failures = plan_failures
+                if evidence.draft:
+                    evidence.draft.claim_gate = ClaimGateResult(
+                        passed=False,
+                        segments=[],
+                        failed_sentences=[],
+                        reasoning="Claim gate not run: the draft has no segments",
+                    )
+                workflow.logger.warning(
+                    f"Draft does not follow the reply plan on attempt {claim_gate_attempts}: {plan_failures}"
+                )
             else:
                 workflow.logger.error("No draft or segments generated")
                 break
         
-        # Skip if claim gate failed after retries
+        # Skip if the draft failed after retries
         # Record the per-sentence reasons from the last attempt
         skip_reason = "Not enough evidence - claim gate failed after regeneration"
-        if last_gate_result and last_gate_result.failed_sentences:
+        if last_failures:
             failure_summary = "; ".join(
                 f"{sentence[:30]}... ({reason})"
-                for sentence, reason in last_gate_result.failed_sentences[:3]
+                for sentence, reason in last_failures[:3]
             )
             skip_reason = f"Not enough evidence: {failure_summary}"
         
@@ -361,6 +492,13 @@ class ReviewWorkflow:
         evidence = await self._research_post(workflow_id, created_at)
         if evidence is None:
             return "skipped"
+        
+        # Step 1b: Plan the reply (issue #5). Guarded by a patch so Review
+        # workflows started before this step replay unchanged.
+        if workflow.patched(REPLY_PLAN_PATCH_ID):
+            evidence = await self._plan_reply(evidence, workflow_id, created_at)
+            if evidence is None:
+                return "skipped"
         
         # Step 2: Draft (with claim gate retry logic)
         evidence = await self._draft_and_validate(evidence, workflow_id, created_at)
@@ -528,6 +666,10 @@ class ReviewWorkflow:
         if self._edit_in_flight_count > 0:
             raise ValueError("Cannot approve while edit gate is in progress. Retry after edit completes.")
         
+        # issue #5: likewise, do not approve a draft a nudge is about to replace
+        if self._nudge_in_flight_count > 0:
+            raise ValueError("Cannot approve while a nudge is in progress. Retry after it completes.")
+        
         # QA R12: Hash check removed (dead code).
         # The edit Update atomically sets both draft.text and edited_text_hash from the same
         # new_text. There is no path to tamper with draft.text after gating without calling
@@ -581,7 +723,17 @@ class ReviewWorkflow:
         workflow.logger.info(f"Received confirm_posted: {reply_url}")
         
         self._confirm_requests.add(client_request_id)
-        
+        try:
+            return await self._run_confirm_posted(reply_url, client_request_id)
+        except Exception:
+            # A failed confirmation is not "done": a retry with the same request
+            # id must check again, not report "Already confirmed" (issue #5
+            # review; these failures used to leave the update unresolved).
+            self._confirm_requests.discard(client_request_id)
+            raise
+    
+    async def _run_confirm_posted(self, reply_url: str, client_request_id: str) -> str:
+        """Body of the confirm_posted update."""
         # Parse reply post ID from URL (already validated by validator)
         match = re.search(r'/status/(\d+)', reply_url)
         reply_post_id = match.group(1)
@@ -599,29 +751,42 @@ class ReviewWorkflow:
         )
         
         if not reply_post:
-            # B8: 404 handling - delete post text per X API compliance
-            workflow.logger.warning(f"Reply post {reply_post_id} not found (404), deleting post text")
+            # A missing *reply* says nothing about the target post, so its text
+            # stays (the removal duty, ADR-0006/0086, is about a 404 on the
+            # target itself). Histories recorded before this fix scheduled
+            # delete_post_text here; the patch keeps them replaying.
+            if not workflow.patched(KEEP_TARGET_ON_REPLY_404_PATCH_ID):
+                workflow.logger.warning(f"Reply post {reply_post_id} not found (404), deleting post text")
+                
+                from backend.activities import DeletePostTextInput, delete_post_text
+                
+                await workflow.execute_activity(
+                    delete_post_text,
+                    DeletePostTextInput(
+                        workflow_id=workflow.info().workflow_id,
+                        idempotency_key=f"{workflow.info().workflow_id}:delete_text:{reply_post_id}",
+                    ),
+                    start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+                )
+                self._post_text_removed = True
+            else:
+                workflow.logger.warning(f"Reply post {reply_post_id} not found (404)")
             
-            from backend.activities import DeletePostTextInput, delete_post_text
-            
-            await workflow.execute_activity(
-                delete_post_text,
-                DeletePostTextInput(
-                    workflow_id=workflow.info().workflow_id,
-                    idempotency_key=f"{workflow.info().workflow_id}:delete_text:{reply_post_id}",
-                ),
-                start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+            # A plain ValueError raised in an update handler body (not a
+            # validator) fails the workflow task and retries it forever, so the
+            # update never resolves. ApplicationError fails just the update.
+            raise ApplicationError(
+                f"Reply post {reply_post_id} not found (deleted or 404)", non_retryable=True
             )
-            
-            raise ValueError(f"Reply post {reply_post_id} not found (deleted or 404)")
         
         # Verify it's a reply to our target post
         # For real X API, check in_reply_to_user_id or conversation_id
         # For fake client, check conversation_id matches
         if reply_post.conversation_id != self.evidence.post_id:
-            raise ValueError(
+            raise ApplicationError(
                 f"Post {reply_post_id} (conversation_id={reply_post.conversation_id}) "
-                f"is not a reply to target post {self.evidence.post_id}"
+                f"is not a reply to target post {self.evidence.post_id}",
+                non_retryable=True,
             )
         
         workflow.logger.info(f"Confirmed reply {reply_post_id} is valid")
@@ -778,6 +943,11 @@ class ReviewWorkflow:
         if not self.evidence or not self.evidence.draft:
             raise ValueError("No draft to edit")
         
+        # issue #5: a nudge in flight would overwrite this edit (or be
+        # overwritten by it) across its activity awaits
+        if self._nudge_in_flight_count > 0:
+            raise ValueError("Cannot edit while a nudge is in progress. Retry after it completes.")
+        
         if not new_text or not new_text.strip():
             raise ValueError("New text cannot be empty")
     
@@ -791,6 +961,27 @@ class ReviewWorkflow:
         
         workflow.logger.info(f"Received nudge update: {len(instruction)} chars")
         self._nudge_requests.add(client_request_id)
+        
+        self._nudge_in_flight_count += 1
+        try:
+            return await self._run_nudge(instruction, client_request_id)
+        finally:
+            self._nudge_in_flight_count -= 1
+    
+    async def _run_nudge(self, instruction: str, client_request_id: str) -> str:
+        """Body of the nudge update (the handler wraps it in the in-flight count)."""
+        plan = self.evidence.reply_plan
+        if plan is not None:
+            # issue #5: under a plan, a nudge that fails for any reason (an
+            # activity error, or a draft rejected by _check_nudged_draft) is not
+            # "done": a retry with the same request id must run again, not
+            # report success via the dedupe path. Pre-plan workflows keep the
+            # old dedupe behaviour so their histories replay unchanged.
+            try:
+                return await self._nudge_with_plan(instruction, client_request_id, plan)
+            except Exception:
+                self._nudge_requests.discard(client_request_id)
+                raise
         
         self.evidence = await workflow.execute_activity(
             "draft_reply",
@@ -818,6 +1009,79 @@ class ReviewWorkflow:
         
         return self.evidence.draft.text
     
+    async def _nudge_with_plan(self, instruction: str, client_request_id: str, plan: ReplyPlan) -> str:
+        """Nudge for a workflow that ran the plan step (issue #5).
+        
+        The redraft is steered by the plan, must follow it and pass the
+        unchanged claim gate before it replaces the current draft.
+        """
+        redrafted = await workflow.execute_activity(
+            "draft_reply",
+            DraftReplyInput(
+                evidence=self.evidence,
+                steer=instruction,
+                idempotency_key=f"{self.evidence.post_id}:nudge:{client_request_id}",
+                plan=plan,
+            ),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_long_sec),
+            retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
+            result_type=Evidence,
+        )
+        await self._check_nudged_draft(redrafted, client_request_id)
+        
+        # Persist first, then commit to workflow state, so a failed card
+        # update leaves both the query and the stored card on the old draft.
+        # The new draft is model-assembled and gated, so any earlier edit's
+        # gate results describe text that is gone: clear them in both places.
+        workflow_id = workflow.info().workflow_id
+        await workflow.execute_activity(
+            update_card,
+            UpdateCardInput(
+                workflow_id=workflow_id,
+                idempotency_key=f"{workflow_id}:update:nudge:{client_request_id}",
+                evidence=redrafted,
+                clear_edited_text_gate=True,
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        self.evidence = redrafted
+        self.edited_text_gate_results = None
+        self.edited_text_gate_state = None
+        return self.evidence.draft.text
+    
+    async def _check_nudged_draft(self, redrafted: Evidence, client_request_id: str) -> None:
+        """Gate a nudged draft under a plan (issue #5); raise to reject the nudge.
+        
+        On success, the draft's text and segments are the gate's assembled
+        versions, as on the initial draft path. On failure the update fails
+        with the reasons and the current draft stays unchanged.
+        """
+        draft = redrafted.draft
+        failures: List[str] = list(draft.plan_conformance_failures) if draft else ["the draft is missing"]
+        if draft and draft.segments:
+            gate_result = await workflow.execute_activity(
+                claim_gate,
+                ClaimGateInput(
+                    segments=draft.segments,
+                    founder_materials=redrafted.founder_materials,
+                    idempotency_key=f"{redrafted.post_id}:nudge_gate:{client_request_id}",
+                ),
+                start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+            )
+            draft.claim_gate = gate_result
+            if gate_result.draft_text:
+                draft.text = gate_result.draft_text
+            draft.segments = gate_result.segments
+            if not gate_result.passed:
+                failures += [f"{sentence[:50]}: {reason}" for sentence, reason in gate_result.failed_sentences]
+                if not gate_result.failed_sentences:
+                    failures.append(gate_result.reasoning)
+        if failures:
+            raise ApplicationError(
+                "Nudged draft rejected; the current draft is unchanged: " + "; ".join(failures[:3]),
+                non_retryable=True,
+            )
+    
     @nudge.validator
     def validate_nudge(self, instruction: str, client_request_id: str) -> None:
         """Validator for nudge Update - checks state and input. S-4: Fix .value reference."""
@@ -827,6 +1091,11 @@ class ReviewWorkflow:
         
         if not self.evidence or not self.evidence.draft:
             raise ValueError("No draft to nudge")
+        
+        # issue #5: serialize draft changes; a nudge overlapping an edit or
+        # another nudge could leave the card and the query on different drafts
+        if self._edit_in_flight_count > 0 or self._nudge_in_flight_count > 0:
+            raise ValueError("Cannot nudge while another draft change is in progress. Retry after it completes.")
         
         if not instruction or not instruction.strip():
             raise ValueError("Instruction cannot be empty")
@@ -855,4 +1124,10 @@ class ReviewWorkflow:
         
         # Use _build_card helper to ensure consistency with ReviewCard structure
         card = self._build_card(self.workflow_id, self.input.post, self.created_at)
-        return card.to_dict()
+        card_dict = card.to_dict()
+        if self._post_text_removed:
+            # issue #5: match the stored card after delete_post_text (X removal
+            # duty): the post text and every evidence copy of it are gone
+            card_dict["post"]["text"] = POST_TEXT_REMOVED
+            card_dict["evidence"] = redact_post_text_copies(card_dict["evidence"])
+        return card_dict

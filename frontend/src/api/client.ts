@@ -27,6 +27,18 @@ export interface ReplyFit {
   rule_version: string;
 }
 
+// Reply plan (issue #5): how to reply, decided before drafting.
+export type ReplyType = "answer_question" | "add_observation" | "share_experience";
+
+export interface ReplyPlan {
+  // A rejected plan may carry an unknown type; the panel shows it as-is.
+  reply_type: ReplyType | string;
+  target_point: string;
+  mention_product: boolean | null;
+  mention_product_reason: string;
+  model_used: string;
+}
+
 export interface ReviewCard {
   workflow_id: string;
   post: {
@@ -97,11 +109,19 @@ export interface ReviewCard {
       model_used: string;
       input_tokens: number;
       output_tokens: number;
+      // issue #5: reasons the draft does not follow the reply plan (empty = conforms)
+      plan_conformance_failures?: string[];
     } | null;
     skip_reason: string | null;
     // Issue #4: should-we-reply features (proposed by research, checked by code).
     // Absent on cards stored before the feature existed.
     reply_fit?: ReplyFit | null;
+    // Reply plan (issue #5). Optional: cards stored before the plan step lack it.
+    reply_plan?: ReplyPlan | null;
+    reply_plan_errors?: string[];
+    reply_plan_attempts?: number;
+    // A plan-stage skip rule that fired on a valid plan (e.g. "needs_written_drafts")
+    reply_plan_skip_rule?: string | null;
   };
   status: ReviewStatus;
   created_at: string;

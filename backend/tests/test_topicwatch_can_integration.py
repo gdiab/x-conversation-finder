@@ -121,6 +121,7 @@ async def test_topicwatch_budget_across_multiple_can():
             x_activities.lookup_post,
             x_activities.check_followup,
             reply_activities.research_post,
+            reply_activities.plan_reply,
             reply_activities.draft_reply,
             store_card,
             claim_gate,

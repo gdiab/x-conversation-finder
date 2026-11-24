@@ -1,10 +1,16 @@
 """Reply agent activities with injected agent."""
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 from temporalio import activity
 
-from backend.models import Evidence, Post
+from backend.models import Evidence, Post, ReplyPlan
+from backend.planning import (
+    NEEDS_WRITTEN_DRAFTS_RULE,
+    needs_written_drafts_skip_reason,
+    plan_conformance_failures,
+    validate_reply_plan,
+)
 from backend.ports import ReplyAgentPort
 from backend.budget import reserve_inference_budget, reconcile_inference_tokens, BudgetExceeded
 from backend.gate.reply_fit import assess_reply_fit
@@ -27,6 +33,36 @@ class DraftReplyInput:
     evidence: Evidence
     steer: Optional[str] = None
     idempotency_key: str = ""
+    plan: Optional[ReplyPlan] = None  # issue #5: validated reply plan, None before the plan step
+
+
+@dataclass
+class PlanReplyInput:
+    """Input for plan_reply activity (issue #5)."""
+    
+    post: Post
+    evidence: Evidence
+    idempotency_key: str
+    feedback: Optional[List[str]] = None  # previous attempt's validation errors
+
+
+@dataclass
+class PlanReplyResult:
+    """Output of plan_reply: the proposed plan and code's validation errors (empty = valid).
+    
+    A valid plan can still skip the post: skip_rule and skip_reason are set
+    when a plan-stage skip rule applies (today only needs_written_drafts).
+    """
+    
+    plan: ReplyPlan
+    errors: List[str] = field(default_factory=list)
+    skip_rule: Optional[str] = None
+    skip_reason: Optional[str] = None
+
+
+# Budget estimate for one planning call (tokens).
+PLAN_RESERVED_INPUT_TOKENS = 700
+PLAN_RESERVED_OUTPUT_TOKENS = 120
 
 
 class ReplyActivities:
@@ -110,6 +146,65 @@ class ReplyActivities:
         
         return evidence
     
+    @activity.defn(name="plan_reply")
+    async def plan_reply(self, input: PlanReplyInput) -> PlanReplyResult:
+        """
+        Plan the reply before drafting (issue #5).
+        
+        Calls ReplyAgentPort.plan(), then validates the plan in code against the
+        post text. Validation runs here, not in workflow code, so the verdict is
+        recorded in history and replays identically even if the rules change.
+        """
+        activity.logger.info(
+            f"Planning reply for post {input.post.id} "
+            f"(retry={'yes' if input.feedback else 'no'}, key: {input.idempotency_key})"
+        )
+        
+        try:
+            reserved_cost, reservation_date = reserve_inference_budget(
+                input_tokens=PLAN_RESERVED_INPUT_TOKENS,
+                output_tokens=PLAN_RESERVED_OUTPUT_TOKENS,
+                workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
+                activity_id=activity.info().activity_id,
+            )
+        except BudgetExceeded as e:
+            activity.logger.error(f"Budget exceeded: {e}")
+            raise
+        
+        plan = await self._reply_agent.plan(
+            post=input.post,
+            evidence=input.evidence,
+            idempotency_key=input.idempotency_key,
+            feedback=input.feedback,
+        )
+        
+        if plan.input_tokens > 0 or plan.output_tokens > 0:
+            reconcile_inference_tokens(
+                reserved_input=PLAN_RESERVED_INPUT_TOKENS,
+                reserved_output=PLAN_RESERVED_OUTPUT_TOKENS,
+                actual_input=plan.input_tokens,
+                actual_output=plan.output_tokens,
+                reservation_date=reservation_date,
+                workflow_id=activity.info().workflow_id,
+                workflow_run_id=activity.info().workflow_run_id,
+                activity_id=activity.info().activity_id,
+            )
+        else:
+            activity.logger.info(f"Plan usage unavailable, kept reservation ${reserved_cost:.4f}")
+        
+        errors = validate_reply_plan(plan, input.post.text)
+        skip_rule = skip_reason = None
+        if not errors:
+            skip_reason = needs_written_drafts_skip_reason(plan)
+            if skip_reason:
+                skip_rule = NEEDS_WRITTEN_DRAFTS_RULE
+        activity.logger.info(
+            f"Plan: type={plan.reply_type!r} mention_product={plan.mention_product} "
+            f"valid={not errors} skip_rule={skip_rule}"
+        )
+        return PlanReplyResult(plan=plan, errors=errors, skip_rule=skip_rule, skip_reason=skip_reason)
+    
     @activity.defn(name="draft_reply")
     async def draft_reply(self, input: DraftReplyInput) -> Evidence:
         """
@@ -145,7 +240,14 @@ class ReplyActivities:
             evidence=input.evidence,
             steer=input.steer,
             idempotency_key=input.idempotency_key,
+            plan=input.plan,
         )
+        
+        if evidence.draft and input.plan is not None:
+            # issue #5: record, in code, whether the draft follows the plan
+            evidence.draft.plan_conformance_failures = plan_conformance_failures(
+                evidence.draft.segments, input.plan
+            )
         
         if evidence.draft:
             # R5-B1: Reconcile inference budget (two-way, idempotent)

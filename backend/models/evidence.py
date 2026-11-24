@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Literal
 
+from .reply_plan import ReplyPlan
+
 
 @dataclass
 class FounderMaterial:
@@ -81,6 +83,9 @@ class Draft:
     # S-2: Real token usage from model
     input_tokens: int = 0
     output_tokens: int = 0
+    # issue #5: reasons the draft does not follow the reply plan (empty = conforms
+    # or no plan). Computed by the draft_reply activity, so the verdict is in history.
+    plan_conformance_failures: List[str] = field(default_factory=list)
 
 
 # --- Issue #4: "should we reply?" features (self-contained block) ---
@@ -125,6 +130,15 @@ class Evidence:
     skip_reason: Optional[str] = None
     # Issue #4: should-we-reply features and the code's checks of them
     reply_fit: Optional[ReplyFit] = None
+    # --- Reply plan (issue #5) ---
+    # The validated plan passed to draft(). When planning failed validation
+    # twice, the last rejected plan is kept here with its errors for the card.
+    reply_plan: Optional[ReplyPlan] = None
+    reply_plan_errors: List[str] = field(default_factory=list)  # empty when the plan is valid
+    reply_plan_attempts: int = 0
+    # A plan-stage skip rule that fired on a valid plan (e.g. needs_written_drafts)
+    reply_plan_skip_rule: Optional[str] = None
+    # --- end reply plan ---
     
     def compute_confidence(self) -> float:
         """

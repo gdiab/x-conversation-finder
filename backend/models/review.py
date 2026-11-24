@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional, Literal
 
 from .evidence import Evidence
+from .reply_plan import reply_plan_card_fields
 from .post import Post
 
 # R4-B1: Status as Literal for boundary crossing (temporalio enum serialization issue)
@@ -134,10 +135,12 @@ class ReviewCard:
                     "model_used": self.evidence.draft.model_used,
                     "input_tokens": self.evidence.draft.input_tokens,
                     "output_tokens": self.evidence.draft.output_tokens,
+                    "plan_conformance_failures": list(self.evidence.draft.plan_conformance_failures),  # issue #5
                 } if self.evidence.draft else None,
                 "skip_reason": self.evidence.skip_reason,
                 # Issue #4: should-we-reply features and checks
                 "reply_fit": asdict(self.evidence.reply_fit) if self.evidence.reply_fit else None,
+                **reply_plan_card_fields(self.evidence),  # issue #5
             },
             "status": self.status,  # R4-NN5: status is already a str (ReviewStatusStr), not enum
             "created_at": self.created_at,

@@ -6,6 +6,7 @@ import { useState, useRef } from 'react';
 import type { ReviewCard as ReviewCardType } from '../api/client';
 import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId } from '../api/client';
 import { ReplyFitPanel } from './ReplyFitPanel';
+import { ReplyPlanPanel } from './ReplyPlanPanel';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -317,6 +318,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           </div>
         )}
       </div>
+
+      {/* Reply Plan (issue #5): shown above the draft */}
+      <ReplyPlanPanel evidence={card.evidence} edited={card.edited_text_gate_state != null} />
 
       {/* Segments with Tags */}
       {card.evidence.draft && card.evidence.draft.segments.length > 0 && (

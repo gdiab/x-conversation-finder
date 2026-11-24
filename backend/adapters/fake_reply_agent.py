@@ -4,7 +4,7 @@ Fake reply agent for testing.
 No API calls, deterministic outputs based on post content.
 """
 
-from typing import Optional
+from typing import List, Optional
 import re
 
 from backend.models import (
@@ -15,8 +15,17 @@ from backend.models import (
     ClaimGateResult,
     Draft,
     ReplyFit,
+    ReplyPlan,
 )
 from backend.ports import ReplyAgentPort
+from backend.planning import question_spans
+
+# issue #5: the closer the fake draft uses for each planned reply type.
+_FAKE_CLOSER_BY_REPLY_TYPE = {
+    "answer_question": "offer.share_details",
+    "add_observation": "q.current_tool",
+    "share_experience": "offer.love_to_hear",
+}
 
 
 
@@ -86,11 +95,47 @@ class FakeReplyAgent(ReplyAgentPort):
         
         return evidence
     
+    async def plan(
+        self,
+        post: Post,
+        evidence: Evidence,
+        idempotency_key: str,
+        feedback: Optional[List[str]] = None,
+    ) -> ReplyPlan:
+        """
+        Plan deterministically (issue #5).
+        
+        A post with a question gets answer_question, targeting the first
+        question sentence; otherwise add_observation, targeting the first
+        sentence. The fake always mentions the product, so existing fake
+        drafts keep their claim; tests subclass this to plan otherwise.
+        """
+        spans = question_spans(post.text)
+        if spans:
+            start, end = spans[0]
+            reply_type = "answer_question"
+            target_point = post.text[start:end].strip()
+        else:
+            match = re.match(r"\s*([^.!?\n]+[.!?]?)", post.text)
+            reply_type = "add_observation"
+            target_point = match.group(1).strip() if match else post.text.strip()
+        
+        return ReplyPlan(
+            reply_type=reply_type,
+            target_point=target_point,
+            mention_product=True,
+            mention_product_reason="Fake planner: the founder material covers this topic.",
+            model_used="fake-model",
+            input_tokens=(len(post.text) + 400) // 4,
+            output_tokens=40,
+        )
+    
     async def draft(
         self,
         evidence: Evidence,
         steer: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        plan: Optional[ReplyPlan] = None,
     ) -> Evidence:
         """
         Generate fake draft deterministically with segments.
@@ -145,9 +190,16 @@ class FakeReplyAgent(ReplyAgentPort):
                 ),
                 Segment(
                     kind="non_claim",
-                    phrase_id="offer.share_details"  # v2.1.0 phrase
+                    # issue #5: the closer follows the planned reply type
+                    phrase_id=_FAKE_CLOSER_BY_REPLY_TYPE.get(
+                        plan.reply_type if plan else "", "offer.share_details"
+                    ),
                 ),
             ]
+        
+        # issue #5: the fake follows a plan that says not to mention the product
+        if plan is not None and plan.mention_product is False:
+            segments = [s for s in segments if s.kind != "claim"]
         
         # QA R13: Construct draft text from segments (claim_gate will validate and insert text)
         # For FakeReplyAgent, we need to construct the text ourselves for the draft
