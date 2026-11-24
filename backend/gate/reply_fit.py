@@ -69,8 +69,8 @@ def match_span(span: Optional[str], post_text: str) -> tuple[str, Optional[str]]
     """Check a proposed problem span; return (check, the matched post text).
 
     check is ok, missing, not_in_post or too_short. The span must be an exact
-    substring of the post: only surrounding whitespace and one pair of wrapping
-    quotes are dropped. On ok, the second value is the text as it appears in
+    substring of the post that starts and ends on word boundaries: only
+    surrounding whitespace and one pair of wrapping quotes are dropped. On ok, the second value is the text as it appears in
     the post, which is what code uses from then on.
     """
     if not isinstance(span, str) or not span.strip():
@@ -79,12 +79,18 @@ def match_span(span: Optional[str], post_text: str) -> tuple[str, Optional[str]]
     candidates = [candidate]
     if len(candidate) > 2 and _WRAPPING_QUOTES.get(candidate[0]) == candidate[-1]:
         candidates.append(candidate[1:-1].strip())
-    match = next((c for c in candidates if c and c in post_text), None)
+    match = next((c for c in candidates if c and _in_at_word_boundaries(c, post_text)), None)
     if match is None:
         return "not_in_post", None
     if len(_stems(match)) < MIN_SPAN_CONTENT_WORDS:
         return "too_short", None
     return "ok", match
+
+
+def _in_at_word_boundaries(fragment: str, text: str) -> bool:
+    """Whether fragment occurs in text without cutting through a word at either end."""
+    pattern = r"(?<!\w)" + re.escape(fragment) + r"(?!\w)"
+    return re.search(pattern, text) is not None
 
 
 def check_span(span: Optional[str], post_text: str) -> str:

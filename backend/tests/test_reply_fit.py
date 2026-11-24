@@ -202,6 +202,10 @@ POST_TEXT = "Our agents keep “forgetting” what they did &amp; nobody can tel
     # Enough content words: function-word fragments are not a problem statement.
     ("who changed what", "too_short"),
     ("what they did", "too_short"),
+    # Word boundaries: a span may not start or end inside a word.
+    ("orgetting\u201d what they did", "not_in_post"),
+    ("nobody can tell who changed wha", "not_in_post"),
+    ("ur agents keep", "not_in_post"),
     ("Our agents keep", "ok"),  # two content words: enough
     ("", "missing"),
     ("   ", "missing"),
@@ -624,3 +628,24 @@ async def test_legacy_research_result_without_reply_fit_is_not_drafted(make_revi
             card = await handle.query("get_card")
     assert draft_calls == []
     assert "predates" in card["skip_reason"]
+
+
+def test_span_cut_from_inside_words_is_rejected():
+    text = "Is a reliable database enough for this?"
+    fit = ReplyFit(post_kind="question", brief_problem_span="liable data", in_others_thread=False, is_vendor_post=False)
+    evidence = assess_reply_fit(_evidence(fit), _post(text=text), "We store data.", now=NOW)
+    assert evidence.reply_fit.span_check == "not_in_post"
+    assert evidence.reply_fit.skip_rule == "no_problem_span"
+
+
+@pytest.mark.asyncio
+async def test_fake_adapter_takes_material_from_any_brief():
+    brief = "# Acme\n\nAcme keeps a log of every deploy. Acme alerts on failed deploys.\n\n- Feature list"
+    post = _post(text="How do you keep a log of every deploy across teams?")
+    evidence = await FakeReplyAgent().research(post, "deploy", brief, "k")
+    evidence = assess_reply_fit(evidence, post, brief, now=NOW)
+    assert [m.passage for m in evidence.founder_materials] == [
+        "Acme keeps a log of every deploy. Acme alerts on failed deploys."
+    ]
+    assert evidence.reply_fit.materials_dropped == 0
+    assert evidence.skip_reason is None

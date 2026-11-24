@@ -19,6 +19,26 @@ from backend.models import (
 from backend.ports import ReplyAgentPort
 
 
+
+def _brief_material(product_brief: str) -> list[FounderMaterial]:
+    """The brief's first prose paragraph (no heading or list), as passage_0.
+
+    The default fake draft claims sentence 0 of passage_0 (sentence 2 when
+    steered "technical"), so a brief whose first paragraph has short,
+    standalone sentences drafts cleanly; the test brief (conftest.py) does.
+    """
+    for block in re.split(r"\n\s*\n", product_brief):
+        lines = [line.strip() for line in block.strip().splitlines()]
+        if not lines or any(line.startswith(("#", "-", "*")) for line in lines):
+            continue
+        return [FounderMaterial(
+            source="product_brief.md",
+            passage=" ".join(lines),
+            relevance="First paragraph of the product brief",
+            passage_id="passage_0",
+        )]
+    return []
+
 class FakeReplyAgent(ReplyAgentPort):
     """Fake reply agent for testing and CI."""
     
@@ -34,8 +54,8 @@ class FakeReplyAgent(ReplyAgentPort):
         Stands in for the research model: the span is the first sentence with a
         question mark, else the first sentence naming the topic, else None.
         The research_post activity checks the features and sets confidence.
-        Its founder passage must appear in the brief, as for the real model;
-        the test brief (backend/tests/conftest.py) contains it.
+        Its founder passage is the brief's first paragraph, so it passes the
+        check that passages appear in the brief, as the real model's must.
         """
         sentences = [s for s in re.split(r"(?<=[.!?])\s+", post.text.strip()) if s]
         span = next((s for s in sentences if "?" in s), None)
@@ -55,15 +75,7 @@ class FakeReplyAgent(ReplyAgentPort):
             why_it_fits=f"Post mentions '{topic}' and discusses relevant themes.",
             confidence_score=0.0,
             confidence_inputs={},
-            founder_materials=[
-                FounderMaterial(
-                    source="product_brief.md",
-                    # Per Architect: short, standalone, claim-ready sentences
-                    passage="Our product helps developers build reliable distributed systems. Our product provides automatic failover. Our product guarantees strong consistency.",
-                    relevance="Directly relevant to the post's discussion of reliability",
-                    passage_id="passage_0",
-                )
-            ],
+            founder_materials=_brief_material(product_brief),
             reply_fit=ReplyFit(
                 post_kind=post_kind,
                 brief_problem_span=span,
