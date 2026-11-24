@@ -11,7 +11,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from backend.workflows.topic_watch import TopicWatchWorkflow, TopicWatchInput
-from backend.workflows.review import ReviewWorkflow
+from backend.workflows.review import ReviewWorkflow, ReviewConfig
 from backend.activities import XActivities, ReplyActivities
 from backend.activities.store_activities import store_card, update_card
 from backend.activities.claim_gate_activity import claim_gate
@@ -53,6 +53,69 @@ async def test_topic_watch_workflow_single_iteration(make_topic_watch_input, x_a
             
             result = await handle.result()
             assert result == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_topic_watch_searches_before_first_sleep(make_topic_watch_input, reply_activities):
+    """A new watch searches right away, then waits a full interval before the next search."""
+    from backend.workflows.topic_watch import TopicWatchConfig
+
+    class CountingXClient(FakeXClient):
+        def __init__(self):
+            super().__init__()
+            self.search_calls = 0
+
+        async def search_recent(self, *args, **kwargs):
+            self.search_calls += 1
+            return await super().search_recent(*args, **kwargs)
+
+    x_client = CountingXClient()
+    x_acts = XActivities(x_client)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[TopicWatchWorkflow, ReviewWorkflow],
+            activities=[
+                x_acts.search_recent,
+                x_acts.lookup_post,
+                x_acts.check_followup,
+                reply_activities.research_post,
+                reply_activities.draft_reply,
+                claim_gate,
+                store_card,
+                update_card,
+            ],
+        ):
+            topic_watch_input = make_topic_watch_input(
+                config=TopicWatchConfig(
+                    poll_interval_hours=3,
+                    activity_timeout_medium_sec=30,
+                    activity_max_attempts=3,
+                ),
+            )
+            handle = await env.client.start_workflow(
+                TopicWatchWorkflow.run,
+                topic_watch_input,
+                id="watch:test:search_first",
+                task_queue="test",
+            )
+
+            # Well inside the first 3h interval: the first search has already run.
+            await env.sleep(timedelta(minutes=10))
+            assert x_client.search_calls == 1
+
+            # Still inside the interval: no second search yet.
+            await env.sleep(timedelta(hours=2))
+            assert x_client.search_calls == 1
+
+            # Past the interval: the second search has run.
+            await env.sleep(timedelta(hours=1))
+            assert x_client.search_calls == 2
+
+            await handle.signal("stop")
+            assert await handle.result() == "stopped"
 
 
 @pytest.mark.asyncio
@@ -165,7 +228,13 @@ async def test_topic_watch_actually_triggers_continue_as_new(make_topic_watch_in
             # Low threshold that will actually be hit
             topic_watch_input = make_topic_watch_input(
                 continue_as_new_after=1,  # CAN after just 1 iteration
-                max_results=2
+                max_results=2,
+                # Reviews are not under test here. With the default 1h review
+                # timeout they expire at the same instant the watch continues
+                # as new, and the time-skipping test server stops advancing
+                # time when those timers and the new run's first search land
+                # together. A long timeout keeps the reviews out of the way.
+                review_config=ReviewConfig(review_timeout_hours=48),
             )
             
             handle = await env.client.start_workflow(
@@ -292,11 +361,21 @@ async def test_direct_start_with_zero_poll_without_flag_clamped():
             ),
         )
         
+        from temporalio import activity
+        from backend.activities.x_activities import SearchRecentInput, SearchRecentOutput
+
+        search_calls = []
+
+        @activity.defn(name="search_recent")
+        async def stub_search_recent(input: SearchRecentInput) -> SearchRecentOutput:
+            search_calls.append(input.poll_interval_hours)
+            return SearchRecentOutput(posts=[], newest_id=None, cost_usd=0.0)
+
         async with Worker(
             env.client,
             task_queue="test-clamp",
             workflows=[TopicWatchWorkflow],
-            activities=[],
+            activities=[stub_search_recent],
         ):
             # Start workflow - it should clamp to 1h internally
             handle = await env.client.start_workflow(
@@ -305,12 +384,15 @@ async def test_direct_start_with_zero_poll_without_flag_clamped():
                 id="test-clamp-workflow",
                 task_queue="test-clamp",
             )
-            
-            # Advance time by 30 minutes - workflow should still be sleeping (clamped to 1h)
-            await env.sleep(timedelta(minutes=30))
-            
+
+            # The first search runs right away, with the clamped interval.
+            await env.sleep(timedelta(minutes=1))
+            assert search_calls == [1]
+
+            # At 30 minutes the watch is still in its clamped 1h sleep:
+            # an unclamped 0h interval would have searched again already.
+            await env.sleep(timedelta(minutes=29))
+            assert search_calls == [1]
+
             # Terminate to end test
             await handle.terminate()
-            
-            # The test passing means the workflow didn't crash on validation
-            # and accepted the clamped 1h value (logged warning but continued)
