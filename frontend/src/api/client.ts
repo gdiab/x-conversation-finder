@@ -18,9 +18,10 @@ export interface ReplyFit {
   brief_problem_span: string | null;
   in_others_thread: boolean | null;
   is_vendor_post: boolean | null;
-  span_check: 'ok' | 'missing' | 'not_in_post' | 'too_short' | 'not_checked';
+  span_check: 'ok' | 'missing' | 'not_in_post' | 'too_short' | 'off_brief' | 'not_checked';
   thread_source: 'metadata' | 'model' | 'missing' | 'not_checked';
   in_others_thread_used: boolean | null;
+  materials_dropped?: number;
   skip_rule: string | null;
   rule_version: string;
 }

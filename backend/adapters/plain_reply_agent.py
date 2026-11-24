@@ -147,8 +147,9 @@ Return a JSON object with these keys:
 - is_vendor_post: true if the poster promotes their own product or company, competing or not.
 - matched_topic: which topic this relates to.
 - why_it_fits: one short sentence quoting the post. If it does not fit, say why.
-- founder_materials: list of {{source, passage, relevance}} copied from the brief that a reply
-  could use. Use an empty list if nothing in the brief applies.
+- founder_materials: list of {{source, passage, relevance}} that a reply could use. Copy each
+  passage from the brief character for character; a passage that is not in the brief is
+  discarded. Use an empty list if nothing in the brief applies.
 
 Most posts are not reply opportunities. Do not stretch a post to fit the brief."""
 

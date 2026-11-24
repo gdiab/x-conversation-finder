@@ -99,9 +99,10 @@ class ReplyFit:
     in_others_thread: Optional[bool] = None
     is_vendor_post: Optional[bool] = None
     # Set by code
-    span_check: str = "not_checked"  # ok | missing | not_in_post | too_short
+    span_check: str = "not_checked"  # ok | missing | not_in_post | too_short | off_brief
     thread_source: str = "not_checked"  # metadata | model | missing
     in_others_thread_used: Optional[bool] = None  # the value the rules used
+    materials_dropped: int = 0  # founder passages removed: not found in the brief
     skip_rule: Optional[str] = None  # rule id when a skip rule fired
     rule_version: str = ""  # backend.config.confidence.CONFIDENCE_RULE_VERSION
 # --- end issue #4 block ---

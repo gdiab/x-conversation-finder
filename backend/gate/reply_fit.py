@@ -3,8 +3,10 @@
 The research model proposes features (ReplyFit: post_kind, brief_problem_span,
 in_others_thread, is_vendor_post). This module, which is plain code:
 
-1. checks the features against the post (the span must be in the post text;
-   thread position comes from X metadata when X gives it);
+1. checks the features against the post and the brief: the span must be an
+   exact substring of the post with enough content words, at least one of them
+   shared with the brief; founder passages must appear in the brief; thread
+   position comes from X metadata when X gives it;
 2. sets every confidence input and computes the confidence score;
 3. applies the hard skip rules and records the rule and its reason.
 
@@ -25,11 +27,11 @@ from backend.config.confidence import (
     BROADCAST_KINDS,
     CONFIDENCE_RULE_VERSION,
     IN_THREAD_ALLOWED_KINDS,
-    MIN_SPAN_WORDS,
+    MIN_SPAN_CONTENT_WORDS,
     POST_KIND_SCORES,
     POST_KINDS,
 )
-from backend.models import Evidence, Post, ReplyFit
+from backend.models import Evidence, FounderMaterial, Post, ReplyFit
 
 # Common words that say nothing about topic. Only words of 4+ letters matter,
 # because shorter words are dropped before this list is used.
@@ -51,23 +53,65 @@ _QUOTE_MAP = str.maketrans({
 
 
 def normalize_text(text: str) -> str:
-    """NFKC, unescape HTML entities, straighten quotes, collapse spaces, casefold."""
+    """NFKC, unescape HTML entities, straighten quotes, collapse spaces, casefold.
+
+    Used only to compare words for the brief-overlap feature, never to decide
+    whether a quote is in the post or the brief.
+    """
     text = html.unescape(unicodedata.normalize("NFKC", text)).translate(_QUOTE_MAP)
     return " ".join(text.split()).casefold()
 
 
-def check_span(span: Optional[str], post_text: str) -> str:
-    """Return ok, missing, not_in_post or too_short for a proposed problem span."""
+_WRAPPING_QUOTES = {'"': '"', "'": "'", "\u201c": "\u201d", "\u2018": "\u2019"}
+
+
+def match_span(span: Optional[str], post_text: str) -> tuple[str, Optional[str]]:
+    """Check a proposed problem span; return (check, the matched post text).
+
+    check is ok, missing, not_in_post or too_short. The span must be an exact
+    substring of the post: only surrounding whitespace and one pair of wrapping
+    quotes are dropped. On ok, the second value is the text as it appears in
+    the post, which is what code uses from then on.
+    """
     if not isinstance(span, str) or not span.strip():
-        return "missing"
-    candidate = normalize_text(span).strip("\"' ")
-    if not candidate:
-        return "missing"
-    if candidate not in normalize_text(post_text):
-        return "not_in_post"
-    if len(candidate.split()) < MIN_SPAN_WORDS:
-        return "too_short"
-    return "ok"
+        return "missing", None
+    candidate = span.strip()
+    candidates = [candidate]
+    if len(candidate) > 2 and _WRAPPING_QUOTES.get(candidate[0]) == candidate[-1]:
+        candidates.append(candidate[1:-1].strip())
+    match = next((c for c in candidates if c and c in post_text), None)
+    if match is None:
+        return "not_in_post", None
+    if len(_stems(match)) < MIN_SPAN_CONTENT_WORDS:
+        return "too_short", None
+    return "ok", match
+
+
+def check_span(span: Optional[str], post_text: str) -> str:
+    """The check result of match_span alone."""
+    return match_span(span, post_text)[0]
+
+
+def _collapse_spaces(text: str) -> str:
+    return " ".join(text.split())
+
+
+def verify_materials(
+    materials: list[FounderMaterial], product_brief: str
+) -> tuple[list[FounderMaterial], int]:
+    """Keep founder passages that appear in the brief; return (kept, dropped count).
+
+    The comparison ignores only differences in whitespace (a passage copied
+    across a line break). A passage the model wrote or reworded is dropped, so
+    the draft and the claim gate never treat it as the founder's own words.
+    """
+    brief = _collapse_spaces(product_brief)
+    kept = [
+        m for m in materials
+        if isinstance(m.passage, str) and m.passage.strip()
+        and _collapse_spaces(m.passage) in brief
+    ]
+    return kept, len(materials) - len(kept)
 
 
 def thread_position(post: Post, model_value: Optional[bool]) -> tuple[Optional[bool], str]:
@@ -150,12 +194,18 @@ def assess_reply_fit(
     fit.rule_version = CONFIDENCE_RULE_VERSION
 
     kind = fit.post_kind if fit.post_kind in POST_KINDS else None
-    fit.span_check = check_span(fit.brief_problem_span, post.text)
+    fit.span_check, matched = match_span(fit.brief_problem_span, post.text)
+    overlap = brief_overlap(matched, product_brief) if matched else 0.0
+    if fit.span_check == "ok" and overlap == 0.0:
+        fit.span_check = "off_brief"
     span_ok = fit.span_check == "ok"
-    span = fit.brief_problem_span if span_ok else ""
+    span = matched if span_ok else ""
     fit.in_others_thread_used, fit.thread_source = thread_position(post, fit.in_others_thread)
 
-    has_material = any(m.passage and m.passage.strip() for m in evidence.founder_materials)
+    evidence.founder_materials, fit.materials_dropped = verify_materials(
+        evidence.founder_materials, product_brief
+    )
+    has_material = bool(evidence.founder_materials)
 
     if span_ok and "?" in span:
         asks_question = 1.0
@@ -171,7 +221,7 @@ def assess_reply_fit(
         "freshness": freshness(post.created_at, now),
         "kind_score": POST_KIND_SCORES.get(kind, 0.0) if kind else 0.0,
         "asks_question": asks_question,
-        "brief_overlap": brief_overlap(span, product_brief) if span_ok else 0.0,
+        "brief_overlap": overlap if span_ok else 0.0,
         "author_reach": author_reach(post.author.followers_count),
         "direct_post": 0.0 if fit.in_others_thread_used is not False else 1.0,
     }
@@ -215,7 +265,8 @@ def _skip_rule(
         detail = {
             "missing": "",
             "not_in_post": " (the quoted span is not in the post)",
-            "too_short": f" (the quoted span is under {MIN_SPAN_WORDS} words)",
+            "too_short": f" (the quoted span has fewer than {MIN_SPAN_CONTENT_WORDS} content words)",
+            "off_brief": " (the quoted span shares no words with the brief)",
         }.get(fit.span_check, "")
         return "no_problem_span", f"No part of the post shows a problem the brief solves{detail}"
 
@@ -223,6 +274,10 @@ def _skip_rule(
         return "others_thread", f"{_label(kind)} post inside someone else's conversation"
 
     if not has_material:
+        if fit.materials_dropped:
+            return "no_founder_material", (
+                "No founder material: the research quoted passages that are not in the brief"
+            )
         return "no_founder_material", "The brief has no material that supports a reply"
 
     return None, None

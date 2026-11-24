@@ -76,9 +76,11 @@ BROADCAST_KINDS = ("announcement", "promo", "roundup", "news")
 # Kinds that may be answered inside someone else's conversation.
 IN_THREAD_ALLOWED_KINDS = ("question", "problem")
 
-# The problem span must be at least this many words, so a one-word quote
-# such as "help" cannot pass the substring check.
-MIN_SPAN_WORDS = 3
+# The problem span must hold at least this many content words (4+ letters,
+# not a stopword), so a fragment such as "How do you" or "help" cannot pass
+# the substring check. It must also share at least one content word with the
+# brief ("off_brief" otherwise).
+MIN_SPAN_CONTENT_WORDS = 2
 
 # brief_overlap: ratio of matched content words that counts as full overlap.
 BRIEF_OVERLAP_FULL = 0.5

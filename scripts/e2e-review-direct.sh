@@ -144,7 +144,8 @@ async def main():
         post=post,
         account="e2e-test",
         topic="reliability",
-        product_brief="We build tools for reliable distributed systems.",
+        # Contains the fake reply agent's founder passage, which must be in the brief (issue #4)
+        product_brief="Our product helps developers build reliable distributed systems. Our product provides automatic failover. Our product guarantees strong consistency.",
         confidence_threshold=0.7,
         config=config
     )

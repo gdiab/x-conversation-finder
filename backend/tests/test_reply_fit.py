@@ -21,12 +21,20 @@ from temporalio.worker import Worker
 
 from backend.activities.claim_gate_activity import claim_gate
 from backend.activities.reply_activities import ReplyActivities
-from backend.activities.store_activities import get_all_cards, store_card, update_card
 from backend.adapters import FakeReplyAgent
 from backend.adapters.plain_reply_agent import PlainReplyAgent, parse_reply_fit
 from backend.config.confidence import CONFIDENCE_RULE_VERSION, CONFIDENCE_THRESHOLD, POST_KINDS
-from backend.gate.reply_fit import assess_reply_fit, check_span, thread_position
-from backend.models import Author, Evidence, FounderMaterial, Post, ReplyFit
+from backend.activities.store_activities import (
+    DeletePostTextInput,
+    StoreCardInput,
+    _delete_post_text_sync,
+    _store_card_sync,
+    get_all_cards,
+    store_card,
+    update_card,
+)
+from backend.gate.reply_fit import assess_reply_fit, check_span, thread_position, verify_materials
+from backend.models import Author, Evidence, FounderMaterial, Post, ReplyFit, ReviewCard
 from backend.workflows.review import ReviewWorkflow
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "reply_fit_posts.json").read_text())
@@ -176,13 +184,21 @@ POST_TEXT = "Our agents keep “forgetting” what they did &amp; nobody can tel
 
 @pytest.mark.parametrize("span,expected", [
     ("nobody can tell who changed what", "ok"),
-    ("NOBODY CAN TELL   who changed what.", "ok"),  # case and spacing are normalized
-    ("nobody can tell who changed what?", "not_in_post"),  # punctuation is not
-    ('"nobody can tell who changed what"', "ok"),  # wrapping quotes are dropped
-    ('keep "forgetting" what they did', "ok"),  # curly quotes in the post
-    ("what they did & nobody", "ok"),  # HTML entity in the post
-    ("who changed", "too_short"),
+    ("  nobody can tell who changed what.  ", "ok"),  # surrounding whitespace is dropped
+    ('"nobody can tell who changed what"', "ok"),  # one pair of wrapping quotes is dropped
+    ("\u201cnobody can tell who changed what\u201d", "ok"),
+    ("keep \u201cforgetting\u201d what they did", "ok"),  # exact copy of the post's curly quotes
+    # The span must be exact: no case, spacing, quote, entity or punctuation changes.
+    ("NOBODY CAN TELL who changed what", "not_in_post"),
+    ("nobody can tell  who changed what", "not_in_post"),
+    ('keep "forgetting" what they did', "not_in_post"),
+    ("what they did & nobody", "not_in_post"),
+    ("nobody can tell who changed what?", "not_in_post"),
     ("nobody knows who changed what", "not_in_post"),
+    # Enough content words: function-word fragments are not a problem statement.
+    ("who changed what", "too_short"),
+    ("what they did", "too_short"),
+    ("Our agents keep", "ok"),  # two content words: enough
     ("", "missing"),
     ("   ", "missing"),
     (None, "missing"),
@@ -190,6 +206,95 @@ POST_TEXT = "Our agents keep “forgetting” what they did &amp; nobody can tel
 ])
 def test_check_span(span, expected):
     assert check_span(span, POST_TEXT) == expected
+
+
+def test_function_word_span_cannot_carry_an_unrelated_question():
+    """A fragment like "How do you" is no problem span, so the post is skipped."""
+    text = "How do you all pick a mechanical keyboard for long sessions?"
+    fit = ReplyFit(post_kind="question", brief_problem_span="How do you", in_others_thread=False, is_vendor_post=False)
+    evidence = assess_reply_fit(_evidence(fit), _post(text=text), BRIEF, now=NOW)
+    assert evidence.reply_fit.span_check == "too_short"
+    assert evidence.reply_fit.skip_rule == "no_problem_span"
+
+
+def test_span_sharing_no_words_with_the_brief_is_skipped():
+    text = "What is everyone's favorite mechanical keyboard for long sessions?"
+    fit = ReplyFit(
+        post_kind="question",
+        brief_problem_span="favorite mechanical keyboard for long sessions",
+        in_others_thread=False,
+        is_vendor_post=False,
+    )
+    evidence = assess_reply_fit(_evidence(fit), _post(text=text), BRIEF, now=NOW)
+    assert evidence.reply_fit.span_check == "off_brief"
+    assert evidence.reply_fit.skip_rule == "no_problem_span"
+    assert "shares no words with the brief" in evidence.skip_reason
+
+
+def test_broadcast_check_reads_the_post_not_the_proposed_span():
+    """A span that swaps the post's full-width question mark for '?' is not in the post."""
+    text = "Weekly digest: how do you keep a record of what each coding agent did\uff1f"
+    fit = ReplyFit(
+        post_kind="roundup",
+        brief_problem_span="how do you keep a record of what each coding agent did?",
+        in_others_thread=False,
+        is_vendor_post=False,
+    )
+    evidence = assess_reply_fit(_evidence(fit), _post(text=text), BRIEF, now=NOW)
+    assert evidence.reply_fit.span_check == "not_in_post"
+    assert evidence.reply_fit.skip_rule == "broadcast_post"
+
+
+def test_founder_passages_must_be_in_the_brief():
+    brief = "Our product records agent work.\nStatus is computed from the record."
+    materials = [
+        FounderMaterial(source="b", passage="Our product records agent work.", relevance="r", passage_id="passage_0"),
+        # Copied across a line break: whitespace differences are allowed.
+        FounderMaterial(source="b", passage="Our product records agent work. Status is computed from the record.",
+                        relevance="r", passage_id="passage_1"),
+        # Invented or reworded: dropped.
+        FounderMaterial(source="b", passage="Our product cuts agent costs by 90%.", relevance="r", passage_id="passage_2"),
+        FounderMaterial(source="b", passage="our product records agent work.", relevance="r", passage_id="passage_3"),
+        FounderMaterial(source="b", passage="   ", relevance="r", passage_id="passage_4"),
+    ]
+    kept, dropped = verify_materials(materials, brief)
+    assert [m.passage_id for m in kept] == ["passage_0", "passage_1"]
+    assert dropped == 3
+
+
+def test_only_invented_material_skips_with_reason():
+    text = "How do you keep a record of what each coding agent did?"
+    fit = ReplyFit(post_kind="question", brief_problem_span=text, in_others_thread=False, is_vendor_post=False)
+    evidence = _evidence(fit)
+    evidence.founder_materials = [
+        FounderMaterial(source="b", passage="Our product cuts agent costs by 90%.", relevance="r", passage_id="passage_0"),
+    ]
+    evidence = assess_reply_fit(evidence, _post(text=text), BRIEF, now=NOW)
+    assert evidence.founder_materials == []
+    assert evidence.reply_fit.materials_dropped == 1
+    assert evidence.reply_fit.skip_rule == "no_founder_material"
+    assert "not in the brief" in evidence.skip_reason
+    assert evidence.confidence_score == 0.0
+
+
+def test_post_text_removal_clears_the_problem_span_and_quote():
+    text = "How do you keep a record of what each coding agent did?"
+    fit = ReplyFit(post_kind="question", brief_problem_span=text, in_others_thread=False, is_vendor_post=False)
+    evidence = assess_reply_fit(_evidence(fit), _post(text=text), BRIEF, now=NOW)
+    evidence.why_it_fits = f'The post asks "{text}"'
+    workflow_id = f"review:test:removal_{uuid.uuid4().hex[:6]}"
+    card = ReviewCard(
+        workflow_id=workflow_id, post=_post(text=text), evidence=evidence, status="skipped",
+        created_at=NOW.isoformat(), updated_at=NOW.isoformat(),
+    )
+    assert _store_card_sync(StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store"))
+
+    assert _delete_post_text_sync(DeletePostTextInput(workflow_id=workflow_id, idempotency_key="k"))
+
+    stored = next(c for c in get_all_cards() if c["workflow_id"] == workflow_id)
+    assert text not in json.dumps(stored)
+    assert stored["evidence"]["reply_fit"]["brief_problem_span"] == "[removed - post deleted]"
+    assert stored["evidence"]["reply_fit"]["skip_rule"] is None
 
 
 def _post(**kw) -> Post:
@@ -228,7 +333,7 @@ def _evidence(fit, materials=True) -> Evidence:
     return Evidence(
         post_id="p1", matched_topic="t", why_it_fits="", confidence_score=0.99,
         confidence_inputs={"topic_match_strength": 0.99},
-        founder_materials=[FounderMaterial(source="b", passage="Our product records agent work.", relevance="r")]
+        founder_materials=[FounderMaterial(source="b", passage=MATERIALS[0]["passage"], relevance="r")]
         if materials else [],
         reply_fit=fit,
     )
@@ -268,13 +373,18 @@ def test_broadcast_post_with_a_quoted_question_is_not_skipped_as_broadcast():
 # --- workflow: a skipped post never reaches draft_reply ----------------------
 
 class CountingFakeAgent(FakeReplyAgent):
-    def __init__(self, fit: ReplyFit):
+    def __init__(self, fit: ReplyFit, passage: str = MATERIALS[0]["passage"]):
         self.fit = fit
+        self.passage = passage
         self.draft_calls = 0
 
     async def research(self, post, topic, product_brief, idempotency_key):
         evidence = await super().research(post, topic, product_brief, idempotency_key)
         evidence.reply_fit = self.fit
+        # A passage that is in BRIEF, so it survives the brief check.
+        evidence.founder_materials = [
+            FounderMaterial(source="product_brief", passage=self.passage, relevance="r", passage_id="passage_0")
+        ]
         return evidence
 
     async def draft(self, evidence, steer=None, idempotency_key=None):
@@ -308,7 +418,9 @@ async def _run_review(agent, make_review_input, x_activities, post, suffix):
                 update_card,
             ],
         ):
-            review_input = make_review_input(post=post, confidence_threshold=CONFIDENCE_THRESHOLD)
+            review_input = make_review_input(
+                post=post, confidence_threshold=CONFIDENCE_THRESHOLD, product_brief=BRIEF,
+            )
             workflow_id = f"review:test:{post.id}_{suffix}_{uuid.uuid4().hex[:6]}"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,

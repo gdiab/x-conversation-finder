@@ -433,9 +433,21 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
             return False
         
         # Delete post text on 404 per X API compliance, keep structure
-        post_data = card_db.post_data
+        post_data = dict(card_db.post_data)
         post_data["text"] = "[removed - post deleted]"
         card_db.post_data = post_data
+        flag_modified(card_db, "post_data")
+
+        # Evidence fields that quote the post go too: why_it_fits quotes it,
+        # and the issue #4 problem span is a verbatim copy of part of it.
+        evidence_data = dict(card_db.evidence_data or {})
+        if evidence_data.get("why_it_fits"):
+            evidence_data["why_it_fits"] = "[removed - post deleted]"
+        reply_fit = evidence_data.get("reply_fit")
+        if isinstance(reply_fit, dict) and reply_fit.get("brief_problem_span"):
+            evidence_data["reply_fit"] = {**reply_fit, "brief_problem_span": "[removed - post deleted]"}
+        card_db.evidence_data = evidence_data
+        flag_modified(card_db, "evidence_data")
         
         db.commit()
         return True

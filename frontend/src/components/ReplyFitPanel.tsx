@@ -27,7 +27,8 @@ const SPAN_CHECK_LABELS: Record<string, string> = {
   ok: 'found in the post',
   missing: 'none proposed',
   not_in_post: 'not found in the post',
-  too_short: 'too short',
+  too_short: 'too few content words',
+  off_brief: 'shares no words with the brief',
   not_checked: 'not checked',
 };
 
@@ -71,6 +72,11 @@ export function ReplyFitPanel({ replyFit, confidenceInputs }: ReplyFitPanelProps
           In someone else's thread: {yesNo(replyFit.in_others_thread_used)} ({threadSource})
         </li>
         <li>Vendor post: {yesNo(replyFit.is_vendor_post)}</li>
+        {(replyFit.materials_dropped ?? 0) > 0 && (
+          <li>
+            Founder passages dropped (not found in the brief): {replyFit.materials_dropped}
+          </li>
+        )}
       </ul>
       <details style={{ marginTop: '8px' }}>
         <summary style={{ cursor: 'pointer', color: '#666' }}>

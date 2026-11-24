@@ -34,6 +34,8 @@ class FakeReplyAgent(ReplyAgentPort):
         Stands in for the research model: the span is the first sentence with a
         question mark, else the first sentence naming the topic, else None.
         The research_post activity checks the features and sets confidence.
+        Its founder passage must appear in the brief, as for the real model;
+        the test brief (backend/tests/conftest.py) contains it.
         """
         sentences = [s for s in re.split(r"(?<=[.!?])\s+", post.text.strip()) if s]
         span = next((s for s in sentences if "?" in s), None)
