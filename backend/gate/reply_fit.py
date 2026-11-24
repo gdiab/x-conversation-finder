@@ -200,6 +200,11 @@ def assess_reply_fit(
         fit.span_check = "off_brief"
     span_ok = fit.span_check == "ok"
     span = matched if span_ok else ""
+    # A failed span counts as null; keep the proposal apart so it is never
+    # shown as a quotation from the post.
+    if not span_ok and isinstance(fit.brief_problem_span, str) and fit.brief_problem_span.strip():
+        fit.rejected_span = fit.brief_problem_span
+    fit.brief_problem_span = span or None
     fit.in_others_thread_used, fit.thread_source = thread_position(post, fit.in_others_thread)
 
     evidence.founder_materials, fit.materials_dropped = verify_materials(
@@ -207,9 +212,9 @@ def assess_reply_fit(
     )
     has_material = bool(evidence.founder_materials)
 
-    if span_ok and "?" in span:
+    if span_ok and _has_question(span):
         asks_question = 1.0
-    elif "?" in post.text:
+    elif _has_question(post.text):
         asks_question = 0.5
     else:
         asks_question = 0.0
@@ -227,17 +232,21 @@ def assess_reply_fit(
     }
     evidence.confidence_score = evidence.compute_confidence()
 
-    rule, reason = _skip_rule(fit, kind, span, has_material, post)
+    rule, reason = _skip_rule(fit, kind, has_material, post)
     fit.skip_rule = rule
     evidence.skip_reason = reason
     evidence.reply_fit = fit
     return evidence
 
 
+def _has_question(text: str) -> bool:
+    """Whether the text has a question mark (ASCII or full-width)."""
+    return "?" in text or "\uff1f" in text
+
+
 def _skip_rule(
     fit: ReplyFit,
     kind: Optional[str],
-    span: str,
     has_material: bool,
     post: Post,
 ) -> tuple[Optional[str], Optional[str]]:
@@ -258,7 +267,7 @@ def _skip_rule(
     if fit.is_vendor_post:
         return "vendor_post", "Vendor post: the poster is promoting their own product"
 
-    if kind in BROADCAST_KINDS and "?" not in span:
+    if kind in BROADCAST_KINDS and not _has_question(post.text):
         return "broadcast_post", f"{_label(kind)} post with no question to answer"
 
     if fit.span_check != "ok":

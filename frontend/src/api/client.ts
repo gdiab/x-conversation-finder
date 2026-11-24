@@ -22,6 +22,7 @@ export interface ReplyFit {
   thread_source: 'metadata' | 'model' | 'missing' | 'not_checked';
   in_others_thread_used: boolean | null;
   materials_dropped?: number;
+  rejected_span?: string | null;
   skip_rule: string | null;
   rule_version: string;
 }

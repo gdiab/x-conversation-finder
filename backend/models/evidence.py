@@ -88,14 +88,16 @@ class Draft:
 class ReplyFit:
     """Should-we-reply features for a post (issue #4, ADR-0006).
 
-    The first four fields are what the research model proposed, stored as
-    received after type checks; code never trusts them as they are. The rest
-    are set by code in backend/gate/reply_fit.py.
+    The first four fields start as what the research model proposed, after
+    type checks; code never trusts them as they are. After the check in
+    backend/gate/reply_fit.py, brief_problem_span holds only text verified to
+    be in the post (else None) and a rejected proposal moves to rejected_span.
+    The remaining fields are set by code.
     """
 
     # Proposed by the research model
     post_kind: Optional[str] = None  # one of backend.config.confidence.POST_KINDS
-    brief_problem_span: Optional[str] = None  # exact span of the post, or None
+    brief_problem_span: Optional[str] = None  # after the check: verified post text, or None
     in_others_thread: Optional[bool] = None
     is_vendor_post: Optional[bool] = None
     # Set by code
@@ -103,6 +105,7 @@ class ReplyFit:
     thread_source: str = "not_checked"  # metadata | model | missing
     in_others_thread_used: Optional[bool] = None  # the value the rules used
     materials_dropped: int = 0  # founder passages removed: not found in the brief
+    rejected_span: Optional[str] = None  # a proposed span that failed span_check (untrusted)
     skip_rule: Optional[str] = None  # rule id when a skip rule fired
     rule_version: str = ""  # backend.config.confidence.CONFIDENCE_RULE_VERSION
 # --- end issue #4 block ---

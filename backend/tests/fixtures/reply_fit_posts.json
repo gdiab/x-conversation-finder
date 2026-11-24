@@ -99,7 +99,7 @@
       "text": "Daily tool updates: editor A shipped background agents, CLI B added hooks, framework C 2.0 is out with a new planner. What did I miss?",
       "hours_ago": 3, "followers": 41000,
       "model": {"post_kind": "roundup", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": false},
-      "expect": {"skip_rule": "broadcast_post", "passes": false}
+      "expect": {"skip_rule": "no_problem_span", "passes": false}
     },
     {
       "id": "s13",

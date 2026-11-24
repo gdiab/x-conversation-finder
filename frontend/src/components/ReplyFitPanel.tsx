@@ -67,6 +67,11 @@ export function ReplyFitPanel({ replyFit, confidenceInputs }: ReplyFitPanelProps
           Problem the brief solves:{' '}
           {replyFit.brief_problem_span ? <em>“{replyFit.brief_problem_span}”</em> : 'none'}
           {' '}({SPAN_CHECK_LABELS[replyFit.span_check] ?? replyFit.span_check})
+          {replyFit.rejected_span && (
+            <div style={{ color: '#666', fontSize: '12px' }}>
+              Research proposed a span that was rejected (not post text): {replyFit.rejected_span}
+            </div>
+          )}
         </li>
         <li>
           In someone else's thread: {yesNo(replyFit.in_others_thread_used)} ({threadSource})

@@ -117,6 +117,10 @@ async def test_fixture_post_outcome(item):
     passes = evidence.skip_reason is None and evidence.confidence_score >= CONFIDENCE_THRESHOLD
     assert passes == expect["passes"], (item["label"], evidence.confidence_score)
     assert evidence.reply_fit.rule_version == CONFIDENCE_RULE_VERSION
+    if evidence.reply_fit.span_check != "ok":
+        assert evidence.reply_fit.brief_problem_span is None
+    else:
+        assert evidence.reply_fit.brief_problem_span in item["text"]
 
 
 @pytest.mark.asyncio
@@ -227,21 +231,37 @@ def test_span_sharing_no_words_with_the_brief_is_skipped():
     )
     evidence = assess_reply_fit(_evidence(fit), _post(text=text), BRIEF, now=NOW)
     assert evidence.reply_fit.span_check == "off_brief"
+    assert evidence.reply_fit.brief_problem_span is None
+    assert evidence.reply_fit.rejected_span == "favorite mechanical keyboard for long sessions"
     assert evidence.reply_fit.skip_rule == "no_problem_span"
     assert "shares no words with the brief" in evidence.skip_reason
 
 
-def test_broadcast_check_reads_the_post_not_the_proposed_span():
+def test_span_with_altered_punctuation_is_rejected_and_not_shown_as_post_text():
     """A span that swaps the post's full-width question mark for '?' is not in the post."""
     text = "Weekly digest: how do you keep a record of what each coding agent did\uff1f"
-    fit = ReplyFit(
-        post_kind="roundup",
-        brief_problem_span="how do you keep a record of what each coding agent did?",
-        in_others_thread=False,
-        is_vendor_post=False,
-    )
+    proposed = "how do you keep a record of what each coding agent did?"
+    fit = ReplyFit(post_kind="roundup", brief_problem_span=proposed, in_others_thread=False, is_vendor_post=False)
     evidence = assess_reply_fit(_evidence(fit), _post(text=text), BRIEF, now=NOW)
     assert evidence.reply_fit.span_check == "not_in_post"
+    assert evidence.reply_fit.brief_problem_span is None
+    assert evidence.reply_fit.rejected_span == proposed
+    # The post does have a (full-width) question, so the broadcast rule does not
+    # claim "no question"; the missing span skips it.
+    assert evidence.reply_fit.skip_rule == "no_problem_span"
+
+
+def test_broadcast_rule_reads_the_post_for_a_question():
+    statement = "nobody can tell which coding agent changed which file"
+    with_q = f"Weekly digest. Also: {statement}. Anyone solved this?"
+    fit = ReplyFit(post_kind="roundup", brief_problem_span=statement, in_others_thread=False, is_vendor_post=False)
+    evidence = assess_reply_fit(_evidence(fit), _post(text=with_q), BRIEF, now=NOW)
+    assert evidence.reply_fit.skip_rule is None  # has a question: scored, not skipped as broadcast
+    assert evidence.confidence_inputs["asks_question"] == 0.5
+
+    no_q = f"Weekly digest. Also: {statement}."
+    fit = ReplyFit(post_kind="roundup", brief_problem_span=statement, in_others_thread=False, is_vendor_post=False)
+    evidence = assess_reply_fit(_evidence(fit), _post(text=no_q), BRIEF, now=NOW)
     assert evidence.reply_fit.skip_rule == "broadcast_post"
 
 
@@ -295,6 +315,24 @@ def test_post_text_removal_clears_the_problem_span_and_quote():
     assert text not in json.dumps(stored)
     assert stored["evidence"]["reply_fit"]["brief_problem_span"] == "[removed - post deleted]"
     assert stored["evidence"]["reply_fit"]["skip_rule"] is None
+
+
+def test_post_text_removal_clears_a_rejected_span():
+    text = "Honestly my agents are a mess right now, no idea who touched what."
+    fit = ReplyFit(post_kind="problem", brief_problem_span="a mess right now, no idea who touched what",
+                   in_others_thread=False, is_vendor_post=False)
+    evidence = assess_reply_fit(_evidence(fit), _post(text=text), BRIEF, now=NOW)
+    assert evidence.reply_fit.span_check == "off_brief"
+    workflow_id = f"review:test:removal_{uuid.uuid4().hex[:6]}"
+    card = ReviewCard(
+        workflow_id=workflow_id, post=_post(text=text), evidence=evidence, status="skipped",
+        created_at=NOW.isoformat(), updated_at=NOW.isoformat(),
+    )
+    assert _store_card_sync(StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store"))
+    assert _delete_post_text_sync(DeletePostTextInput(workflow_id=workflow_id, idempotency_key="k"))
+    stored = next(c for c in get_all_cards() if c["workflow_id"] == workflow_id)
+    assert "no idea who touched" not in json.dumps(stored)
+    assert stored["evidence"]["reply_fit"]["rejected_span"] == "[removed - post deleted]"
 
 
 def _post(**kw) -> Post:

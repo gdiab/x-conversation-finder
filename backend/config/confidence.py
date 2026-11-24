@@ -24,6 +24,10 @@ CONFIDENCE_RULE_VERSION = "2026-11-24"
 # six-day-old question), while an on-topic opinion and a day-old experience
 # post phrased in words the brief does not use score about 0.45. 0.55 sits in
 # that gap with about 0.1 of margin on each side.
+#
+# A TopicWatch keeps the threshold it was started with (it is part of the
+# workflow input and survives Continue-As-New). To apply a new threshold to a
+# running watch, stop the watch and start it again.
 CONFIDENCE_THRESHOLD = 0.55
 
 # Gates: if any is 0 the confidence is 0. Each one also has a skip rule with
@@ -69,8 +73,8 @@ POST_KIND_SCORES = {
 
 POST_KINDS = tuple(POST_KIND_SCORES)
 
-# Kinds that broadcast rather than converse. Skipped unless the verified
-# problem span is a question.
+# Kinds that broadcast rather than converse. Skipped when the post has no
+# question mark; otherwise the span and threshold rules decide.
 BROADCAST_KINDS = ("announcement", "promo", "roundup", "news")
 
 # Kinds that may be answered inside someone else's conversation.

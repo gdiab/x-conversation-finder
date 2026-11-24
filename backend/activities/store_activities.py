@@ -444,8 +444,15 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
         if evidence_data.get("why_it_fits"):
             evidence_data["why_it_fits"] = "[removed - post deleted]"
         reply_fit = evidence_data.get("reply_fit")
-        if isinstance(reply_fit, dict) and reply_fit.get("brief_problem_span"):
-            evidence_data["reply_fit"] = {**reply_fit, "brief_problem_span": "[removed - post deleted]"}
+        if isinstance(reply_fit, dict):
+            evidence_data["reply_fit"] = {
+                **reply_fit,
+                **{
+                    key: "[removed - post deleted]"
+                    for key in ("brief_problem_span", "rejected_span")
+                    if reply_fit.get(key)
+                },
+            }
         card_db.evidence_data = evidence_data
         flag_modified(card_db, "evidence_data")
         
