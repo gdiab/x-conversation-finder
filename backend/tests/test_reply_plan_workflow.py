@@ -216,32 +216,43 @@ async def test_no_product_mention_gives_claimless_draft_that_passes_gate(make_re
             assert card["evidence"]["reply_plan"]["mention_product"] is False
 
 
-def _pre_plan_history() -> WorkflowHistory:
-    path = FIXTURES / "review_history_pre_reply_plan.json"
-    return WorkflowHistory.from_json("review:test:5001_pre_plan", path.read_text())
+# Review histories recorded without the plan step, each waiting for review
+# after one nudge: on main 4581d99 (before issue #4) and on main 32ff75e
+# (issue #4 merged). Synthetic data; worker identity scrubbed.
+PRE_PLAN_HISTORIES = [
+    ("review_history_pre_reply_plan.json", "review:test:5001_pre_plan"),
+    ("review_history_main_32ff75e.json", "review:test:5032_main_32ff75e"),
+]
 
 
-def test_pre_plan_fixture_has_no_plan_step():
-    events = json.loads((FIXTURES / "review_history_pre_reply_plan.json").read_text())["events"]
+def _pre_plan_history(fixture: str = PRE_PLAN_HISTORIES[0][0], workflow_id: str = PRE_PLAN_HISTORIES[0][1]) -> WorkflowHistory:
+    return WorkflowHistory.from_json(workflow_id, (FIXTURES / fixture).read_text())
+
+
+@pytest.mark.parametrize("fixture,workflow_id", PRE_PLAN_HISTORIES)
+def test_pre_plan_fixture_has_no_plan_step(fixture, workflow_id):
+    events = json.loads((FIXTURES / fixture).read_text())["events"]
     scheduled = [
         e["activityTaskScheduledEventAttributes"]["activityType"]["name"]
         for e in events
         if e["eventType"] == "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
     ]
-    # Recorded on main (4581d99): research, draft, gate, store, then a nudge redraft
+    # Research, draft, gate, store, then a nudge redraft
     assert scheduled[:4] == ["research_post", "draft_reply", "claim_gate", "store_card"]
     assert "plan_reply" not in scheduled
 
 
 @pytest.mark.asyncio
-async def test_review_started_before_plan_step_replays():
+@pytest.mark.parametrize("fixture,workflow_id", PRE_PLAN_HISTORIES)
+async def test_review_started_before_plan_step_replays(fixture, workflow_id):
     """An in-flight Review recorded before the plan step (waiting for review, then
     nudged) replays against the current code without a nondeterminism error."""
-    await Replayer(workflows=[ReviewWorkflow]).replay_workflow(_pre_plan_history())
+    await Replayer(workflows=[ReviewWorkflow]).replay_workflow(_pre_plan_history(fixture, workflow_id))
 
 
 @pytest.mark.asyncio
-async def test_pre_plan_history_fails_replay_without_patch_guard(monkeypatch):
+@pytest.mark.parametrize("fixture,workflow_id", PRE_PLAN_HISTORIES)
+async def test_pre_plan_history_fails_replay_without_patch_guard(monkeypatch, fixture, workflow_id):
     """Control: if the plan step ran unconditionally, the old history would not
     replay. This shows the replay test above exercises the patch guard."""
     from temporalio import workflow as temporal_workflow
@@ -255,7 +266,7 @@ async def test_pre_plan_history_fails_replay_without_patch_guard(monkeypatch):
 
     monkeypatch.setattr(temporal_workflow, "patched", always_patched)
     result = await Replayer(workflows=[ReviewWorkflow]).replay_workflow(
-        _pre_plan_history(), raise_on_replay_failure=False
+        _pre_plan_history(fixture, workflow_id), raise_on_replay_failure=False
     )
     assert result.replay_failure is not None
     assert "Nondeterminism" in str(result.replay_failure)
@@ -790,6 +801,103 @@ async def test_legacy_reply_404_branch_still_deletes_and_redacts_query(make_revi
                     "confirm_posted", args=["https://x.com/test/status/404404", str(uuid.uuid4())]
                 )
             card = await handle.query("get_card")
+            stored = _db_card(workflow_id)
             assert card["post"]["text"] == "[removed - post deleted]"
             assert card["evidence"]["reply_plan"]["target_point"] == "[removed - post deleted]"
-            assert QUESTION not in json.dumps(_db_card(workflow_id))
+            # Same redaction in the query and the stored card (issue #4 fields too)
+            assert card["evidence"]["why_it_fits"] == stored["evidence"]["why_it_fits"] == "[removed - post deleted]"
+            for key in ("brief_problem_span", "rejected_span"):
+                assert card["evidence"]["reply_fit"][key] == stored["evidence"]["reply_fit"][key]
+            assert QUESTION not in json.dumps(stored)
+            assert QUESTION not in json.dumps(card)
+
+
+# ---------- skip rule needs_written_drafts (George, 2026-11-24) ----------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply_type,target", [
+    ("answer_question", QUESTION),
+    ("share_experience", "Struggling with distributed systems reliability."),
+])
+async def test_plan_needing_written_drafts_skips_before_drafting(make_review_input, x_activities, reply_type, target):
+    unfulfillable = ReplyPlan(
+        reply_type=reply_type,
+        target_point=target,
+        mention_product=False,
+        mention_product_reason="They asked for practices, not tools.",
+    )
+    agent = RecordingAgent(plans=[unfulfillable])
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, x_activities, agent):
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_needs_written_{reply_type}"
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
+            )
+            assert await handle.result() == "skipped"
+
+            assert len(agent.plan_calls) == 1, "a valid plan is not re-requested"
+            assert agent.draft_plans == [], "draft() must not run"
+            card = await handle.query("get_card")
+            assert card["skip_reason"].startswith("Reply needs written drafts")
+            assert "ADR-0006 amendment 2026-11-24" in card["skip_reason"]
+            assert card["evidence"]["skip_reason"] == card["skip_reason"]
+            assert card["evidence"]["reply_plan_skip_rule"] == "needs_written_drafts"
+            assert card["evidence"]["reply_plan_errors"] == []
+            assert card["evidence"]["reply_plan"]["reply_type"] == reply_type
+            assert card["evidence"]["draft"] is None
+
+            stored = _db_card(workflow_id)
+            assert stored["status"] == "skipped"
+            assert stored["skip_reason"] == card["skip_reason"]
+            assert stored["evidence"]["reply_plan_skip_rule"] == "needs_written_drafts"
+
+            await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
+
+
+@pytest.mark.asyncio
+async def test_needs_written_drafts_switched_off_drafts_phrase_only(make_review_input, x_activities, monkeypatch):
+    """With the rule off (as for future written drafts), the same plan is drafted."""
+    import backend.planning.needs_written_drafts as rule
+
+    monkeypatch.setattr(rule, "NEEDS_WRITTEN_DRAFTS_ENABLED", False)
+    unfulfillable = ReplyPlan(
+        reply_type="answer_question",
+        target_point=QUESTION,
+        mention_product=False,
+        mention_product_reason="They asked for practices, not tools.",
+    )
+    agent = RecordingAgent(plans=[unfulfillable])
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, x_activities, agent):
+            review_input = make_review_input()
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run, review_input,
+                id=f"review:test:{review_input.post.id}_needs_written_off", task_queue="test",
+            )
+            await env.sleep(1)
+            card = await handle.query("get_card")
+            assert card["status"] == "pending"
+            assert card["evidence"]["reply_plan_skip_rule"] is None
+            assert all(s["kind"] == "non_claim" for s in card["evidence"]["draft"]["segments"])
+
+
+def test_redact_post_text_copies_covers_issue_4_and_5_fields():
+    from backend.activities.store_activities import POST_TEXT_REMOVED, redact_post_text_copies
+
+    evidence = {
+        "why_it_fits": "The post says 'how do you track agents?'",
+        "reply_fit": {"brief_problem_span": "track agents", "rejected_span": "agents?", "post_kind": "question"},
+        "reply_plan": {"target_point": "how do you track agents?", "reply_type": "answer_question"},
+        "matched_topic": "agents",
+    }
+    out = redact_post_text_copies(evidence)
+    assert out["why_it_fits"] == POST_TEXT_REMOVED
+    assert out["reply_fit"]["brief_problem_span"] == POST_TEXT_REMOVED
+    assert out["reply_fit"]["rejected_span"] == POST_TEXT_REMOVED
+    assert out["reply_fit"]["post_kind"] == "question"
+    assert out["reply_plan"]["target_point"] == POST_TEXT_REMOVED
+    assert out["reply_plan"]["reply_type"] == "answer_question"
+    assert out["matched_topic"] == "agents"
+    assert evidence["why_it_fits"].startswith("The post"), "input is not mutated"
+    assert redact_post_text_copies(None) == {}

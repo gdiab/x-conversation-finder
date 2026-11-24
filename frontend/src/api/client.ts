@@ -120,6 +120,8 @@ export interface ReviewCard {
     reply_plan?: ReplyPlan | null;
     reply_plan_errors?: string[];
     reply_plan_attempts?: number;
+    // A plan-stage skip rule that fired on a valid plan (e.g. "needs_written_drafts")
+    reply_plan_skip_rule?: string | null;
   };
   status: ReviewStatus;
   created_at: string;

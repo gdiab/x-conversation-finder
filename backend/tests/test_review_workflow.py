@@ -434,10 +434,17 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
         
         async def plan(self, post, evidence, idempotency_key, feedback=None):
             # issue #5: its drafts carry no claim segment, so plan no product
-            # mention; this keeps the test about the claim gate alone.
+            # mention, as an observation (an answer without a mention would be
+            # skipped by needs_written_drafts); this keeps the test about the
+            # claim gate alone.
             from dataclasses import replace
             base = await super().plan(post, evidence, idempotency_key, feedback)
-            return replace(base, mention_product=False)
+            return replace(
+                base,
+                reply_type="add_observation",
+                target_point="Struggling with distributed systems reliability.",
+                mention_product=False,
+            )
         
         async def research(self, post, topic, product_brief, idempotency_key) -> Evidence:
             """Generate fake evidence."""

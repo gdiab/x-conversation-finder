@@ -302,3 +302,62 @@ async def test_plan_reply_activity_validates_in_code_and_forwards_feedback(sampl
 
     assert any("not an exact substring" in e for e in result.errors)
     assert agent.feedback_seen == [["previous error"]]
+
+
+# ---------- skip rule needs_written_drafts (George, 2026-11-24) ----------
+
+from backend.planning import (  # noqa: E402
+    NEEDS_WRITTEN_DRAFTS_RULE,
+    needs_written_drafts_skip_reason,
+)
+
+
+@pytest.mark.parametrize("reply_type,action", [
+    ("answer_question", "answer the question"),
+    ("share_experience", "share our experience"),
+])
+def test_needs_written_drafts_applies_without_product_mention(reply_type, action):
+    reason = needs_written_drafts_skip_reason(plan(reply_type=reply_type, mention_product=False))
+    assert reason.startswith("Reply needs written drafts")
+    assert action in reason
+    assert "ADR-0006 amendment 2026-11-24" in reason
+
+
+@pytest.mark.parametrize("reply_type,mention", [
+    ("answer_question", True),
+    ("share_experience", True),
+    ("add_observation", False),
+    ("add_observation", True),
+])
+def test_needs_written_drafts_does_not_apply_otherwise(reply_type, mention):
+    assert needs_written_drafts_skip_reason(plan(reply_type=reply_type, mention_product=mention)) is None
+
+
+def test_needs_written_drafts_can_be_switched_off():
+    p = plan(reply_type="answer_question", mention_product=False)
+    assert needs_written_drafts_skip_reason(p, enabled=False) is None
+    assert NEEDS_WRITTEN_DRAFTS_RULE == "needs_written_drafts"
+
+
+@pytest.mark.asyncio
+async def test_plan_reply_activity_reports_needs_written_drafts(sample_post):
+    target = "How do you folks handle eventual consistency?"
+    agent = ScriptedPlanAgent(plan(target_point=target, mention_product=False))
+    result = await ActivityEnvironment().run(
+        ReplyActivities(agent).plan_reply,
+        PlanReplyInput(post=sample_post, evidence=_evidence(), idempotency_key="k"),
+    )
+    assert result.errors == []
+    assert result.skip_rule == "needs_written_drafts"
+    assert result.skip_reason.startswith("Reply needs written drafts")
+
+
+@pytest.mark.asyncio
+async def test_plan_reply_activity_does_not_apply_skip_rule_to_invalid_plan(sample_post):
+    agent = ScriptedPlanAgent(plan(target_point="not in the post", mention_product=False))
+    result = await ActivityEnvironment().run(
+        ReplyActivities(agent).plan_reply,
+        PlanReplyInput(post=sample_post, evidence=_evidence(), idempotency_key="k"),
+    )
+    assert result.errors
+    assert result.skip_rule is None and result.skip_reason is None

@@ -77,6 +77,13 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
             Plan requested {attempts} times; earlier plans failed validation.
           </div>
         )}
+        {evidence.reply_plan_skip_rule === 'needs_written_drafts' && (
+          <div style={{ marginTop: '8px', fontSize: '12px', color: '#c62828' }}>
+            <strong>Skipped:</strong> this reply needs written drafts. Assembled drafts can only use
+            fixed phrases here, and fixed phrases cannot{' '}
+            {plan.reply_type === 'answer_question' ? 'answer the question' : 'share our experience'}.
+          </div>
+        )}
         {draftFailures.length > 0 && (
           <div style={{ marginTop: '8px', fontSize: '12px', color: '#c62828' }}>
             <strong>Draft does not follow this plan:</strong> {draftFailures.join('; ')}

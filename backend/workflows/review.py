@@ -277,24 +277,33 @@ class ReviewWorkflow:
         evidence.reply_plan_errors = list(result.errors)
         evidence.reply_plan_attempts = attempts
         
-        if not result.errors:
+        if not result.errors and not result.skip_reason:
             workflow.logger.info(
                 f"Reply plan: {result.plan.reply_type}, mention_product={result.plan.mention_product}"
             )
             return evidence
         
+        if result.errors:
+            skip_reason = f"Reply plan invalid after {attempts} attempts: " + "; ".join(result.errors[:3])
+            store_key = f"{workflow_id}:store:plan_invalid"
+        else:
+            # A valid plan that a plan-stage skip rule rejects (needs_written_drafts);
+            # the verdict comes from the plan_reply activity result.
+            evidence.reply_plan_skip_rule = result.skip_rule
+            skip_reason = result.skip_reason
+            store_key = f"{workflow_id}:store:plan_skip"
+        
         self.status = "skipped"
         self.skipped = True
-        self.skip_reason = (
-            f"Reply plan invalid after {attempts} attempts: " + "; ".join(result.errors[:3])
-        )
+        self.skip_reason = skip_reason
+        evidence.skip_reason = skip_reason
         self.evidence = evidence
         workflow.logger.info(f"Skipped: {self.skip_reason}")
         
         card = self._build_card(workflow_id, input.post, created_at)
         await workflow.execute_activity(
             store_card,
-            StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:plan_invalid"),
+            StoreCardInput(card=card, idempotency_key=store_key),
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
         )
         return None

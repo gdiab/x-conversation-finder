@@ -5,7 +5,12 @@ from typing import List, Optional
 from temporalio import activity
 
 from backend.models import Evidence, Post, ReplyPlan
-from backend.planning import plan_conformance_failures, validate_reply_plan
+from backend.planning import (
+    NEEDS_WRITTEN_DRAFTS_RULE,
+    needs_written_drafts_skip_reason,
+    plan_conformance_failures,
+    validate_reply_plan,
+)
 from backend.ports import ReplyAgentPort
 from backend.budget import reserve_inference_budget, reconcile_inference_tokens, BudgetExceeded
 from backend.gate.reply_fit import assess_reply_fit
@@ -43,10 +48,16 @@ class PlanReplyInput:
 
 @dataclass
 class PlanReplyResult:
-    """Output of plan_reply: the proposed plan and code's validation errors (empty = valid)."""
+    """Output of plan_reply: the proposed plan and code's validation errors (empty = valid).
+    
+    A valid plan can still skip the post: skip_rule and skip_reason are set
+    when a plan-stage skip rule applies (today only needs_written_drafts).
+    """
     
     plan: ReplyPlan
     errors: List[str] = field(default_factory=list)
+    skip_rule: Optional[str] = None
+    skip_reason: Optional[str] = None
 
 
 # Budget estimate for one planning call (tokens).
@@ -183,11 +194,16 @@ class ReplyActivities:
             activity.logger.info(f"Plan usage unavailable, kept reservation ${reserved_cost:.4f}")
         
         errors = validate_reply_plan(plan, input.post.text)
+        skip_rule = skip_reason = None
+        if not errors:
+            skip_reason = needs_written_drafts_skip_reason(plan)
+            if skip_reason:
+                skip_rule = NEEDS_WRITTEN_DRAFTS_RULE
         activity.logger.info(
             f"Plan: type={plan.reply_type!r} mention_product={plan.mention_product} "
-            f"valid={not errors}"
+            f"valid={not errors} skip_rule={skip_rule}"
         )
-        return PlanReplyResult(plan=plan, errors=errors)
+        return PlanReplyResult(plan=plan, errors=errors, skip_rule=skip_rule, skip_reason=skip_reason)
     
     @activity.defn(name="draft_reply")
     async def draft_reply(self, input: DraftReplyInput) -> Evidence:

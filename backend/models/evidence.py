@@ -136,6 +136,8 @@ class Evidence:
     reply_plan: Optional[ReplyPlan] = None
     reply_plan_errors: List[str] = field(default_factory=list)  # empty when the plan is valid
     reply_plan_attempts: int = 0
+    # A plan-stage skip rule that fired on a valid plan (e.g. needs_written_drafts)
+    reply_plan_skip_rule: Optional[str] = None
     # --- end reply plan ---
     
     def compute_confidence(self) -> float:

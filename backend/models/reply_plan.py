@@ -65,4 +65,5 @@ def reply_plan_card_fields(evidence: Any) -> Dict[str, Any]:
         },
         "reply_plan_errors": list(getattr(evidence, "reply_plan_errors", None) or []),
         "reply_plan_attempts": getattr(evidence, "reply_plan_attempts", 0) or 0,
+        "reply_plan_skip_rule": getattr(evidence, "reply_plan_skip_rule", None),
     }
