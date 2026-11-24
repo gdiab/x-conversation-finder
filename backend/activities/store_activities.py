@@ -7,6 +7,40 @@ import asyncio
 from sqlalchemy.orm.attributes import flag_modified
 
 from backend.models import ReviewCard, Evidence
+from backend.models.reply_plan import reply_plan_card_fields
+
+# Placeholder for post text removed under X's removal duty (ADR-0006); the
+# Review workflow's get_card query uses the same value.
+POST_TEXT_REMOVED = "[removed - post deleted]"
+
+
+def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a copy of a card's evidence dict with every copy of the post text removed.
+
+    Used for the stored card (delete_post_text) and for the Review workflow's
+    get_card query, so both views redact the same fields:
+    - why_it_fits, which quotes the post;
+    - issue #4: reply_fit.brief_problem_span and reply_fit.rejected_span;
+    - issue #5: reply_plan.target_point.
+    Pure and deterministic (the workflow calls it from a query).
+    """
+    evidence_data = dict(evidence_data or {})
+    if evidence_data.get("why_it_fits"):
+        evidence_data["why_it_fits"] = POST_TEXT_REMOVED
+    reply_fit = evidence_data.get("reply_fit")
+    if isinstance(reply_fit, dict):
+        evidence_data["reply_fit"] = {
+            **reply_fit,
+            **{
+                key: POST_TEXT_REMOVED
+                for key in ("brief_problem_span", "rejected_span")
+                if reply_fit.get(key)
+            },
+        }
+    reply_plan = evidence_data.get("reply_plan")
+    if isinstance(reply_plan, dict) and reply_plan.get("target_point"):
+        evidence_data["reply_plan"] = {**reply_plan, "target_point": POST_TEXT_REMOVED}
+    return evidence_data
 from backend.database import get_db, ReviewCardDB
 
 
@@ -43,6 +77,8 @@ class UpdateCardInput:
     post_anyway: Optional[bool] = None
     post_anyway_failing_sentences: Optional[List[str]] = None
     edit_seq: Optional[int] = None  # QA R13: Monotonic edit sequence
+    # issue #5: a gated nudge replaced the draft; drop the old edit's gate results
+    clear_edited_text_gate: Optional[bool] = None
 
 
 @dataclass
@@ -163,10 +199,12 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "model_used": card.evidence.draft.model_used,
                 "input_tokens": card.evidence.draft.input_tokens,
                 "output_tokens": card.evidence.draft.output_tokens,
+                "plan_conformance_failures": list(card.evidence.draft.plan_conformance_failures),  # issue #5
             } if card.evidence.draft else None,
             "skip_reason": card.evidence.skip_reason,
             # Issue #4: should-we-reply features and checks
             "reply_fit": asdict(card.evidence.reply_fit) if card.evidence.reply_fit else None,
+            **reply_plan_card_fields(card.evidence),  # issue #5
         },
         status=status_str,
         created_at=card.created_at,
@@ -266,6 +304,9 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         if input.followup_replies is not None:
             card_db.followup_replies = input.followup_replies
             flag_modified(card_db, "followup_replies")  # QA R13: flag_modified for JSON
+        if input.clear_edited_text_gate:
+            card_db.edited_text_gate_results = None
+            card_db.edited_text_gate_state = None
         if input.edited_text_gate_results is not None:
             card_db.edited_text_gate_results = input.edited_text_gate_results
             flag_modified(card_db, "edited_text_gate_results")  # QA R13: flag_modified for JSON
@@ -339,6 +380,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                     "model_used": value.draft.model_used,
                     "input_tokens": value.draft.input_tokens,
                     "output_tokens": value.draft.output_tokens,
+                    "plan_conformance_failures": list(value.draft.plan_conformance_failures),  # issue #5
                 }
             card_db.evidence_data = evidence_data
             flag_modified(card_db, "evidence_data")
@@ -434,26 +476,11 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
         
         # Delete post text on 404 per X API compliance, keep structure
         post_data = dict(card_db.post_data)
-        post_data["text"] = "[removed - post deleted]"
+        post_data["text"] = POST_TEXT_REMOVED
         card_db.post_data = post_data
         flag_modified(card_db, "post_data")
 
-        # Evidence fields that quote the post go too: why_it_fits quotes it,
-        # and the issue #4 problem span is a verbatim copy of part of it.
-        evidence_data = dict(card_db.evidence_data or {})
-        if evidence_data.get("why_it_fits"):
-            evidence_data["why_it_fits"] = "[removed - post deleted]"
-        reply_fit = evidence_data.get("reply_fit")
-        if isinstance(reply_fit, dict):
-            evidence_data["reply_fit"] = {
-                **reply_fit,
-                **{
-                    key: "[removed - post deleted]"
-                    for key in ("brief_problem_span", "rejected_span")
-                    if reply_fit.get(key)
-                },
-            }
-        card_db.evidence_data = evidence_data
+        card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
         flag_modified(card_db, "evidence_data")
         
         db.commit()
@@ -505,6 +532,8 @@ def get_all_cards() -> List[Dict]:
                 "followup_replies": card.followup_replies if card.followup_replies else None,
                 # B2: Include edit re-gate fields
                 "edited_text_gate_results": card.edited_text_gate_results if card.edited_text_gate_results else None,
+                # issue #5: the plan panel uses this to tell an edited draft apart
+                "edited_text_gate_state": card.edited_text_gate_state,
                 "post_anyway": card.post_anyway,
                 "post_anyway_failing_sentences": card.post_anyway_failing_sentences if card.post_anyway_failing_sentences else None,
             }

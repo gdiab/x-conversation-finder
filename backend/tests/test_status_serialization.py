@@ -57,6 +57,7 @@ async def test_stored_status_is_plain_string_not_char_list(temp_db_for_status, m
                 x_activities.lookup_post,
                 x_activities.check_followup,
                 reply_activities.research_post,
+                reply_activities.plan_reply,
                 reply_activities.draft_reply,
                 claim_gate,
                 store_card,

@@ -136,7 +136,8 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `search_recent`: Search X for recent posts
 - `lookup_post`: Get full post details
 - `research_post`: Analyze post and gather evidence; code then checks the proposed reply features, computes confidence and applies the skip rules (`backend/gate/reply_fit.py`), so a skipped post is never drafted
-- `draft_reply`: Generate draft with claim gate
+- `plan_reply`: Plan the reply before drafting (reply type, target point in the post, whether to mention the product); code validates the plan, re-requests it once, then skips the post. Runs only for posts that passed the research-stage skip rules
+- `draft_reply`: Generate draft with claim gate, steered by the plan
 - `store_card` / `update_card`: Persist review cards
 
 ### Key Constraints (ADRs)

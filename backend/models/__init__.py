@@ -3,6 +3,7 @@
 from .evidence import Evidence, FounderMaterial, Claim, Segment, ClaimGateResult, Draft, ReplyFit
 from .post import Post, Author
 from .review import ReviewCard, SentenceGateResult
+from .reply_plan import ReplyPlan, REPLY_TYPES
 
 __all__ = [
     "Evidence",
@@ -16,4 +17,6 @@ __all__ = [
     "Author",
     "ReviewCard",
     "SentenceGateResult",
+    "ReplyPlan",
+    "REPLY_TYPES",
 ]

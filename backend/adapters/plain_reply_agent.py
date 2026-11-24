@@ -6,7 +6,7 @@ This is the baseline for ADR-0006 evaluation.
 """
 
 import json
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from openai import AsyncOpenAI
 
@@ -19,8 +19,11 @@ from backend.models import (
     ClaimGateResult,
     Draft,
     ReplyFit,
+    ReplyPlan,
 )
 from backend.config.confidence import POST_KINDS
+from backend.models.reply_plan import REPLY_TYPE_DESCRIPTIONS
+from backend.planning import MAX_REASON_CHARS
 from backend.ports import ReplyAgentPort
 from backend.activities.claim_gate_activity import (
     split_into_sentences,
@@ -92,6 +95,73 @@ def parse_reply_fit(result: dict) -> ReplyFit:
         in_others_thread=_strict_bool(result.get("in_others_thread")),
         is_vendor_post=_strict_bool(result.get("is_vendor_post")),
     )
+
+
+# --- Reply plan (issue #5) ---
+
+# How the assembled drafter picks its closer for each planned reply type.
+# Phrase ids refer to backend/gate/non_claim_set.py (v2.1.0).
+_CLOSER_GUIDANCE_BY_REPLY_TYPE = {
+    "answer_question": (
+        "The poster asked a question. If you include a claim, it is the answer: pick the\n"
+        "  sentence that answers the target point, and close with an offer\n"
+        "  (offer.share_details or offer.happy_to_help). Ask a question back only when the\n"
+        "  question cannot be answered without more context (q.context or q.stack)."
+    ),
+    "add_observation": (
+        "React to the target point. Close with the one question that follows from the\n"
+        "  target point. Never ask about something the post already says, and use\n"
+        "  q.problem only when the target point describes a problem. If no question fits,\n"
+        "  close with offer.love_to_hear."
+    ),
+    "share_experience": (
+        "Relate the target point to how we run our own product. Close with\n"
+        "  offer.love_to_hear, or with q.current_tool or q.stack when the post does not\n"
+        "  already say what they use."
+    ),
+}
+
+
+_EXAMPLE_WITH_CLAIM = """{"segments": [
+  {"kind": "non_claim", "phrase_id": "opener.hey"},
+  {"kind": "claim", "source_passage_id": "passage_0", "sentence_index": 1},
+  {"kind": "non_claim", "phrase_id": "q.current_tool"}
+]}"""
+
+
+def format_plan_for_prompt(plan: ReplyPlan) -> str:
+    """Render the validated plan for the draft prompt."""
+    description = REPLY_TYPE_DESCRIPTIONS.get(plan.reply_type, "")
+    mention = "yes" if plan.mention_product else "no"
+    return (
+        "Reply plan (decided before drafting; follow it):\n"
+        f"- Reply type: {plan.reply_type} ({description})\n"
+        f"- Respond to this part of the post: \"{plan.target_point}\"\n"
+        f"- Mention the product: {mention} ({plan.mention_product_reason})"
+    )
+
+
+def _parse_plan(result: object) -> dict:
+    """Read the model's plan JSON without coercion; validation judges the values.
+
+    Missing or wrongly typed values become "" or None so that validation
+    records a reason instead of the adapter raising.
+    """
+    if not isinstance(result, dict):
+        result = {}
+    reply_type = result.get("reply_type")
+    target_point = result.get("target_point")
+    mention = result.get("mention_product")
+    reason = result.get("mention_product_reason")
+    return {
+        "reply_type": reply_type.strip() if isinstance(reply_type, str) else "",
+        # Only outer whitespace is trimmed: target_point must match the post exactly.
+        "target_point": target_point.strip() if isinstance(target_point, str) else "",
+        "mention_product": mention if isinstance(mention, bool) else None,
+        "mention_product_reason": reason.strip() if isinstance(reason, str) else "",
+    }
+
+# --- end reply plan ---
 
 
 class PlainReplyAgent(ReplyAgentPort):
@@ -198,11 +268,80 @@ Most posts are not reply opportunities. Do not stretch a post to fit the brief."
             reply_fit=parse_reply_fit(result),
         )
     
+    async def plan(
+        self,
+        post: Post,
+        evidence: Evidence,
+        idempotency_key: str,
+        feedback: Optional[List[str]] = None,
+    ) -> ReplyPlan:
+        """Plan the reply (issue #5): one JSON-mode call, validated by the activity."""
+        materials = "\n".join(f"- {m.passage}" for m in evidence.founder_materials) or "(none)"
+        feedback_text = ""
+        if feedback:
+            feedback_text = (
+                "\n\nYour previous plan was rejected by code for these reasons:\n"
+                + "\n".join(f"- {f}" for f in feedback)
+                + "\nReturn a corrected plan."
+            )
+
+        prompt = f"""Plan a reply to this X post. Decide HOW to reply; do not write the reply.
+
+Post (verbatim, between the markers):
+<<<POST
+{post.text}
+POST>>>
+
+Why this post was surfaced: {evidence.why_it_fits}
+
+What the founder's material says about the product:
+{materials}
+
+Return a JSON object with exactly these keys:
+- reply_type: one of
+  - "answer_question": the post asks something we can answer. Only when the post contains a question.
+  - "add_observation": react to the poster's specific point.
+  - "share_experience": relate the post to how we run our own product.
+- target_point: the exact span of the post the reply responds to, copied character for
+  character from the post (a phrase or one sentence, not a summary). For answer_question,
+  it is the question being answered.
+- mention_product: true or false. true only when the product directly addresses the target
+  point and the founder material above supports it. false is a normal outcome, for example
+  when the poster asks for something else, shares their own work, or a product mention would
+  read as a pitch.
+- mention_product_reason: one line, at most {MAX_REASON_CHARS} characters, explaining that decision.{feedback_text}"""
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "You plan replies to social posts. Return valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            # JSON mode returns a bare object; see research() above.
+            response_format={"type": "json_object"},
+        )
+
+        try:
+            result = json.loads(response.choices[0].message.content)
+        except (TypeError, ValueError):
+            result = {}
+        fields = _parse_plan(result)
+
+        usage = response.usage
+        return ReplyPlan(
+            **fields,
+            model_used=self.model,
+            input_tokens=usage.prompt_tokens if usage else 0,
+            output_tokens=usage.completion_tokens if usage else 0,
+        )
+
     async def draft(
         self,
         evidence: Evidence,
         steer: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        plan: Optional[ReplyPlan] = None,
     ) -> Evidence:
         """
         Draft a reply with structured segments.
@@ -216,7 +355,44 @@ Most posts are not reply opportunities. Do not stretch a post to fit the brief."
 
         steer_text = f"\n\nAdditional instruction: {steer}" if steer else ""
 
-        prompt = f"""Draft a reply to this post as structured segments.
+        # issue #5: under assembled drafts the plan steers the closer and
+        # whether a claim is included. Without a plan (Review workflows started
+        # before the plan step) the rules are unchanged.
+        if plan is None:
+            plan_text = ""
+            segments_rule = "one claim, one closer (an offer or a question), and"
+            claim_rule = "- Include exactly one claim: the sentence that speaks most directly to this post."
+            closer_rule = """- For the closer, prefer a question when the poster describes a problem, shares their
+  setup, or asks something open-ended. Use an offer only when the poster asks for help,
+  a recommendation, or details."""
+            return_rule = "2-3 segments, exactly 1 claim"
+            example = _EXAMPLE_WITH_CLAIM
+        else:
+            plan_text = format_plan_for_prompt(plan) + "\n\n"
+            closer_rule = "- Closer: " + _CLOSER_GUIDANCE_BY_REPLY_TYPE.get(
+                plan.reply_type, "pick the closer that fits the target point."
+            )
+            if plan.mention_product:
+                segments_rule = "one claim, one closer (an offer or a question), and"
+                claim_rule = (
+                    "- Include exactly one claim: the sentence that speaks most directly to the\n"
+                    "  target point."
+                )
+                return_rule = "2-3 segments, exactly 1 claim"
+                example = _EXAMPLE_WITH_CLAIM
+            else:
+                segments_rule = "no claim, one or two closers (at most one offer and at most one question), and"
+                claim_rule = (
+                    "- Include NO claim segment: the plan says not to mention the product.\n"
+                    "  Use phrases only."
+                )
+                return_rule = "1-3 segments, no claim"
+                example = """{"segments": [
+  {"kind": "non_claim", "phrase_id": "thanks.for_sharing"},
+  {"kind": "non_claim", "phrase_id": "q.current_tool"}
+]}"""
+
+        prompt = f"""{plan_text}Draft a reply to this post as structured segments.
 
 CRITICAL RULES - QA R13:
 - Claims are QUOTED, not paraphrased. You reference a passage sentence by its number.
@@ -230,17 +406,15 @@ Available phrases (phrase_id: text):
 {available_phrases}
 
 Composition rules:
-- At most 3 segments in total: one claim, one closer (an offer or a question), and
+- At most 3 segments in total: {segments_rule}
   optionally ONE lead-in, which is either an opener or a thanks phrase, never both.
 - Order: lead-in, then the claim, then the closer.
 - No repeated phrase_id, never an opener alone.
-- Include exactly one claim: the sentence that speaks most directly to this post.
+{claim_rule}
 - Choose each phrase for this post; do not default to the first phrase in a category.
   For the lead-in, use "Thanks for sharing." when the poster shares their own work or
   results, a short opener otherwise, or no lead-in at all.
-- For the closer, prefer a question when the poster describes a problem, shares their
-  setup, or asks something open-ended. Use an offer only when the poster asks for help,
-  a recommendation, or details.
+{closer_rule}
 
 Why this post fits: {evidence.why_it_fits}
 
@@ -249,16 +423,12 @@ Founder Materials (selectable sentences, numbered):
 {steer_text}
 
 Return a JSON object with one key:
-- segments: list of objects (2-3 segments, exactly 1 claim):
+- segments: list of objects ({return_rule}):
   - For claims: {{"kind": "claim", "source_passage_id": "passage_X", "sentence_index": N}}
   - For non-claims: {{"kind": "non_claim", "phrase_id": "exact.phrase.id"}}
 
 Example (shape only; pick phrases and the sentence for this post):
-{{"segments": [
-  {{"kind": "non_claim", "phrase_id": "opener.hey"}},
-  {{"kind": "claim", "source_passage_id": "passage_0", "sentence_index": 1}},
-  {{"kind": "non_claim", "phrase_id": "q.current_tool"}}
-]}}
+{example}
 
 Be conversational and honest. Never invent features. Reference founder material by sentence number only.
 Max 280 chars total after text insertion."""
