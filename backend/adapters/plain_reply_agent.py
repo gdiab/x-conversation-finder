@@ -21,6 +21,50 @@ from backend.models import (
     Draft,
 )
 from backend.ports import ReplyAgentPort
+from backend.activities.claim_gate_activity import (
+    split_into_sentences,
+    has_unresolved_referent,
+    ends_with_abbreviation,
+)
+from backend.gate.non_claim_set import NON_CLAIM_PHRASES
+
+
+def format_materials_for_prompt(materials: list[FounderMaterial]) -> str:
+    """List each passage's selectable sentences under the numbers the claim gate uses.
+
+    Numbers are indices into split_into_sentences(passage), the same split the
+    claim gate checks against. Sentences the gate never accepts as claims (an
+    unresolved referent at the start, or an abbreviation at the end) are left
+    out, but the remaining sentences keep their original numbers.
+    """
+    blocks = []
+    for m in materials:
+        lines = [f"[{m.passage_id}] Source: {m.source}"]
+        for i, sentence in enumerate(split_into_sentences(m.passage)):
+            if has_unresolved_referent(sentence) or ends_with_abbreviation(sentence):
+                continue
+            lines.append(f"  {i}: {sentence}")
+        if len(lines) == 1:
+            lines.append("  (no selectable sentences)")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def format_phrases_for_prompt() -> str:
+    """List the current fixed phrase set, grouped by category, from the code's own list."""
+    labels = {
+        "opener": "OPENERS",
+        "thanks": "THANKS",
+        "offer": "OFFERS (closer)",
+        "question_to_poster": "QUESTIONS (closer)",
+    }
+    groups: dict[str, list[str]] = {}
+    for p in NON_CLAIM_PHRASES:
+        groups.setdefault(p.category, []).append(f"  {p.id}: {p.text}")
+    return "\n".join(
+        f"{labels.get(cat, cat.upper())}:\n" + "\n".join(lines)
+        for cat, lines in groups.items()
+    )
 
 
 class PlainReplyAgent(ReplyAgentPort):
@@ -67,6 +111,9 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
+            # Without JSON mode, models wrap long answers in ```json fences,
+            # which json.loads rejects.
+            response_format={"type": "json_object"},
         )
         
         result = json.loads(response.choices[0].message.content)
@@ -116,50 +163,56 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
         The LLM outputs segments {text, kind, source_passage_id?, quote?}.
         Activity payloads use plain str Literals, not str-Enums.
         """
-        materials_text = "\n\n".join(
-            f"[{m.passage_id}] Source: {m.source}\n{m.passage}"
-            for m in evidence.founder_materials
-        )
-        
+        materials_text = format_materials_for_prompt(evidence.founder_materials)
+        available_phrases = format_phrases_for_prompt()
+
         steer_text = f"\n\nAdditional instruction: {steer}" if steer else ""
-        
-        # QA R13: List available phrases for the model
-        available_phrases = """OPENERS: opener.hi, opener.hello, opener.hey, opener.thanks, opener.great_question
-THANKS: thanks.for_sharing, thanks.for_asking, thanks.for_question, thanks.interesting
-OFFERS: offer.happy_to_help, offer.happy_to_share, offer.share_details, offer.glad_to_help, offer.love_to_hear, offer.feel_free
-QUESTIONS: q.current_tool, q.stack, q.use_case, q.context, q.tried, q.looking_for, q.problem"""
-        
+
         prompt = f"""Draft a reply to this post as structured segments.
 
 CRITICAL RULES - QA R13:
-- Claims are QUOTED, not paraphrased. You reference a passage sentence by its index (0-based).
+- Claims are QUOTED, not paraphrased. You reference a passage sentence by its number.
 - For claims: output ONLY {{"kind": "claim", "source_passage_id": "passage_X", "sentence_index": N}}
+  where N is one of the sentence numbers listed under that passage below. Use no other number.
 - For non-claims: output {{"kind": "non_claim", "phrase_id": "phrase.id"}} - select from the fixed list below
 - The code will insert the exact passage sentence for claims and the phrase text for non-claims.
-- You do NOT write ANY free text. Claims are sentence indices, non-claims are phrase IDs.
+- You do NOT write ANY free text. Claims are sentence numbers, non-claims are phrase IDs.
 
-Available Phrase IDs (select one by exact ID):
+Available phrases (phrase_id: text):
 {available_phrases}
+
+Composition rules:
+- At most 3 segments in total: one claim, one closer (an offer or a question), and
+  optionally ONE lead-in, which is either an opener or a thanks phrase, never both.
+- Order: lead-in, then the claim, then the closer.
+- No repeated phrase_id, never an opener alone.
+- Include exactly one claim: the sentence that speaks most directly to this post.
+- Choose each phrase for this post; do not default to the first phrase in a category.
+  For the lead-in, use "Thanks for sharing." when the poster shares their own work or
+  results, a short opener otherwise, or no lead-in at all.
+- For the closer, prefer a question when the poster describes a problem, shares their
+  setup, or asks something open-ended. Use an offer only when the poster asks for help,
+  a recommendation, or details.
 
 Why this post fits: {evidence.why_it_fits}
 
-Founder Materials (sentence indices shown):
+Founder Materials (selectable sentences, numbered):
 {materials_text}
 {steer_text}
 
-Return JSON with:
-- segments: list of objects (1-3 segments, at most 1 claim):
+Return a JSON object with one key:
+- segments: list of objects (2-3 segments, exactly 1 claim):
   - For claims: {{"kind": "claim", "source_passage_id": "passage_X", "sentence_index": N}}
   - For non-claims: {{"kind": "non_claim", "phrase_id": "exact.phrase.id"}}
 
-Example:
-[
-  {{"kind": "non_claim", "phrase_id": "opener.thanks"}},
-  {{"kind": "claim", "source_passage_id": "passage_0", "sentence_index": 0}},
-  {{"kind": "non_claim", "phrase_id": "offer.share_details"}}
-]
+Example (shape only; pick phrases and the sentence for this post):
+{{"segments": [
+  {{"kind": "non_claim", "phrase_id": "opener.hey"}},
+  {{"kind": "claim", "source_passage_id": "passage_0", "sentence_index": 1}},
+  {{"kind": "non_claim", "phrase_id": "q.current_tool"}}
+]}}
 
-Be conversational and honest. Never invent features. Reference founder material by sentence index only.
+Be conversational and honest. Never invent features. Reference founder material by sentence number only.
 Max 280 chars total after text insertion."""
 
         response = await self.client.chat.completions.create(
@@ -169,12 +222,13 @@ Max 280 chars total after text insertion."""
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
+            # JSON mode returns a bare object; see research() above.
+            response_format={"type": "json_object"},
         )
         
         result = json.loads(response.choices[0].message.content)
         
         from backend.models import Segment
-        from backend.activities.claim_gate_activity import split_into_sentences
         from backend.gate.non_claim_set import get_phrase_text
         
         # QA R13: Claims have {kind, source_passage_id, sentence_index}, non-claims have {kind, phrase_id}
