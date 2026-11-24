@@ -445,8 +445,26 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         </div>
       )}
 
+      {/* Skipped: say why, and show the rejected draft as not for posting */}
+      {card.status === 'skipped' && (
+        <div style={{
+          backgroundColor: '#f5f5f5',
+          border: '1px solid #ccc',
+          padding: '12px',
+          borderRadius: '4px',
+          marginBottom: '20px',
+        }}>
+          <strong>Skipped:</strong> {card.skip_reason || card.evidence.skip_reason || 'No reason recorded'}
+          {card.evidence.draft && (
+            <div style={{ marginTop: '8px', fontSize: '14px', color: '#666' }}>
+              Rejected draft (not for posting): <em>{card.evidence.draft.text || '(empty)'}</em>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Draft Reply */}
-      {card.evidence.draft && (
+      {card.evidence.draft && card.status !== 'skipped' && (
         <div style={{ marginBottom: '20px' }}>
           <h4>Draft Reply (Combined)</h4>
           {isEditing ? (

@@ -64,12 +64,15 @@ class TopicWatchWorkflow:
     
     Workflow ID: watch:{account}:{topic}
     
-    Steps:
-    1. Sleep for poll_interval_hours
-    2. Search recent posts with since_id
-    3. Filter already-seen post IDs
-    4. Spawn Review child for each new post
-    5. Continue-As-New after N iterations
+    Steps (each iteration):
+    1. Search recent posts with since_id
+    2. Filter already-seen post IDs
+    3. Spawn Review child for each new post
+    4. Sleep for poll_interval_hours
+    Continue-As-New after N iterations. The search runs first, so a new watch
+    returns results right away; because every iteration ends with its sleep,
+    the run started by Continue-As-New can also search immediately without
+    shortening the poll interval.
     """
     
     def __init__(self):
@@ -103,22 +106,10 @@ class TopicWatchWorkflow:
             if self.stop_requested:
                 workflow.logger.info("Stop requested, ending watch")
                 return "stopped"
-            
-            workflow.logger.info(f"Iteration {iteration}: sleeping {poll_interval_hours}h")
-            
-            try:
-                await workflow.wait_condition(
-                    lambda: self.stop_requested,
-                    timeout=timedelta(hours=poll_interval_hours),
-                )
-            except asyncio.TimeoutError:
-                pass
-            
-            if self.stop_requested:
-                workflow.logger.info("Stop requested during sleep, ending watch")
-                return "stopped"
-            
-            workflow.logger.info(f"Searching for '{input.query}' since_id={since_id}")
+
+            workflow.logger.info(
+                f"Iteration {iteration}: searching for '{input.query}' since_id={since_id}"
+            )
             
             try:
                 search_result = await workflow.execute_activity(
@@ -188,7 +179,21 @@ class TopicWatchWorkflow:
                 workflow.logger.error(f"Search failed: {e}")
                 # Re-raise to fail the workflow - don't continue silently
                 raise
-        
+
+            workflow.logger.info(f"Iteration {iteration}: sleeping {poll_interval_hours}h")
+
+            try:
+                await workflow.wait_condition(
+                    lambda: self.stop_requested,
+                    timeout=timedelta(hours=poll_interval_hours),
+                )
+            except asyncio.TimeoutError:
+                pass
+
+            if self.stop_requested:
+                workflow.logger.info("Stop requested during sleep, ending watch")
+                return "stopped"
+
         workflow.logger.info(
             f"Reached Continue-As-New threshold ({input.continue_as_new_after} iterations)"
         )
