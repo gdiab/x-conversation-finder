@@ -126,7 +126,7 @@ Drafts are assembled, not written. A claim segment references a founder passage 
 
 ## Amendment 2026-11-24: Written drafts, product claims checked against the brief
 
-**Status:** Proposed (2026-11-24). Supersedes the 2026-11-21 amendment's "drafts are assembled, not written" rule for the model-draft path once accepted. Everything else in that amendment stays.
+**Status:** Accepted (2026-11-24, George, by merging PR #3). Supersedes the 2026-11-21 amendment's "drafts are assembled, not written" rule for the model-draft path once the switch criteria below pass. Everything else in that amendment stays.
 
 **Context:** The first live runs (2 watches, 20 posts, 2026-11-23) showed the cost the 2026-11-21 amendment predicted ("v1 replies are templated by design"). Every draft was a fixed opener, one verbatim brief sentence and a fixed question, for example "Thanks for sharing. <brief sentence>. What problem are you solving?" The drafts cannot react to what the post says, so they read as a product pitch dropped into a thread. George judged none of the 20 postable as written. The assembled format removed invented claims, but it also removed the conversation, which is the reason to reply at all.
 
