@@ -111,6 +111,7 @@ echo ""
 WORKFLOW_ID=$(python3 << 'PYEOF'
 import asyncio
 import sys
+from datetime import datetime, timezone
 from temporalio.client import Client
 from backend.workflows.review import ReviewWorkflow, ReviewInput, ReviewConfig
 from backend.models import Post, Author
@@ -119,7 +120,8 @@ from backend.config import get_settings
 async def main():
     post = Post(
         id="e2e_9999",
-        text="Just shipped our new reliable distributed system! Handles network partitions gracefully.",
+        # A fresh, on-topic question, so it passes the should-we-reply rules (issue #4)
+        text="How do you keep distributed systems reliable when the network partitions?",
         author=Author(
             id="111",
             username="test_user",
@@ -127,7 +129,7 @@ async def main():
             followers_count=500,
             verified=False
         ),
-        created_at="2026-11-21T07:00:00",
+        created_at=datetime.now(timezone.utc).isoformat(),
         like_count=42,
         reply_count=5,
         repost_count=10,
@@ -142,7 +144,8 @@ async def main():
         post=post,
         account="e2e-test",
         topic="reliability",
-        product_brief="We build tools for reliable distributed systems.",
+        # Contains the fake reply agent's founder passage, which must be in the brief (issue #4)
+        product_brief="Our product helps developers build reliable distributed systems. Our product provides automatic failover. Our product guarantees strong consistency.",
         confidence_threshold=0.7,
         config=config
     )

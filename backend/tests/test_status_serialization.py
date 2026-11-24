@@ -65,7 +65,7 @@ async def test_stored_status_is_plain_string_not_char_list(temp_db_for_status, m
         ):
             post = Post(
                 id="status_test_1",
-                text="Testing status serialization for reliable systems",
+                text="How do you test status serialization for reliable systems?",
                 author=Author(
                     id="999",
                     username="test_status",

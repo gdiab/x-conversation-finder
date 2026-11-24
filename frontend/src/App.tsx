@@ -101,7 +101,9 @@ function App() {
             {showSkipped ? 'Hide' : 'Show'} skipped ({skippedCards.length})
           </button>
           <p style={{ color: '#666', fontSize: '14px' }}>
-            Posts with no usable draft, usually because no reply could be backed by your product brief.
+            Posts with no draft to post: the post was not a reply opportunity (for example a promo,
+            a roundup or a vendor post), its confidence was below the threshold, or no reply could be
+            backed by your product brief. Each card says which.
           </p>
           {showSkipped && skippedCards.map((card) => (
             <ReviewCard

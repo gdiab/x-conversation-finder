@@ -5,6 +5,7 @@
 import { useState, useRef } from 'react';
 import type { ReviewCard as ReviewCardType } from '../api/client';
 import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId } from '../api/client';
+import { ReplyFitPanel } from './ReplyFitPanel';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -221,6 +222,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         <div style={{ marginBottom: '12px' }}>
           <strong>Why it fits:</strong> {card.evidence.why_it_fits}
         </div>
+
+        {/* Issue #4: should-we-reply features and checks */}
+        <ReplyFitPanel
+          replyFit={card.evidence.reply_fit}
+          confidenceInputs={card.evidence.confidence_inputs}
+        />
         
         {card.evidence.founder_materials.length > 0 && (
           <div style={{ marginBottom: '12px' }}>

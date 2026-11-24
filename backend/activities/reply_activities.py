@@ -7,6 +7,7 @@ from temporalio import activity
 from backend.models import Evidence, Post
 from backend.ports import ReplyAgentPort
 from backend.budget import reserve_inference_budget, reconcile_inference_tokens, BudgetExceeded
+from backend.gate.reply_fit import assess_reply_fit
 
 
 @dataclass
@@ -42,7 +43,8 @@ class ReplyActivities:
         Calls the ReplyAgentPort to:
         - Analyze the post against the topic
         - Find relevant founder materials
-        - Compute confidence features
+        - Then, in code: check the proposed reply features, compute confidence,
+          and apply the should-we-reply skip rules (backend/gate/reply_fit.py)
         
         Idempotent by post_id + topic hash.
         """
@@ -71,6 +73,14 @@ class ReplyActivities:
             product_brief=input.product_brief,
             idempotency_key=input.idempotency_key,
         )
+
+        # Issue #4 / ADR-0006: code checks the proposed features, sets the
+        # confidence and applies the skip rules, whatever the adapter returned.
+        evidence = assess_reply_fit(evidence, input.post, input.product_brief)
+        if evidence.skip_reason:
+            activity.logger.info(
+                f"Post {input.post.id} fails rule {evidence.reply_fit.skip_rule}: {evidence.skip_reason}"
+            )
         
         # R5-B1: Reconcile inference budget (research_post must reconcile)
         # If usage is missing from LLM response, keep the full reservation

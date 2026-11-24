@@ -1,6 +1,6 @@
 """Review workflow models."""
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, Literal
 
@@ -136,6 +136,8 @@ class ReviewCard:
                     "output_tokens": self.evidence.draft.output_tokens,
                 } if self.evidence.draft else None,
                 "skip_reason": self.evidence.skip_reason,
+                # Issue #4: should-we-reply features and checks
+                "reply_fit": asdict(self.evidence.reply_fit) if self.evidence.reply_fit else None,
             },
             "status": self.status,  # R4-NN5: status is already a str (ReviewStatusStr), not enum
             "created_at": self.created_at,

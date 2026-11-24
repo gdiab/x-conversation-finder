@@ -4,9 +4,8 @@ Fake reply agent for testing.
 No API calls, deterministic outputs based on post content.
 """
 
-from datetime import datetime, timezone
 from typing import Optional
-import hashlib
+import re
 
 from backend.models import (
     Evidence,
@@ -15,9 +14,30 @@ from backend.models import (
     Claim,
     ClaimGateResult,
     Draft,
+    ReplyFit,
 )
 from backend.ports import ReplyAgentPort
 
+
+
+def _brief_material(product_brief: str) -> list[FounderMaterial]:
+    """The brief's first prose paragraph (no heading or list), as passage_0.
+
+    The default fake draft claims sentence 0 of passage_0 (sentence 2 when
+    steered "technical"), so a brief whose first paragraph has short,
+    standalone sentences drafts cleanly; the test brief (conftest.py) does.
+    """
+    for block in re.split(r"\n\s*\n", product_brief):
+        lines = [line.strip() for line in block.strip().splitlines()]
+        if not lines or any(line.startswith(("#", "-", "*")) for line in lines):
+            continue
+        return [FounderMaterial(
+            source="product_brief.md",
+            passage=" ".join(lines),
+            relevance="First paragraph of the product brief",
+            passage_id="passage_0",
+        )]
+    return []
 
 class FakeReplyAgent(ReplyAgentPort):
     """Fake reply agent for testing and CI."""
@@ -29,40 +49,40 @@ class FakeReplyAgent(ReplyAgentPort):
         product_brief: str,
         idempotency_key: str,
     ) -> Evidence:
-        """Generate fake evidence deterministically."""
-        
-        post_hash = int(hashlib.md5(post.id.encode()).hexdigest()[:8], 16)
-        confidence_base = (post_hash % 100) / 100.0
-        
-        has_topic_keyword = topic.lower() in post.text.lower()
-        
-        confidence_inputs = {
-            "lookup_succeeded": 1.0,
-            "replies_open": 1.0 if post.reply_settings == "everyone" else 0.0,
-            "topic_match_strength": 0.8 if has_topic_keyword else 0.3,
-            "freshness": self._compute_freshness(post.created_at),
-            "author_reach": min(1.0, (post.author.followers_count / 100000) * 0.5),
-            "has_founder_material": 1.0,
-        }
+        """Propose reply features deterministically from the post text.
+
+        Stands in for the research model: the span is the first sentence with a
+        question mark, else the first sentence naming the topic, else None.
+        The research_post activity checks the features and sets confidence.
+        Its founder passage is the brief's first paragraph, so it passes the
+        check that passages appear in the brief, as the real model's must.
+        """
+        sentences = [s for s in re.split(r"(?<=[.!?])\s+", post.text.strip()) if s]
+        span = next((s for s in sentences if "?" in s), None)
+        if span is None:
+            span = next((s for s in sentences if topic.lower() in s.lower()), None)
+
+        if "?" in post.text:
+            post_kind = "question"
+        elif span is not None:
+            post_kind = "problem"
+        else:
+            post_kind = "opinion"
         
         evidence = Evidence(
             post_id=post.id,
             matched_topic=topic,
             why_it_fits=f"Post mentions '{topic}' and discusses relevant themes.",
             confidence_score=0.0,
-            confidence_inputs=confidence_inputs,
-            founder_materials=[
-                FounderMaterial(
-                    source="product_brief.md",
-                    # Per Architect: short, standalone, claim-ready sentences
-                    passage="Our product helps developers build reliable distributed systems. Our product provides automatic failover. Our product guarantees strong consistency.",
-                    relevance="Directly relevant to the post's discussion of reliability",
-                    passage_id="passage_0",
-                )
-            ],
+            confidence_inputs={},
+            founder_materials=_brief_material(product_brief),
+            reply_fit=ReplyFit(
+                post_kind=post_kind,
+                brief_problem_span=span,
+                in_others_thread=bool(post.in_reply_to_user_id),
+                is_vendor_post=False,
+            ),
         )
-        
-        evidence.confidence_score = evidence.compute_confidence()
         
         return evidence
     
@@ -188,20 +208,3 @@ class FakeReplyAgent(ReplyAgentPort):
         )
         
         return evidence
-    
-    def _compute_freshness(self, created_at: str) -> float:
-        """Compute freshness score."""
-        created_dt = datetime.fromisoformat(created_at)
-        # Ensure timezone-aware for comparison
-        if created_dt.tzinfo is None:
-            created_dt = created_dt.replace(tzinfo=timezone.utc)
-        age_hours = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600
-        
-        if age_hours < 24:
-            return 1.0
-        elif age_hours < 48:
-            return 0.5
-        elif age_hours < 168:
-            return 0.25
-        else:
-            return 0.1

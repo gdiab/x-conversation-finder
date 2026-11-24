@@ -11,6 +11,22 @@ export type ReviewStatus =
   | "expired" 
   | "followup_due";
 
+// Issue #4: should-we-reply features. The first four fields are what the
+// research model proposed; the rest are set by code (backend/gate/reply_fit.py).
+export interface ReplyFit {
+  post_kind: string | null;
+  brief_problem_span: string | null;
+  in_others_thread: boolean | null;
+  is_vendor_post: boolean | null;
+  span_check: 'ok' | 'missing' | 'not_in_post' | 'too_short' | 'off_brief' | 'not_checked';
+  thread_source: 'metadata' | 'model' | 'missing' | 'not_checked';
+  in_others_thread_used: boolean | null;
+  materials_dropped?: number;
+  rejected_span?: string | null;
+  skip_rule: string | null;
+  rule_version: string;
+}
+
 export interface ReviewCard {
   workflow_id: string;
   post: {
@@ -83,6 +99,9 @@ export interface ReviewCard {
       output_tokens: number;
     } | null;
     skip_reason: string | null;
+    // Issue #4: should-we-reply features (proposed by research, checked by code).
+    // Absent on cards stored before the feature existed.
+    reply_fit?: ReplyFit | null;
   };
   status: ReviewStatus;
   created_at: string;

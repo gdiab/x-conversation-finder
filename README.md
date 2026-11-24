@@ -99,8 +99,10 @@ test_review_workflow.py::test_review_workflow_low_confidence PASSED
 test_topic_watch_workflow.py::test_topic_watch_workflow_single_iteration PASSED
 test_topic_watch_workflow.py::test_topic_watch_workflow_spawns_reviews PASSED
 test_topic_watch_workflow.py::test_topic_watch_workflow_continue_as_new PASSED
-test_models.py::test_evidence_compute_confidence PASSED
-test_models.py::test_evidence_compute_confidence_low PASSED
+test_models.py::test_direct_question_clears_threshold PASSED
+test_models.py::test_always_on_features_alone_do_not_clear_threshold PASSED
+test_reply_fit.py::test_fixture_post_outcome[s10] PASSED
+test_reply_fit.py::test_skipped_post_makes_no_draft_call PASSED
 ```
 
 ## Documentation

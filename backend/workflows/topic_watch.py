@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
     from backend.activities import SearchRecentInput, SearchRecentOutput
     from backend.workflows.review import ReviewWorkflow, ReviewInput, ReviewConfig
     from temporalio.workflow import ParentClosePolicy
+    from backend.config.confidence import CONFIDENCE_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ class TopicWatchInput:
     query: str
     product_brief: str
     max_results: int = 10
-    confidence_threshold: float = 0.6
+    confidence_threshold: float = CONFIDENCE_THRESHOLD  # dated in backend/config/confidence.py
     continue_as_new_after: int = 100
     since_id: Optional[str] = None
     iteration: int = 0

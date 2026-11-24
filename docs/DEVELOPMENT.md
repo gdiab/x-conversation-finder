@@ -100,7 +100,8 @@ This runs all replay tests with fake adapters. No API keys needed.
 
 - `test_review_workflow.py`: Tests Review workflow signals, updates, queries, and timeout
 - `test_topic_watch_workflow.py`: Tests TopicWatch polling loop and Continue-As-New
-- `test_models.py`: Tests confidence computation
+- `test_models.py`: Tests confidence computation (rule v2, `backend/config/confidence.py`)
+- `test_reply_fit.py`: Tests the should-we-reply rules on synthetic posts (`fixtures/reply_fit_posts.json`): skip reasons, confidence spread, and no draft call for a skipped post
 
 ## Using the System
 
@@ -134,7 +135,7 @@ This runs all replay tests with fake adapters. No API keys needed.
 
 - `search_recent`: Search X for recent posts
 - `lookup_post`: Get full post details
-- `research_post`: Analyze post and gather evidence
+- `research_post`: Analyze post and gather evidence; code then checks the proposed reply features, computes confidence and applies the skip rules (`backend/gate/reply_fit.py`), so a skipped post is never drafted
 - `draft_reply`: Generate draft with claim gate
 - `store_card` / `update_card`: Persist review cards
 

@@ -173,7 +173,9 @@ def product_brief():
     return """
 # Product Brief
 
-Our product helps developers build reliable distributed systems.
+Our product helps developers build reliable distributed systems. Our product provides automatic failover. Our product guarantees strong consistency.
+
+Our platform is designed for reliability.
 
 Key features:
 - Automatic failover

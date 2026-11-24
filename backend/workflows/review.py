@@ -44,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
         verify_edited_text,
     )
     from backend.activities.store_activities import store_card, update_card
+    from backend.config.confidence import CONFIDENCE_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ class ReviewInput:
     topic: str
     product_brief: str
     account: str
-    confidence_threshold: float = 0.6
+    confidence_threshold: float = CONFIDENCE_THRESHOLD  # dated in backend/config/confidence.py
     config: ReviewConfig = None
     
     def __post_init__(self):
@@ -156,7 +157,11 @@ class ReviewWorkflow:
         )
 
     async def _research_post(self, workflow_id: str, created_at: str) -> Optional[Evidence]:
-        """Research post and return evidence, or None if skipped for low confidence."""
+        """Research post and return evidence, or None if skipped before drafting.
+
+        Skips (issue #4) when a should-we-reply rule fired in research_post or
+        the computed confidence is below the threshold.
+        """
         input = self.input
         
         evidence = await workflow.execute_activity(
@@ -174,12 +179,26 @@ class ReviewWorkflow:
         
         workflow.logger.info(f"Research complete: confidence={evidence.confidence_score:.2f}")
         
-        # Skip if low confidence
-        if evidence.confidence_score < input.confidence_threshold:
+        # --- Issue #4: decide whether to reply before any draft is made ---
+        # research_post applied the skip rules in code (backend/gate/reply_fit.py)
+        # and set evidence.skip_reason; then the computed confidence must clear
+        # the threshold. Either way no draft_reply call is made.
+        skip_reason = evidence.skip_reason
+        # A research result recorded before the rules existed has no reply_fit
+        # and an old-rule score. New workflow tasks skip it; replaying a history
+        # that already went on to draft keeps the old path (no patch marker).
+        if evidence.reply_fit is None and workflow.patched("issue-4-reply-fit-gate"):
+            skip_reason = skip_reason or "Research predates the should-we-reply rules; not drafting"
+        if not skip_reason and evidence.confidence_score < input.confidence_threshold:
+            skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
+        if skip_reason:
             self.status = "skipped"
-            self.skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
+            self.skipped = True
+            self.skip_reason = skip_reason
+            evidence.skip_reason = skip_reason
             self.evidence = evidence
-            workflow.logger.info(f"Skipped: low confidence {evidence.confidence_score:.2f}")
+            workflow.logger.info(f"Skipped before drafting: {skip_reason}")
+            # --- end issue #4 block ---
             
             card = self._build_card(workflow_id, input.post, created_at)
             

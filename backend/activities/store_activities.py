@@ -1,6 +1,6 @@
 """Storage activities for review cards using SQLite."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import asyncio
@@ -165,6 +165,8 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "output_tokens": card.evidence.draft.output_tokens,
             } if card.evidence.draft else None,
             "skip_reason": card.evidence.skip_reason,
+            # Issue #4: should-we-reply features and checks
+            "reply_fit": asdict(card.evidence.reply_fit) if card.evidence.reply_fit else None,
         },
         status=status_str,
         created_at=card.created_at,
@@ -431,9 +433,28 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
             return False
         
         # Delete post text on 404 per X API compliance, keep structure
-        post_data = card_db.post_data
+        post_data = dict(card_db.post_data)
         post_data["text"] = "[removed - post deleted]"
         card_db.post_data = post_data
+        flag_modified(card_db, "post_data")
+
+        # Evidence fields that quote the post go too: why_it_fits quotes it,
+        # and the issue #4 problem span is a verbatim copy of part of it.
+        evidence_data = dict(card_db.evidence_data or {})
+        if evidence_data.get("why_it_fits"):
+            evidence_data["why_it_fits"] = "[removed - post deleted]"
+        reply_fit = evidence_data.get("reply_fit")
+        if isinstance(reply_fit, dict):
+            evidence_data["reply_fit"] = {
+                **reply_fit,
+                **{
+                    key: "[removed - post deleted]"
+                    for key in ("brief_problem_span", "rejected_span")
+                    if reply_fit.get(key)
+                },
+            }
+        card_db.evidence_data = evidence_data
+        flag_modified(card_db, "evidence_data")
         
         db.commit()
         return True
