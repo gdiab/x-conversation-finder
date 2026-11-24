@@ -6,8 +6,7 @@ This is the baseline for ADR-0006 evaluation.
 """
 
 import json
-from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
@@ -19,7 +18,9 @@ from backend.models import (
     Claim,
     ClaimGateResult,
     Draft,
+    ReplyFit,
 )
+from backend.config.confidence import POST_KINDS
 from backend.ports import ReplyAgentPort
 from backend.activities.claim_gate_activity import (
     split_into_sentences,
@@ -67,6 +68,32 @@ def format_phrases_for_prompt() -> str:
     )
 
 
+def _strict_bool(value: Any) -> Optional[bool]:
+    """A JSON boolean, or the strings "true"/"false"; anything else is unknown."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    return None
+
+
+def parse_reply_fit(result: dict) -> ReplyFit:
+    """Read the model's proposed reply features, keeping only well-typed values.
+
+    An unknown post_kind or a malformed flag becomes None, which the skip
+    rules treat as "research incomplete" rather than guessing.
+    """
+    kind = result.get("post_kind")
+    kind = kind.strip().lower() if isinstance(kind, str) else None
+    span = result.get("brief_problem_span")
+    return ReplyFit(
+        post_kind=kind if kind in POST_KINDS else None,
+        brief_problem_span=span if isinstance(span, str) and span.strip() else None,
+        in_others_thread=_strict_bool(result.get("in_others_thread")),
+        is_vendor_post=_strict_bool(result.get("is_vendor_post")),
+    )
+
+
 class PlainReplyAgent(ReplyAgentPort):
     """Plain LLM adapter - baseline implementation."""
     
@@ -85,24 +112,45 @@ class PlainReplyAgent(ReplyAgentPort):
         product_brief: str,
         idempotency_key: str,
     ) -> Evidence:
-        """Research post and gather evidence."""
-        
-        prompt = f"""Analyze this X post for potential reply:
+        """Research a post: propose reply features and pick founder material.
+
+        Returns features only. The research_post activity checks them and sets
+        confidence and any skip reason in code (backend/gate/reply_fit.py).
+        """
+        thread_hint = ""
+        if post.in_reply_to_user_id:
+            thread_hint = "\nThis post is a reply to another post."
+
+        prompt = f"""Analyze this X post. Decide whether the founder of the product below should reply to it.
 
 Post: {post.text}
-Author: @{post.author.username} ({post.author.followers_count} followers)
+Author: @{post.author.username} ({post.author.followers_count} followers){thread_hint}
 Topic: {topic}
 
 Product Brief:
 {product_brief}
 
-Return JSON with:
-- matched_topic: which topic this relates to
-- why_it_fits: short explanation quoting the post
-- founder_materials: list of {{source, passage, relevance}} from the brief
-- topic_match_strength: 0.0-1.0 score
+Return a JSON object with these keys:
+- post_kind: exactly one of {", ".join(POST_KINDS)}.
+    question: the poster asks for help, advice or a recommendation.
+    problem: the poster describes a problem they have now.
+    experience: the poster shares what happened to them or what they learned.
+    opinion: the poster states a view or a take.
+    announcement: the poster announces a launch, release or feature.
+    promo: the poster promotes a product, service, course or event.
+    roundup: a list or digest of links, tools or updates.
+    news: the poster reports news about someone else.
+- brief_problem_span: copy, character for character, the part of the post that shows a
+  problem the product brief solves. Use null if no part of the post shows such a problem.
+  Do not paraphrase, shorten or fix the text.
+- in_others_thread: true if the post is a reply inside a conversation started by another account.
+- is_vendor_post: true if the poster promotes their own product or company, competing or not.
+- matched_topic: which topic this relates to.
+- why_it_fits: one short sentence quoting the post. If it does not fit, say why.
+- founder_materials: list of {{source, passage, relevance}} copied from the brief that a reply
+  could use. Use an empty list if nothing in the brief applies.
 
-Be honest about uncertainty. If the post doesn't fit well, say so."""
+Most posts are not reply opportunities. Do not stretch a post to fit the brief."""
 
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -118,37 +166,29 @@ Be honest about uncertainty. If the post doesn't fit well, say so."""
         
         result = json.loads(response.choices[0].message.content)
         
-        confidence_inputs = {
-            "lookup_succeeded": 1.0,
-            "replies_open": 1.0 if post.reply_settings == "everyone" else 0.0,
-            "topic_match_strength": result.get("topic_match_strength", 0.5),
-            "freshness": self._compute_freshness(post.created_at),
-            "author_reach": self._compute_reach(post.author.followers_count),
-            "has_founder_material": 1.0 if result.get("founder_materials") else 0.0,
-        }
-        
         founder_materials = []
-        for i, m in enumerate(result.get("founder_materials", [])):
-            material = FounderMaterial(
-                source=m["source"],
+        for i, m in enumerate(result.get("founder_materials") or []):
+            if not isinstance(m, dict) or not isinstance(m.get("passage"), str):
+                continue
+            founder_materials.append(FounderMaterial(
+                source=str(m.get("source", "product_brief")),
                 passage=m["passage"],
-                relevance=m["relevance"],
+                relevance=str(m.get("relevance", "")),
                 passage_id=f"passage_{i}",
-            )
-            founder_materials.append(material)
+            ))
         
-        evidence = Evidence(
+        # Confidence is not computed here: the activity does it in code from
+        # these proposed features (ADR-0006). Any number the model types, such
+        # as a legacy topic_match_strength, is ignored.
+        return Evidence(
             post_id=post.id,
-            matched_topic=result["matched_topic"],
-            why_it_fits=result["why_it_fits"],
+            matched_topic=str(result.get("matched_topic") or topic),
+            why_it_fits=str(result.get("why_it_fits") or ""),
             confidence_score=0.0,
-            confidence_inputs=confidence_inputs,
+            confidence_inputs={},
             founder_materials=founder_materials,
+            reply_fit=parse_reply_fit(result),
         )
-        
-        evidence.confidence_score = evidence.compute_confidence()
-        
-        return evidence
     
     async def draft(
         self,
@@ -301,24 +341,3 @@ Max 280 chars total after text insertion."""
         )
         
         return evidence
-    
-    def _compute_freshness(self, created_at: str) -> float:
-        """Compute freshness score."""
-        created_dt = datetime.fromisoformat(created_at)
-        age_hours = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600
-        
-        if age_hours < 24:
-            return 1.0
-        elif age_hours < 48:
-            return 0.5
-        elif age_hours < 168:
-            return 0.25
-        else:
-            return 0.1
-    
-    def _compute_reach(self, followers: int) -> float:
-        """Compute author reach score."""
-        import math
-        if followers <= 0:
-            return 0.0
-        return min(1.0, math.log10(followers) / 6.0)

@@ -1,6 +1,6 @@
 """Data models for the X conversation finder."""
 
-from .evidence import Evidence, FounderMaterial, Claim, Segment, ClaimGateResult, Draft
+from .evidence import Evidence, FounderMaterial, Claim, Segment, ClaimGateResult, Draft, ReplyFit
 from .post import Post, Author
 from .review import ReviewCard, SentenceGateResult
 
@@ -11,6 +11,7 @@ __all__ = [
     "Segment",
     "ClaimGateResult",
     "Draft",
+    "ReplyFit",
     "Post",
     "Author",
     "ReviewCard",

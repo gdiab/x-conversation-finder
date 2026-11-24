@@ -26,7 +26,10 @@ RESEARCH_JSON = {
             "relevance": "Answers how to track agent work",
         }
     ],
-    "topic_match_strength": 0.8,
+    "post_kind": "question",
+    "brief_problem_span": None,
+    "in_others_thread": False,
+    "is_vendor_post": False,
 }
 
 DRAFT_JSON = {
@@ -70,6 +73,9 @@ async def test_research_uses_json_mode_and_parses(sample_post):
     assert completions.calls[0]["response_format"] == {"type": "json_object"}
     assert evidence.matched_topic == "multi-agent-orchestration"
     assert len(evidence.founder_materials) == 1
+    assert evidence.reply_fit.post_kind == "question"
+    # The adapter proposes features only; the research_post activity scores them.
+    assert evidence.confidence_inputs == {}
 
 
 @pytest.mark.asyncio

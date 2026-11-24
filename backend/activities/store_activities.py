@@ -1,6 +1,6 @@
 """Storage activities for review cards using SQLite."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import asyncio
@@ -165,6 +165,8 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "output_tokens": card.evidence.draft.output_tokens,
             } if card.evidence.draft else None,
             "skip_reason": card.evidence.skip_reason,
+            # Issue #4: should-we-reply features and checks
+            "reply_fit": asdict(card.evidence.reply_fit) if card.evidence.reply_fit else None,
         },
         status=status_str,
         created_at=card.created_at,

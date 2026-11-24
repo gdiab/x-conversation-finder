@@ -236,7 +236,9 @@ async def test_review_workflow_low_confidence(make_review_input, x_activities, r
                 update_card,
             ],
         ):
-            review_input = make_review_input(confidence_threshold=0.95)
+            # The sample post passes every skip rule and scores about 0.96 under
+            # confidence rule v2, so only a threshold above that skips it.
+            review_input = make_review_input(confidence_threshold=0.99)
             workflow_id = f"review:test:{review_input.post.id}_low_conf"
             
             handle = await env.client.start_workflow(
@@ -416,7 +418,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
     from backend.activities.claim_gate_activity import claim_gate
     from backend.ports import ReplyAgentPort
     from backend.activities.reply_activities import ReplyActivities
-    from backend.models import Evidence, FounderMaterial, Claim, ClaimGateResult, Draft
+    from backend.models import Evidence, FounderMaterial, Claim, ClaimGateResult, Draft, ReplyFit
     from typing import Optional
     
     class BadClaimReplyAgent(ReplyAgentPort):
@@ -430,6 +432,13 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
                 why_it_fits="Post discusses relevant topics.",
                 confidence_score=0.85,
                 confidence_inputs={"topic_match_strength": 0.9},
+                # Issue #4: research proposes reply features; these pass the skip rules
+                reply_fit=ReplyFit(
+                    post_kind="question",
+                    brief_problem_span="How do you folks handle eventual consistency?",
+                    in_others_thread=False,
+                    is_vendor_post=False,
+                ),
                 founder_materials=[
                     FounderMaterial(
                         source="product_brief",
@@ -543,7 +552,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
     from backend.activities.claim_gate_activity import claim_gate
     from backend.ports import ReplyAgentPort
     from backend.activities.reply_activities import ReplyActivities
-    from backend.models import Evidence, FounderMaterial, Segment, ClaimGateResult, Draft
+    from backend.models import Evidence, FounderMaterial, Segment, ClaimGateResult, Draft, ReplyFit
     from typing import Optional
     
     class AlwaysFailingClaimAgent(ReplyAgentPort):
@@ -560,6 +569,13 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
                 why_it_fits="Post discusses relevant topics.",
                 confidence_score=0.85,
                 confidence_inputs={"topic_match_strength": 0.9},
+                # Issue #4: research proposes reply features; these pass the skip rules
+                reply_fit=ReplyFit(
+                    post_kind="question",
+                    brief_problem_span="How do you folks handle eventual consistency?",
+                    in_others_thread=False,
+                    is_vendor_post=False,
+                ),
                 founder_materials=[
                     FounderMaterial(
                         source="product_brief",
@@ -721,7 +737,7 @@ async def test_review_workflow_confirm_posted_with_post_1005(x_activities, reply
             from backend.models import Post, Author
             post = Post(
                 id="1005",
-                text="Enterprise reliability challenges and solutions.",
+                text="Enterprise reliability challenges: how do you solve them?",
                 author=Author(
                     id="author_1005",
                     username="enterprise_dev",

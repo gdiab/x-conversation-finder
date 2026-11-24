@@ -8,6 +8,8 @@ import os
 from pydantic_settings import BaseSettings
 from pydantic import field_validator, model_validator
 
+from backend.config.confidence import CONFIDENCE_THRESHOLD
+
 
 class Settings(BaseSettings):
     """Application configuration."""
@@ -110,7 +112,10 @@ class Settings(BaseSettings):
     
     # Confidence threshold (ADR-0006: computed confidence)
     # Set 2026-11-21: Threshold 0.6 with guessed weights, revisit after first 50 real cards
-    confidence_threshold: float = 0.6
+    # Set 2026-11-24 (issue #4): 0.55 for confidence rule v2. The rule, its weights
+    # and the reasons for this value are in backend/config/confidence.py.
+    # An env value (CONFIDENCE_THRESHOLD) overrides this default.
+    confidence_threshold: float = CONFIDENCE_THRESHOLD
     
     # Follow-up settings (ADR-0002: follow-up timer)
     # Set 2026-11-21: 3 days after confirmation

@@ -83,6 +83,30 @@ class Draft:
     output_tokens: int = 0
 
 
+# --- Issue #4: "should we reply?" features (self-contained block) ---
+@dataclass
+class ReplyFit:
+    """Should-we-reply features for a post (issue #4, ADR-0006).
+
+    The first four fields are what the research model proposed, stored as
+    received after type checks; code never trusts them as they are. The rest
+    are set by code in backend/gate/reply_fit.py.
+    """
+
+    # Proposed by the research model
+    post_kind: Optional[str] = None  # one of backend.config.confidence.POST_KINDS
+    brief_problem_span: Optional[str] = None  # exact span of the post, or None
+    in_others_thread: Optional[bool] = None
+    is_vendor_post: Optional[bool] = None
+    # Set by code
+    span_check: str = "not_checked"  # ok | missing | not_in_post | too_short
+    thread_source: str = "not_checked"  # metadata | model | missing
+    in_others_thread_used: Optional[bool] = None  # the value the rules used
+    skip_rule: Optional[str] = None  # rule id when a skip rule fired
+    rule_version: str = ""  # backend.config.confidence.CONFIDENCE_RULE_VERSION
+# --- end issue #4 block ---
+
+
 @dataclass
 class Evidence:
     """Evidence trail for a post."""
@@ -95,32 +119,41 @@ class Evidence:
     founder_materials: List[FounderMaterial]
     draft: Optional[Draft] = None
     skip_reason: Optional[str] = None
+    # Issue #4: should-we-reply features and the code's checks of them
+    reply_fit: Optional[ReplyFit] = None
     
     def compute_confidence(self) -> float:
         """
         Compute confidence from evidence shape.
         Per ADR-0006: confidence is computed, never asserted by the model.
-        
-        Features:
-        - lookup_succeeded: 1.0 if we got the post
-        - replies_open: 1.0 if anyone can reply
-        - topic_match_strength: 0.0-1.0 from keyword/semantic match
-        - freshness: 1.0 if < 24h, 0.5 if < 48h, 0.25 if < 7d
-        - author_reach: log10(followers)/6.0, capped at 1.0
-        - has_founder_material: 1.0 if we have supporting passages
-        
-        Weighted sum, threshold 0.6
+
+        Rule v2 (backend/config/confidence.py, dated there):
+        - gates (lookup_succeeded, replies_open, has_founder_material):
+          any gate at 0 makes the score 0;
+        - weighted sum of kind_score, asks_question, brief_overlap,
+          author_reach and direct_post;
+        - multiplied by a freshness factor that can only lower the score.
+
+        Every input is set by code (backend/gate/reply_fit.py); a missing
+        input counts as 0.
         """
+        from backend.config.confidence import (
+            CONFIDENCE_GATES,
+            CONFIDENCE_WEIGHTS,
+            FRESHNESS_FLOOR,
+        )
+
         inputs = self.confidence_inputs
-        
-        weights = {
-            "lookup_succeeded": 0.15,
-            "replies_open": 0.15,
-            "topic_match_strength": 0.25,
-            "freshness": 0.15,
-            "author_reach": 0.10,
-            "has_founder_material": 0.20,
-        }
-        
-        score = sum(inputs.get(k, 0.0) * w for k, w in weights.items())
-        return min(1.0, max(0.0, score))
+
+        def value(key: str) -> float:
+            v = inputs.get(key, 0.0)
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return 0.0
+            return min(1.0, max(0.0, float(v)))
+
+        if any(value(g) <= 0.0 for g in CONFIDENCE_GATES):
+            return 0.0
+
+        score = sum(value(k) * w for k, w in CONFIDENCE_WEIGHTS.items())
+        score *= FRESHNESS_FLOOR + (1.0 - FRESHNESS_FLOOR) * value("freshness")
+        return round(min(1.0, max(0.0, score)), 4)

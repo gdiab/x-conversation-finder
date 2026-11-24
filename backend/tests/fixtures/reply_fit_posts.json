@@ -1,0 +1,170 @@
+{
+  "_about": "Synthetic posts for issue #4. Modeled on the kinds of post in the first live runs (2026-11-23): promos, a daily tool-update roundup, an explainer in someone else's thread, a competitor launch, a pricing essay, and direct questions and problem descriptions. All text, handles and ids are invented; no real X data. 'model' is what a research model would return in JSON mode; 'expect' is the outcome the rules must give.",
+  "now": "2026-11-24T12:00:00+00:00",
+  "topic": "multi-agent-orchestration",
+  "product_brief": "# Product brief\n\nOur product records what each coding agent did in one durable ledger.\nStatus is computed from the record, never estimated by an agent.\nTeams use it to coordinate several coding agents working on the same repository.\nHandoffs between agents keep their context because every step is written down.",
+  "posts": [
+    {
+      "id": "s01",
+      "label": "direct question: tracking agents",
+      "text": "How are you all keeping track of what each coding agent did? I run four agents on the same repository and lose the thread by lunch.",
+      "hours_ago": 2, "followers": 2400,
+      "model": {"post_kind": "question", "brief_problem_span": "How are you all keeping track of what each coding agent did?", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": true}
+    },
+    {
+      "id": "s02",
+      "label": "direct question: handoff context",
+      "text": "Anyone found a way to hand off context between coding agents without pasting giant summaries into every prompt?",
+      "hours_ago": 5, "followers": 310,
+      "model": {"post_kind": "question", "brief_problem_span": "Anyone found a way to hand off context between coding agents without pasting giant summaries into every prompt?", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": true}
+    },
+    {
+      "id": "s03",
+      "label": "problem: agents report fake status",
+      "text": "Running several coding agents in parallel and their status reports are pure fiction. They say done when nothing is committed.",
+      "hours_ago": 8, "followers": 15000,
+      "model": {"post_kind": "problem", "brief_problem_span": "Running several coding agents in parallel and their status reports are pure fiction.", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": true}
+    },
+    {
+      "id": "s04",
+      "label": "problem: two agents in one repository",
+      "text": "Lost an afternoon because two agents edited the same repository and neither one knew what the other had done.",
+      "hours_ago": 20, "followers": 900,
+      "model": {"post_kind": "problem", "brief_problem_span": "two agents edited the same repository and neither one knew what the other had done", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": true}
+    },
+    {
+      "id": "s05",
+      "label": "experience, a day old, in words the brief does not use: below threshold",
+      "text": "Spent the weekend coordinating three coding agents. The hardest part was knowing which one had actually finished its step.",
+      "hours_ago": 30, "followers": 4200,
+      "model": {"post_kind": "experience", "brief_problem_span": "The hardest part was knowing which one had actually finished its step.", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": false}
+    },
+    {
+      "id": "s06",
+      "label": "question asked inside someone else's thread",
+      "text": "@user_alpha how do you stop the agents from overwriting each other's work in the same repository?",
+      "hours_ago": 3, "followers": 150,
+      "conversation_id": "s90", "in_reply_to_user_id": "u_alpha",
+      "model": {"post_kind": "question", "brief_problem_span": "how do you stop the agents from overwriting each other's work in the same repository?", "in_others_thread": true, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": true}
+    },
+    {
+      "id": "s07",
+      "label": "on-topic opinion, nothing to answer: below threshold",
+      "text": "Hot take: an agent is only as useful as the record it leaves behind.",
+      "hours_ago": 10, "followers": 600,
+      "model": {"post_kind": "opinion", "brief_problem_span": "an agent is only as useful as the record it leaves behind", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": false}
+    },
+    {
+      "id": "s08",
+      "label": "stale question, six days old",
+      "text": "What do people use to see which coding agent is working on what? Our standups have turned into guesswork.",
+      "hours_ago": 144, "followers": 50,
+      "model": {"post_kind": "question", "brief_problem_span": "What do people use to see which coding agent is working on what?", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": null, "passes": true}
+    },
+    {
+      "id": "s09",
+      "label": "question with replies limited",
+      "text": "How do you keep a record of what your coding agents changed overnight?",
+      "hours_ago": 4, "followers": 8000, "reply_settings": "following",
+      "model": {"post_kind": "question", "brief_problem_span": "How do you keep a record of what your coding agents changed overnight?", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "replies_limited", "passes": false}
+    },
+    {
+      "id": "s10",
+      "label": "vendor promo with a discount",
+      "text": "Our agent toolkit is 40% off this week only. Ship faster with parallel coding agents. Link below.",
+      "hours_ago": 1, "followers": 22000,
+      "model": {"post_kind": "promo", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": true},
+      "expect": {"skip_rule": "vendor_post", "passes": false}
+    },
+    {
+      "id": "s11",
+      "label": "event promo, not the poster's product",
+      "text": "Agent hackathon this Saturday downtown, free pizza and prizes. Sign up through the link.",
+      "hours_ago": 6, "followers": 3000,
+      "model": {"post_kind": "promo", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "broadcast_post", "passes": false}
+    },
+    {
+      "id": "s12",
+      "label": "daily tool-update roundup that ends with a question",
+      "text": "Daily tool updates: editor A shipped background agents, CLI B added hooks, framework C 2.0 is out with a new planner. What did I miss?",
+      "hours_ago": 3, "followers": 41000,
+      "model": {"post_kind": "roundup", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "broadcast_post", "passes": false}
+    },
+    {
+      "id": "s13",
+      "label": "weekly link roundup",
+      "text": "This week in coding agents: five links worth your time, from planning loops to sandboxed shells.",
+      "hours_ago": 12, "followers": 9000,
+      "model": {"post_kind": "roundup", "brief_problem_span": "from planning loops to sandboxed shells", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "broadcast_post", "passes": false}
+    },
+    {
+      "id": "s14",
+      "label": "explainer inside someone else's thread",
+      "text": "@user_beta The reason this happens is that each agent keeps its own context window, so nothing is shared unless you write it down somewhere.",
+      "hours_ago": 2, "followers": 1200,
+      "conversation_id": "s91", "in_reply_to_user_id": "u_beta",
+      "model": {"post_kind": "opinion", "brief_problem_span": "each agent keeps its own context window, so nothing is shared unless you write it down somewhere", "in_others_thread": true, "is_vendor_post": false},
+      "expect": {"skip_rule": "others_thread", "passes": false}
+    },
+    {
+      "id": "s15",
+      "label": "competitor launch post",
+      "text": "Launching today: our orchestration layer for coding agents, with a shared task board and live status for every agent.",
+      "hours_ago": 7, "followers": 18000,
+      "model": {"post_kind": "announcement", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": true},
+      "expect": {"skip_rule": "vendor_post", "passes": false}
+    },
+    {
+      "id": "s16",
+      "label": "pricing and economics essay",
+      "text": "Long thread on the economics of agent tooling: per-seat pricing breaks when one engineer runs ten agents. Here is how I would price it instead.",
+      "hours_ago": 9, "followers": 27000,
+      "model": {"post_kind": "opinion", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "no_problem_span", "passes": false}
+    },
+    {
+      "id": "s17",
+      "label": "news about a model release",
+      "text": "A large lab just released a coding model with a much longer context window. Benchmarks look strong.",
+      "hours_ago": 4, "followers": 65000,
+      "model": {"post_kind": "news", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "broadcast_post", "passes": false}
+    },
+    {
+      "id": "s18",
+      "label": "model paraphrased the span instead of quoting it",
+      "text": "Honestly my agents are a mess right now, no idea who touched what.",
+      "hours_ago": 5, "followers": 700,
+      "model": {"post_kind": "problem", "brief_problem_span": "I cannot tell which agent changed which file", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "no_problem_span", "passes": false}
+    },
+    {
+      "id": "s19",
+      "label": "off-topic question",
+      "text": "What is everyone's favorite mechanical keyboard for long coding sessions?",
+      "hours_ago": 1, "followers": 5000,
+      "model": {"post_kind": "question", "brief_problem_span": null, "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "no_problem_span", "passes": false}
+    },
+    {
+      "id": "s20",
+      "label": "model returned an unknown post kind",
+      "text": "Coding agents are wild. Three of them argued in my terminal for an hour about a variable name.",
+      "hours_ago": 3, "followers": 2000,
+      "model": {"post_kind": "rant", "brief_problem_span": "Three of them argued in my terminal for an hour", "in_others_thread": false, "is_vendor_post": false},
+      "expect": {"skip_rule": "research_incomplete", "passes": false}
+    }
+  ]
+}
