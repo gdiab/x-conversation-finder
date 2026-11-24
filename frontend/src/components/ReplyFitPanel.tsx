@@ -19,7 +19,7 @@ const SKIP_RULE_LABELS: Record<string, string> = {
   vendor_post: 'Vendor post',
   broadcast_post: 'Broadcast post with no question',
   no_problem_span: 'No problem the brief solves',
-  others_thread: "Inside someone else's conversation",
+  others_thread: "Replying in another account's conversation",
   no_founder_material: 'No supporting founder material',
 };
 
@@ -74,7 +74,7 @@ export function ReplyFitPanel({ replyFit, confidenceInputs }: ReplyFitPanelProps
           )}
         </li>
         <li>
-          In someone else's thread: {yesNo(replyFit.in_others_thread_used)} ({threadSource})
+          Replying to another account: {yesNo(replyFit.in_others_thread_used)} ({threadSource})
         </li>
         <li>Vendor post: {yesNo(replyFit.is_vendor_post)}</li>
         {(replyFit.materials_dropped ?? 0) > 0 && (

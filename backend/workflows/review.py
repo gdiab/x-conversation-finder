@@ -184,6 +184,11 @@ class ReviewWorkflow:
         # and set evidence.skip_reason; then the computed confidence must clear
         # the threshold. Either way no draft_reply call is made.
         skip_reason = evidence.skip_reason
+        # A research result recorded before the rules existed has no reply_fit
+        # and an old-rule score. New workflow tasks skip it; replaying a history
+        # that already went on to draft keeps the old path (no patch marker).
+        if evidence.reply_fit is None and workflow.patched("issue-4-reply-fit-gate"):
+            skip_reason = skip_reason or "Research predates the should-we-reply rules; not drafting"
         if not skip_reason and evidence.confidence_score < input.confidence_threshold:
             skip_reason = f"Low confidence: {evidence.confidence_score:.2f} < {input.confidence_threshold}"
         if skip_reason:

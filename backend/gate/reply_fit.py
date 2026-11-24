@@ -115,12 +115,15 @@ def verify_materials(
 
 
 def thread_position(post: Post, model_value: Optional[bool]) -> tuple[Optional[bool], str]:
-    """Whether the post is a reply in someone else's conversation, and the source.
+    """Whether the post replies into another account's conversation, and the source.
 
     X metadata decides when it can: a post that starts its own conversation is
-    not in another thread, and a reply to a different user is. A reply to the
-    poster's own post (a self-thread) cannot be placed from the post alone, so
-    the model's proposal is used, as it is when metadata is missing.
+    not, and a post that replies to another account is treated as one. X does
+    not say who started a conversation, so a poster answering a commenter in
+    their own thread also counts; the rule and its reason say "replying to
+    another account", which is always true then. A reply to the poster's own
+    post (a self-thread) cannot be placed from the post alone, so the model's
+    proposal is used, as it is when metadata is missing.
     """
     conversation_id = post.conversation_id or ""
     if conversation_id and conversation_id == post.id:
@@ -280,7 +283,7 @@ def _skip_rule(
         return "no_problem_span", f"No part of the post shows a problem the brief solves{detail}"
 
     if fit.in_others_thread_used and kind not in IN_THREAD_ALLOWED_KINDS:
-        return "others_thread", f"{_label(kind)} post inside someone else's conversation"
+        return "others_thread", f"{_label(kind)} post replying to another account's conversation"
 
     if not has_material:
         if fit.materials_dropped:

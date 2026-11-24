@@ -166,9 +166,16 @@ Most posts are not reply opportunities. Do not stretch a post to fit the brief."
         )
         
         result = json.loads(response.choices[0].message.content)
+        if not isinstance(result, dict):
+            # Valid JSON that is not an object: no features, so the gate
+            # records "research incomplete" instead of the activity failing.
+            result = {}
         
+        raw_materials = result.get("founder_materials")
+        if not isinstance(raw_materials, list):
+            raw_materials = []
         founder_materials = []
-        for i, m in enumerate(result.get("founder_materials") or []):
+        for i, m in enumerate(raw_materials):
             if not isinstance(m, dict) or not isinstance(m.get("passage"), str):
                 continue
             founder_materials.append(FounderMaterial(

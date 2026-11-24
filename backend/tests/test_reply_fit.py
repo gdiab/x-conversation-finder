@@ -553,3 +553,74 @@ async def test_passing_post_is_drafted(make_review_input, x_activities):
             assert card["evidence"]["reply_fit"]["span_check"] == "ok"
             await handle.signal("skip", args=["done", str(uuid.uuid4())])
             assert await handle.result() == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"founder_materials": 42},
+    {"founder_materials": True},
+    {"founder_materials": "a passage"},
+])
+async def test_malformed_founder_materials_skip_instead_of_failing(payload):
+    text = "How do you keep a record of what each coding agent did?"
+    completions = JsonModeCompletions({
+        "post_kind": "question", "brief_problem_span": text,
+        "in_others_thread": False, "is_vendor_post": False, **payload,
+    })
+    agent = PlainReplyAgent(openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    post = _post(text=text)
+    evidence = assess_reply_fit(await agent.research(post, TOPIC, BRIEF, "k"), post, BRIEF, now=NOW)
+    assert evidence.founder_materials == []
+    assert evidence.reply_fit.skip_rule == "no_founder_material"
+
+
+@pytest.mark.asyncio
+async def test_non_object_json_is_research_incomplete():
+    completions = JsonModeCompletions(["not", "an", "object"])
+    agent = PlainReplyAgent(openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    post = _post(text="How do you keep a record of what each coding agent did?")
+    evidence = assess_reply_fit(await agent.research(post, TOPIC, BRIEF, "k"), post, BRIEF, now=NOW)
+    assert evidence.reply_fit.skip_rule == "research_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_legacy_research_result_without_reply_fit_is_not_drafted(make_review_input, x_activities):
+    """A research result recorded before the gate (no reply_fit, old high score) must not be drafted."""
+    from temporalio import activity as temporal_activity
+
+    from backend.activities import ResearchPostInput
+
+    draft_calls = []
+
+    @temporal_activity.defn(name="research_post")
+    async def legacy_research_post(input: ResearchPostInput) -> Evidence:
+        return Evidence(
+            post_id=input.post.id, matched_topic="t", why_it_fits="legacy",
+            confidence_score=0.95, confidence_inputs={"topic_match_strength": 0.9},
+            founder_materials=[FounderMaterial(source="b", passage="p", relevance="r", passage_id="passage_0")],
+        )
+
+    @temporal_activity.defn(name="draft_reply")
+    async def draft_reply(input) -> Evidence:
+        draft_calls.append(1)
+        raise RuntimeError("draft_reply must not run")
+
+    post = _fresh_post("Our agent toolkit is 40% off this week only. Link below.")
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[ReviewWorkflow],
+            activities=[legacy_research_post, draft_reply, claim_gate, store_card, update_card,
+                        x_activities.lookup_post, x_activities.check_followup],
+        ):
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run,
+                make_review_input(post=post, confidence_threshold=CONFIDENCE_THRESHOLD, product_brief=BRIEF),
+                id=f"review:test:legacy_{uuid.uuid4().hex[:6]}",
+                task_queue="test",
+            )
+            assert await handle.result() == "skipped"
+            card = await handle.query("get_card")
+    assert draft_calls == []
+    assert "predates" in card["skip_reason"]
