@@ -3,6 +3,11 @@ ReplyAgentPort - abstraction for reply generation.
 
 Per ADR-0003: the Agent Kit sits behind this port.
 The plain activity adapter is the baseline and default.
+
+Budget (issue #8): an adapter that makes paid inference calls reserves each one
+through backend.budget.current_inference_meter() right before the request,
+sized from the prompt and the max output tokens it sends, and settles or
+releases it after (see PlainReplyAgent._complete). The activities open the meter.
 """
 
 from abc import ABC, abstractmethod

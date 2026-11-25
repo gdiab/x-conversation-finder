@@ -12,7 +12,7 @@ from backend.planning import (
     validate_reply_plan,
 )
 from backend.ports import ReplyAgentPort
-from backend.budget import reserve_inference_budget, reconcile_inference_tokens, BudgetExceeded
+from backend.budget import meter_inference
 from backend.gate.reply_fit import assess_reply_fit
 
 
@@ -60,11 +60,6 @@ class PlanReplyResult:
     skip_reason: Optional[str] = None
 
 
-# Budget estimate for one planning call (tokens).
-PLAN_RESERVED_INPUT_TOKENS = 700
-PLAN_RESERVED_OUTPUT_TOKENS = 120
-
-
 class ReplyActivities:
     """Reply agent activities with injected agent."""
     
@@ -83,32 +78,23 @@ class ReplyActivities:
           and apply the should-we-reply skip rules (backend/gate/reply_fit.py)
         
         Idempotent by post_id + topic hash.
+        
+        Budget (issue #8): the adapter reserves each paid call of this attempt
+        through the meter, sized from its prompt, and reconciles it to the
+        reported usage. Raises BudgetExceeded (non-retryable) at the cap.
         """
         activity.logger.info(
             f"Researching post {input.post.id} for topic '{input.topic}' "
             f"(key: {input.idempotency_key})"
         )
         
-        # Reserve inference budget with token estimates (NB3: per-token pricing)
-        # Estimate: ~500 input tokens, ~200 output tokens for research
-        try:
-            reserved_cost, reservation_date = reserve_inference_budget(
-                input_tokens=500,
-                output_tokens=200,
-                workflow_id=activity.info().workflow_id,
-                workflow_run_id=activity.info().workflow_run_id,
-                activity_id=activity.info().activity_id,
+        with meter_inference() as meter:
+            evidence = await self._reply_agent.research(
+                post=input.post,
+                topic=input.topic,
+                product_brief=input.product_brief,
+                idempotency_key=input.idempotency_key,
             )
-        except BudgetExceeded as e:
-            activity.logger.error(f"Budget exceeded: {e}")
-            raise
-        
-        evidence = await self._reply_agent.research(
-            post=input.post,
-            topic=input.topic,
-            product_brief=input.product_brief,
-            idempotency_key=input.idempotency_key,
-        )
 
         # Issue #4 / ADR-0006: code checks the proposed features, sets the
         # confidence and applies the skip rules, whatever the adapter returned.
@@ -118,31 +104,10 @@ class ReplyActivities:
                 f"Post {input.post.id} fails rule {evidence.reply_fit.skip_rule}: {evidence.skip_reason}"
             )
         
-        # R5-B1: Reconcile inference budget (research_post must reconcile)
-        # If usage is missing from LLM response, keep the full reservation
-        if hasattr(evidence, 'input_tokens') and hasattr(evidence, 'output_tokens'):
-            actual_cost = reconcile_inference_tokens(
-                reserved_input=500,
-                reserved_output=200,
-                actual_input=evidence.input_tokens,
-                actual_output=evidence.output_tokens,
-                reservation_date=reservation_date,
-                workflow_id=activity.info().workflow_id,
-                workflow_run_id=activity.info().workflow_run_id,
-                activity_id=activity.info().activity_id,
-            )
-            activity.logger.info(
-                f"Research complete: confidence={evidence.confidence_score:.2f}, "
-                f"materials={len(evidence.founder_materials)}, "
-                f"tokens={evidence.input_tokens}/{evidence.output_tokens}, cost=${actual_cost:.4f}"
-            )
-        else:
-            # Missing usage: keep full reservation as spent (R5-B1)
-            activity.logger.info(
-                f"Research complete: confidence={evidence.confidence_score:.2f}, "
-                f"materials={len(evidence.founder_materials)}, "
-                f"usage unavailable, kept reservation ${reserved_cost:.4f}"
-            )
+        activity.logger.info(
+            f"Research complete: confidence={evidence.confidence_score:.2f}, "
+            f"materials={len(evidence.founder_materials)}, {meter.summary()}"
+        )
         
         return evidence
     
@@ -160,38 +125,14 @@ class ReplyActivities:
             f"(retry={'yes' if input.feedback else 'no'}, key: {input.idempotency_key})"
         )
         
-        try:
-            reserved_cost, reservation_date = reserve_inference_budget(
-                input_tokens=PLAN_RESERVED_INPUT_TOKENS,
-                output_tokens=PLAN_RESERVED_OUTPUT_TOKENS,
-                workflow_id=activity.info().workflow_id,
-                workflow_run_id=activity.info().workflow_run_id,
-                activity_id=activity.info().activity_id,
+        with meter_inference() as meter:
+            plan = await self._reply_agent.plan(
+                post=input.post,
+                evidence=input.evidence,
+                idempotency_key=input.idempotency_key,
+                feedback=input.feedback,
             )
-        except BudgetExceeded as e:
-            activity.logger.error(f"Budget exceeded: {e}")
-            raise
-        
-        plan = await self._reply_agent.plan(
-            post=input.post,
-            evidence=input.evidence,
-            idempotency_key=input.idempotency_key,
-            feedback=input.feedback,
-        )
-        
-        if plan.input_tokens > 0 or plan.output_tokens > 0:
-            reconcile_inference_tokens(
-                reserved_input=PLAN_RESERVED_INPUT_TOKENS,
-                reserved_output=PLAN_RESERVED_OUTPUT_TOKENS,
-                actual_input=plan.input_tokens,
-                actual_output=plan.output_tokens,
-                reservation_date=reservation_date,
-                workflow_id=activity.info().workflow_id,
-                workflow_run_id=activity.info().workflow_run_id,
-                activity_id=activity.info().activity_id,
-            )
-        else:
-            activity.logger.info(f"Plan usage unavailable, kept reservation ${reserved_cost:.4f}")
+        activity.logger.info(f"Plan budget: {meter.summary()}")
         
         errors = validate_reply_plan(plan, input.post.text)
         skip_rule = skip_reason = None
@@ -222,26 +163,14 @@ class ReplyActivities:
             f"steer={input.steer} (key: {input.idempotency_key})"
         )
         
-        # Reserve inference budget with token estimates (NB3: per-token pricing)
-        # Estimate: ~800 input tokens, ~100 output tokens for draft
-        try:
-            reserved_cost, reservation_date = reserve_inference_budget(
-                input_tokens=800,
-                output_tokens=100,
-                workflow_id=activity.info().workflow_id,
-                workflow_run_id=activity.info().workflow_run_id,
-                activity_id=activity.info().activity_id,
+        # Budget (issue #8): metered per paid call of this attempt; see research_post.
+        with meter_inference() as meter:
+            evidence = await self._reply_agent.draft(
+                evidence=input.evidence,
+                steer=input.steer,
+                idempotency_key=input.idempotency_key,
+                plan=input.plan,
             )
-        except BudgetExceeded as e:
-            activity.logger.error(f"Budget exceeded: {e}")
-            raise
-        
-        evidence = await self._reply_agent.draft(
-            evidence=input.evidence,
-            steer=input.steer,
-            idempotency_key=input.idempotency_key,
-            plan=input.plan,
-        )
         
         if evidence.draft and input.plan is not None:
             # issue #5: record, in code, whether the draft follows the plan
@@ -250,31 +179,10 @@ class ReplyActivities:
             )
         
         if evidence.draft:
-            # R5-B1: Reconcile inference budget (two-way, idempotent)
-            # If usage is missing (0/0), keep the full reservation
-            if evidence.draft.input_tokens > 0 or evidence.draft.output_tokens > 0:
-                actual_cost = reconcile_inference_tokens(
-                    reserved_input=800,
-                    reserved_output=100,
-                    actual_input=evidence.draft.input_tokens,
-                    actual_output=evidence.draft.output_tokens,
-                    reservation_date=reservation_date,
-                    workflow_id=activity.info().workflow_id,
-                    workflow_run_id=activity.info().workflow_run_id,
-                    activity_id=activity.info().activity_id,
-                )
-                activity.logger.info(
-                    f"Draft complete: {len(evidence.draft.text)} chars, "
-                    f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
-                    f"tokens={evidence.draft.input_tokens}/{evidence.draft.output_tokens}, "
-                    f"cost=${actual_cost:.6f}"
-                )
-            else:
-                # Missing usage (0/0): keep full reservation as spent (R5-B1)
-                activity.logger.info(
-                    f"Draft complete: {len(evidence.draft.text)} chars, "
-                    f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
-                    f"usage unavailable, kept reservation ${reserved_cost:.4f}"
-                )
+            activity.logger.info(
+                f"Draft complete: {len(evidence.draft.text)} chars, "
+                f"claim_gate={'PASS' if evidence.draft.claim_gate.passed else 'FAIL'}, "
+                f"{meter.summary()}"
+            )
         
         return evidence

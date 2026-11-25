@@ -8,8 +8,9 @@ This is the baseline for ADR-0006 evaluation.
 import json
 from typing import Any, List, Optional
 
-from openai import AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI
 
+from backend.budget import current_inference_meter, estimate_prompt_tokens
 from backend.config import get_settings
 from backend.models import (
     Evidence,
@@ -172,8 +173,54 @@ class PlainReplyAgent(ReplyAgentPort):
         self.client = openai_client or AsyncOpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            # Issue #8: no hidden SDK retries. Temporal retries the activity, and
+            # each attempt's request is reserved and counted on its own; an SDK
+            # retry after a timeout would be a second paid request nobody counted.
+            max_retries=0,
         )
         self.model = settings.openai_model
+        self._max_output_tokens = {
+            "research": settings.research_max_output_tokens,
+            "plan": settings.plan_max_output_tokens,
+            "draft": settings.draft_max_output_tokens,
+        }
+    
+    async def _complete(self, call: str, messages: list[dict], temperature: float):
+        """Send one JSON-mode chat completion, metered against the daily budget.
+
+        Issue #8: inside a metered activity attempt (backend.budget.meter_inference)
+        the call is reserved right before the request, sized from the prompt and
+        the max output tokens sent with it, then reconciled to the reported usage.
+        An error status from the provider (4xx/5xx) returns no completion, so the
+        reservation is released. Any other failure (timeout, connection error,
+        cancellation) keeps it counted: the request may have been billed.
+        """
+        max_output_tokens = self._max_output_tokens[call]
+        meter = current_inference_meter()
+        reservation = (
+            meter.reserve(estimate_prompt_tokens(messages), max_output_tokens) if meter else None
+        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_completion_tokens=max_output_tokens,
+                # Without JSON mode, models wrap long answers in ```json fences,
+                # which json.loads rejects.
+                response_format={"type": "json_object"},
+            )
+        except APIStatusError:
+            if reservation:
+                reservation.release()
+            raise
+        if reservation:
+            usage = getattr(response, "usage", None)
+            reservation.settle(
+                getattr(usage, "prompt_tokens", None) if usage else None,
+                getattr(usage, "completion_tokens", None) if usage else None,
+            )
+        return response
     
     async def research(
         self,
@@ -223,16 +270,13 @@ Return a JSON object with these keys:
 
 Most posts are not reply opportunities. Do not stretch a post to fit the brief."""
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        response = await self._complete(
+            "research",
+            [
                 {"role": "system", "content": "You are a research assistant. Return valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
-            # Without JSON mode, models wrap long answers in ```json fences,
-            # which json.loads rejects.
-            response_format={"type": "json_object"},
         )
         
         result = json.loads(response.choices[0].message.content)
@@ -311,15 +355,13 @@ Return a JSON object with exactly these keys:
   read as a pitch.
 - mention_product_reason: one line, at most {MAX_REASON_CHARS} characters, explaining that decision.{feedback_text}"""
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        response = await self._complete(
+            "plan",
+            [
                 {"role": "system", "content": "You plan replies to social posts. Return valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
-            # JSON mode returns a bare object; see research() above.
-            response_format={"type": "json_object"},
         )
 
         try:
@@ -433,15 +475,13 @@ Example (shape only; pick phrases and the sentence for this post):
 Be conversational and honest. Never invent features. Reference founder material by sentence number only.
 Max 280 chars total after text insertion."""
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        response = await self._complete(
+            "draft",
+            [
                 {"role": "system", "content": "You are a helpful assistant. Return valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            # JSON mode returns a bare object; see research() above.
-            response_format={"type": "json_object"},
         )
         
         result = json.loads(response.choices[0].message.content)

@@ -2,13 +2,29 @@
 
 from dataclasses import dataclass
 from typing import Optional, List
+
+import httpx
 from temporalio import activity
 
 from backend.models import Post
 from backend.ports import XClientPort
-from backend.budget import reserve_x_budget, reconcile_x_reads, BudgetExceeded
+from backend.budget import reserve_x_budget, reconcile_x_reads, release_x_reservation, BudgetExceeded
 from backend.config import get_settings
 from temporalio.exceptions import ApplicationError
+
+
+def x_returned_error_status(exc: BaseException) -> bool:
+    """True when the X API answered the request with an error status (issue #8).
+
+    X bills per post returned, and an error response returns none, so the
+    attempt's reservation is released. The HTTP adapter raises
+    httpx.HTTPStatusError, or a RateLimitError ApplicationError for 429.
+    Timeouts and connection errors return False: the request may have been
+    served, so the reservation stays counted.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return True
+    return isinstance(exc, ApplicationError) and exc.type == "RateLimitError"
 
 
 @dataclass
@@ -67,7 +83,9 @@ class XActivities:
         Search recent posts on X.
         
         Idempotent: same query + since_id returns cached results within 24h UTC.
-        Cost tracking: updates the daily spend ledger.
+        Cost tracking: updates the daily spend ledger. Each attempt reserves and
+        reconciles on its own (issue #8); an attempt X answered with an error
+        status is released.
         Budget enforcement: checks daily cap before calling.
         Poll interval validation: HTTP adapter rejects sub-1h and negative intervals (item 3).
         """
@@ -111,11 +129,23 @@ class XActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        posts, newest_id = await self._x_client.search_recent(
-            query=input.query,
-            since_id=input.since_id,
-            max_results=input.max_results,
-        )
+        try:
+            posts, newest_id = await self._x_client.search_recent(
+                query=input.query,
+                since_id=input.since_id,
+                max_results=input.max_results,
+            )
+        except Exception as e:
+            if x_returned_error_status(e):
+                release_x_reservation(
+                    reserved_reads=input.max_results,
+                    reservation_date=reservation_date,
+                    workflow_id=activity.info().workflow_id,
+                    workflow_run_id=activity.info().workflow_run_id,
+                    activity_id=activity.info().activity_id,
+                    cost_per_read=settings.x_post_read_cost,
+                )
+            raise
         
         # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
         actual_reads = len(posts)
@@ -169,7 +199,19 @@ class XActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        post = await self._x_client.lookup_post(input.post_id)
+        try:
+            post = await self._x_client.lookup_post(input.post_id)
+        except Exception as e:
+            if x_returned_error_status(e):
+                release_x_reservation(
+                    reserved_reads=1,
+                    reservation_date=reservation_date,
+                    workflow_id=activity.info().workflow_id,
+                    workflow_run_id=activity.info().workflow_run_id,
+                    activity_id=activity.info().activity_id,
+                    cost_per_read=settings.x_post_read_cost,
+                )
+            raise
         
         # Note: lookup_post always bills exactly 1 read, so no reconciliation needed
         if post:
@@ -210,10 +252,22 @@ class XActivities:
         
         # Search for posts in the conversation thread
         query = f"conversation_id:{input.reply_post_id}"
-        posts, _ = await self._x_client.search_recent(
-            query=query,
-            max_results=max_results,
-        )
+        try:
+            posts, _ = await self._x_client.search_recent(
+                query=query,
+                max_results=max_results,
+            )
+        except Exception as e:
+            if x_returned_error_status(e):
+                release_x_reservation(
+                    reserved_reads=max_results,
+                    reservation_date=reservation_date,
+                    workflow_id=activity.info().workflow_id,
+                    workflow_run_id=activity.info().workflow_run_id,
+                    activity_id=activity.info().activity_id,
+                    cost_per_read=settings.x_post_read_cost,
+                )
+            raise
         
         # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
         actual_reads = len(posts)

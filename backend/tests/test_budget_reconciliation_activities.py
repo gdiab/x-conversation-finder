@@ -5,10 +5,11 @@ Tests cover:
 - Overage charged (actual > reserved)
 - Underage refunded (actual < reserved)
 - Missing usage keeps reservation
-- Retry idempotency (same workflow_id, workflow_run_id, activity_id)
+- Retry idempotency (same workflow_id, workflow_run_id, activity_id, attempt)
 - Reconciliation across midnight hits the right day
 - Reconciliation across Continue-As-New (new run_id)
-- Retried activity within same run (idempotent)
+- Same activity attempt reserving twice (idempotent; a new attempt is counted,
+  see test_budget_per_attempt.py, issue #8)
 - Reused workflow_id with new run
 - TopicWatch crossing CAN tracks budget correctly
 """
@@ -228,7 +229,7 @@ async def test_reconcile_retry_idempotency():
         
         # Check reconciliation record exists
         reconciliation = db.query(BudgetReconciliationDB).filter(
-            BudgetReconciliationDB.reconciliation_key == "test_wf_idempotent:test-run-idempotent:test_act_idempotent:x_reads"
+            BudgetReconciliationDB.reconciliation_key == "test_wf_idempotent:test-run-idempotent:test_act_idempotent:a1:x_reads"
         ).first()
         assert reconciliation is not None
         assert reconciliation.reserved_amount == 10.0
@@ -415,13 +416,17 @@ async def test_reconcile_across_continue_as_new():
 
 
 @pytest.mark.asyncio
-async def test_retried_activity_reuses_reservation():
+async def test_same_attempt_reuses_reservation():
     """
-    Test that activity retry reuses the same reservation instead of double-reserving.
+    Test that the same activity attempt reserving again reuses its reservation.
+    
+    No attempt is passed, so both calls key by attempt 1 (outside an activity).
+    Issue #8: a real retry is a new attempt and gets a new reservation; see
+    backend/tests/test_budget_per_attempt.py.
     
     Covers both paths:
-    1. Retry after reconcile: reserve -> reconcile -> retry (reserve again) -> reconcile (idempotent)
-    2. Retry after failure: reserve -> fail -> retry (reserve again) -> reconcile
+    1. After reconcile: reserve -> reconcile -> reserve again -> reconcile (idempotent)
+    2. After failure: reserve -> fail -> reserve again -> reconcile
     """
     settings = get_settings()
     

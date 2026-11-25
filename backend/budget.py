@@ -7,12 +7,28 @@ Per NB3 and R3-B3: Atomic reserve-then-commit in one SQLite transaction (BEGIN I
 - Per-token inference pricing from config
 - Kill switch (env/config flag + DB flag checked before every X/LLM call)
 - lookup_post over budget must raise, never report not-found
+
+Issue #8: every paid attempt is counted.
+- Reservations and reconciliations are keyed by Temporal activity attempt, so a
+  retry after a lost completion makes a new reservation instead of reusing the
+  previous attempt's. Inference keys also carry a call index, one per paid call.
+- An open reservation from an attempt that sent its request stays counted at the
+  reserved amount: the call may have been billed.
+- An attempt whose request the provider answered with an error status is released
+  (reconciled to zero): an error response returns no posts and no completion.
+- Inference reservations are sized from the prompt and the call's max output
+  tokens (estimate_prompt_tokens, InferenceMeter), not from fixed estimates.
 """
 
+import math
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from sqlalchemy import text
+from temporalio import activity
 from temporalio.exceptions import ApplicationError
-from typing import Tuple, Optional
+from typing import Iterator, List, Optional, Sequence, Tuple
 from backend.database import get_db, BudgetLedgerDB, GlobalSettingsDB, BudgetReconciliationDB, BudgetReservationDB
 from backend.config import get_settings
 
@@ -30,6 +46,45 @@ class BudgetExceeded(ApplicationError):
 def get_today_utc() -> str:
     """Get today's date in UTC as YYYY-MM-DD."""
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _resolve_attempt(attempt: Optional[int]) -> int:
+    """The attempt to key a reservation by.
+
+    None means the current Temporal activity attempt when called inside an
+    activity, else 1. Callers that pass workflow_id/workflow_run_id/activity_id
+    from activity.info() therefore get per-attempt keys without passing it.
+    """
+    if attempt is not None:
+        return attempt
+    if activity.in_activity():
+        return activity.info().attempt
+    return 1
+
+
+def _reservation_key(
+    workflow_id: str,
+    workflow_run_id: str,
+    activity_id: str,
+    attempt: int,
+    reservation_date: str,
+    budget_type: str,
+    call_index: Optional[int] = None,
+) -> str:
+    call = f":c{call_index}" if call_index is not None else ""
+    return f"{workflow_id}:{workflow_run_id}:{activity_id}:a{attempt}{call}:{reservation_date}:{budget_type}"
+
+
+def _reconciliation_key(
+    workflow_id: str,
+    workflow_run_id: str,
+    activity_id: str,
+    attempt: int,
+    budget_type: str,
+    call_index: Optional[int] = None,
+) -> str:
+    call = f":c{call_index}" if call_index is not None else ""
+    return f"{workflow_id}:{workflow_run_id}:{activity_id}:a{attempt}{call}:{budget_type}"
 
 
 def _check_kill_switch(db):
@@ -59,6 +114,7 @@ def reserve_x_budget(
     workflow_id: Optional[str] = None,
     workflow_run_id: Optional[str] = None,
     activity_id: Optional[str] = None,
+    attempt: Optional[int] = None,
 ) -> Tuple[float, str]:
     """
     Atomically reserve X API budget.
@@ -73,9 +129,12 @@ def reserve_x_budget(
     Reconciliation adjusts down to actual usage but never prevents a reservation that
     would stay within the cap.
     
-    If workflow_id, workflow_run_id, and activity_id are provided, checks for an existing
-    open reservation with the same key and reuses it instead of creating a new one. This
-    prevents double-reserving on activity retries.
+    If workflow_id, workflow_run_id, and activity_id are provided, the reservation is
+    keyed by them plus the activity attempt (issue #8). The same attempt reserving
+    again reuses its reservation; a retry (a new attempt) makes a new one, because
+    the previous attempt may have made the paid call before its completion was lost.
+    `attempt` defaults to the current activity attempt (see _resolve_attempt).
+    Pass the same `attempt` to reconcile_x_reads / release_x_reservation.
     
     Returns (cost in USD, reservation date YYYY-MM-DD).
     
@@ -91,6 +150,11 @@ def reserve_x_budget(
         cost_per_read = settings.x_post_read_cost
     
     cost = reads_needed * cost_per_read
+    keyed = bool(workflow_id and workflow_run_id and activity_id)
+    if keyed:
+        reservation_key = _reservation_key(
+            workflow_id, workflow_run_id, activity_id, _resolve_attempt(attempt), today, "x_reads"
+        )
     
     db = get_db()
     try:
@@ -98,9 +162,8 @@ def reserve_x_budget(
         
         _check_kill_switch(db)
         
-        # Check for existing open reservation
-        if workflow_id and workflow_run_id and activity_id:
-            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:x_reads"
+        # Same attempt reserving again: reuse its reservation
+        if keyed:
             existing = db.query(BudgetReservationDB).filter(
                 BudgetReservationDB.reservation_key == reservation_key
             ).first()
@@ -154,9 +217,8 @@ def reserve_x_budget(
             ledger.x_cost_usd = projected_cost
             ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
-        # Record the reservation for retry idempotency
-        if workflow_id and workflow_run_id and activity_id:
-            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:x_reads"
+        # Record the reservation (idempotent per attempt)
+        if keyed:
             reservation = BudgetReservationDB(
                 reservation_key=reservation_key,
                 workflow_id=workflow_id,
@@ -190,6 +252,8 @@ def reserve_inference_budget(
     workflow_id: Optional[str] = None,
     workflow_run_id: Optional[str] = None,
     activity_id: Optional[str] = None,
+    attempt: Optional[int] = None,
+    call_index: int = 1,
 ) -> Tuple[float, str]:
     """
     Atomically reserve inference budget.
@@ -198,9 +262,12 @@ def reserve_inference_budget(
     Uses BEGIN IMMEDIATE transaction for atomic reserve-then-commit.
     Cap enforced on first call too.
     
-    If workflow_id, workflow_run_id, and activity_id are provided, checks for an existing
-    open reservation with the same key and reuses it instead of creating a new one. This
-    prevents double-reserving on activity retries.
+    input_tokens and output_tokens are the call's upper bound: the prompt estimate
+    and the max output tokens sent with the request (InferenceMeter does this).
+    
+    If workflow_id, workflow_run_id, and activity_id are provided, the reservation is
+    keyed by them plus the activity attempt and call_index (issue #8): one
+    reservation per paid call per attempt. The same key reserving again reuses it.
     
     Returns (cost in USD, reservation date YYYY-MM-DD).
     
@@ -216,6 +283,12 @@ def reserve_inference_budget(
         output_tokens * settings.inference_output_token_cost_usd
     )
     total_tokens = input_tokens + output_tokens
+    keyed = bool(workflow_id and workflow_run_id and activity_id)
+    if keyed:
+        reservation_key = _reservation_key(
+            workflow_id, workflow_run_id, activity_id, _resolve_attempt(attempt), today,
+            "inference", call_index,
+        )
     
     db = get_db()
     try:
@@ -223,9 +296,8 @@ def reserve_inference_budget(
         
         _check_kill_switch(db)
         
-        # Check for existing open reservation
-        if workflow_id and workflow_run_id and activity_id:
-            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:inference"
+        # Same attempt and call reserving again: reuse its reservation
+        if keyed:
             existing = db.query(BudgetReservationDB).filter(
                 BudgetReservationDB.reservation_key == reservation_key
             ).first()
@@ -262,9 +334,8 @@ def reserve_inference_budget(
             ledger.inference_cost_usd = projected_cost
             ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
-        # Record the reservation for retry idempotency
-        if workflow_id and workflow_run_id and activity_id:
-            reservation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:{today}:inference"
+        # Record the reservation (idempotent per attempt and call)
+        if keyed:
             reservation = BudgetReservationDB(
                 reservation_key=reservation_key,
                 workflow_id=workflow_id,
@@ -299,7 +370,8 @@ def reconcile_x_reads(
     workflow_id: str,
     workflow_run_id: str,
     activity_id: str,
-    cost_per_read: float = None
+    cost_per_read: float = None,
+    attempt: Optional[int] = None,
 ) -> float:
     """
     Reconcile X budget after actual results known (R5-B1: two-way with idempotency).
@@ -307,7 +379,8 @@ def reconcile_x_reads(
     - Charges delta when actual > reserved
     - Refunds delta when actual < reserved  
     - Applies to reservation's own UTC day, not today
-    - Idempotent per workflow run and activity (workflow_id, workflow_run_id, activity_id)
+    - Idempotent per workflow run, activity and attempt (issue #8); `attempt`
+      defaults to the current activity attempt, as in reserve_x_budget
     - Never takes a day below zero
     
     Returns the actual cost charged.
@@ -317,8 +390,9 @@ def reconcile_x_reads(
     if cost_per_read is None:
         cost_per_read = settings.x_post_read_cost
     
+    attempt = _resolve_attempt(attempt)
     actual_cost = actual_reads * cost_per_read
-    reconciliation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:x_reads"
+    reconciliation_key = _reconciliation_key(workflow_id, workflow_run_id, activity_id, attempt, "x_reads")
     
     db = get_db()
     try:
@@ -385,7 +459,7 @@ def reconcile_x_reads(
             reconciliation_key=reconciliation_key,
             workflow_id=workflow_id,
             activity_id=activity_id,
-            attempt=workflow_run_id,  # Store run_id in attempt field for now
+            attempt=str(attempt),
             reservation_date=reservation_date,
             reserved_amount=float(reserved_reads),
             actual_amount=float(actual_reads),
@@ -395,7 +469,9 @@ def reconcile_x_reads(
         db.add(reconciliation)
         
         # Mark the reservation as reconciled
-        reservation_key_str = f"{workflow_id}:{workflow_run_id}:{activity_id}:{reservation_date}:x_reads"
+        reservation_key_str = _reservation_key(
+            workflow_id, workflow_run_id, activity_id, attempt, reservation_date, "x_reads"
+        )
         reservation = db.query(BudgetReservationDB).filter(
             BudgetReservationDB.reservation_key == reservation_key_str
         ).first()
@@ -412,6 +488,34 @@ def reconcile_x_reads(
         db.close()
 
 
+def release_x_reservation(
+    reserved_reads: int,
+    reservation_date: str,
+    workflow_id: str,
+    workflow_run_id: str,
+    activity_id: str,
+    cost_per_read: float = None,
+    attempt: Optional[int] = None,
+) -> float:
+    """Release an X reservation whose request returned no posts (issue #8).
+
+    For an attempt the X API answered with an error status: X bills per post
+    returned, and an error response returns none. Reconciles the reservation to
+    zero reads. Do not call it for timeouts or connection errors, where the
+    request may have been served; those reservations stay counted.
+    """
+    return reconcile_x_reads(
+        reserved_reads=reserved_reads,
+        actual_reads=0,
+        reservation_date=reservation_date,
+        workflow_id=workflow_id,
+        workflow_run_id=workflow_run_id,
+        activity_id=activity_id,
+        cost_per_read=cost_per_read,
+        attempt=attempt,
+    )
+
+
 def reconcile_inference_tokens(
     reserved_input: int,
     reserved_output: int,
@@ -420,7 +524,9 @@ def reconcile_inference_tokens(
     reservation_date: str,
     workflow_id: str,
     workflow_run_id: str,
-    activity_id: str
+    activity_id: str,
+    attempt: Optional[int] = None,
+    call_index: int = 1,
 ) -> float:
     """
     Reconcile inference budget after actual usage known (R5-B1: two-way with idempotency).
@@ -428,12 +534,55 @@ def reconcile_inference_tokens(
     - Charges delta when actual > reserved
     - Refunds delta when actual < reserved
     - Applies to reservation's own UTC day, not today
-    - Idempotent per workflow run and activity (workflow_id, workflow_run_id, activity_id)
+    - Idempotent per workflow run, activity, attempt and call (issue #8);
+      `attempt` defaults to the current activity attempt
     - Never takes a day below zero
     
     Returns the actual cost charged.
     """
+    return _close_inference_reservation(
+        reserved_input, reserved_output, actual_input, actual_output, reservation_date,
+        workflow_id, workflow_run_id, activity_id, attempt, call_index, released=False,
+    )
+
+
+def release_inference_reservation(
+    reserved_input: int,
+    reserved_output: int,
+    reservation_date: str,
+    workflow_id: str,
+    workflow_run_id: str,
+    activity_id: str,
+    attempt: Optional[int] = None,
+    call_index: int = 1,
+) -> float:
+    """Release an inference reservation whose call returned no completion (issue #8).
+
+    For a call the provider answered with an error status. Refunds the whole
+    reservation and takes the call off the day's inference_calls count.
+    Idempotent with reconcile_inference_tokens (same key). Returns 0.0.
+    """
+    return _close_inference_reservation(
+        reserved_input, reserved_output, 0, 0, reservation_date,
+        workflow_id, workflow_run_id, activity_id, attempt, call_index, released=True,
+    )
+
+
+def _close_inference_reservation(
+    reserved_input: int,
+    reserved_output: int,
+    actual_input: int,
+    actual_output: int,
+    reservation_date: str,
+    workflow_id: str,
+    workflow_run_id: str,
+    activity_id: str,
+    attempt: Optional[int],
+    call_index: int,
+    released: bool,
+) -> float:
     settings = get_settings()
+    attempt = _resolve_attempt(attempt)
     
     reserved_cost = (
         reserved_input * settings.inference_input_token_cost_usd +
@@ -445,7 +594,9 @@ def reconcile_inference_tokens(
         actual_output * settings.inference_output_token_cost_usd
     )
     
-    reconciliation_key = f"{workflow_id}:{workflow_run_id}:{activity_id}:inference"
+    reconciliation_key = _reconciliation_key(
+        workflow_id, workflow_run_id, activity_id, attempt, "inference", call_index
+    )
     
     db = get_db()
     try:
@@ -494,6 +645,9 @@ def reconcile_inference_tokens(
             )
         
         ledger.inference_cost_usd = max(0.0, new_cost)
+        if released:
+            # The call was counted when reserved; it returned no completion.
+            ledger.inference_calls = max(0, (ledger.inference_calls or 0) - 1)
         ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
         # Record reconciliation for idempotency
@@ -503,7 +657,7 @@ def reconcile_inference_tokens(
             reconciliation_key=reconciliation_key,
             workflow_id=workflow_id,
             activity_id=activity_id,
-            attempt=workflow_run_id,  # Store run_id in attempt field for now
+            attempt=str(attempt),
             reservation_date=reservation_date,
             reserved_amount=float(total_reserved),
             actual_amount=float(total_actual),
@@ -513,7 +667,10 @@ def reconcile_inference_tokens(
         db.add(reconciliation)
         
         # Mark the reservation as reconciled
-        reservation_key_str = f"{workflow_id}:{workflow_run_id}:{activity_id}:{reservation_date}:inference"
+        reservation_key_str = _reservation_key(
+            workflow_id, workflow_run_id, activity_id, attempt, reservation_date,
+            "inference", call_index,
+        )
         reservation = db.query(BudgetReservationDB).filter(
             BudgetReservationDB.reservation_key == reservation_key_str
         ).first()
@@ -528,6 +685,186 @@ def reconcile_inference_tokens(
         raise
     finally:
         db.close()
+
+
+# --- issue #8: per-attempt inference metering, sized from the prompt ---
+
+# Prompt token estimate. English averages about 4 characters per token in the
+# GPT tokenizers; assume 3 so the estimate is high, not low. A non-ASCII
+# character (accents, CJK, emoji) can take more than one token; assume 2.
+# Reconciliation corrects the estimate to the provider's reported usage.
+ASCII_CHARS_PER_TOKEN = 3
+TOKENS_PER_NON_ASCII_CHAR = 2
+# Chat format overhead: tokens per message, plus the assistant reply priming.
+TOKENS_PER_MESSAGE = 4
+TOKENS_PER_REPLY = 3
+
+
+def estimate_prompt_tokens(messages: Sequence[dict]) -> int:
+    """Estimate the input tokens of a chat request from its messages.
+
+    A deliberate overestimate (see the constants above), so a reservation
+    covers the call; the call is reconciled to the provider's usage after.
+    """
+    total = TOKENS_PER_REPLY
+    for message in messages:
+        content = message.get("content") or ""
+        if not isinstance(content, str):
+            content = str(content)
+        ascii_chars = sum(1 for ch in content if ord(ch) < 128)
+        non_ascii_chars = len(content) - ascii_chars
+        total += (
+            TOKENS_PER_MESSAGE
+            + math.ceil(ascii_chars / ASCII_CHARS_PER_TOKEN)
+            + non_ascii_chars * TOKENS_PER_NON_ASCII_CHAR
+        )
+    return total
+
+
+@dataclass
+class InferenceCall:
+    """One paid inference call's reservation, and how it was closed.
+
+    status: "open" (reserved; stays counted at the reserved amount),
+    "settled" (reconciled to the provider's usage), "released" (no
+    completion, refunded) or "kept" (no usage reported, reservation kept).
+    """
+
+    meter: "InferenceMeter"
+    call_index: int
+    reserved_input: int
+    reserved_output: int
+    reserved_cost: float
+    reservation_date: str
+    status: str = "open"
+    cost_usd: float = 0.0
+
+    def settle(self, actual_input: Optional[int], actual_output: Optional[int]) -> float:
+        """Reconcile to the provider's reported usage. Missing usage (None or 0/0)
+        keeps the full reservation as spent (R5-B1). Returns the cost counted."""
+        if self.status != "open":
+            return self.cost_usd
+        if not actual_input and not actual_output:
+            self.status = "kept"
+            self.cost_usd = self.reserved_cost
+            return self.cost_usd
+        m = self.meter
+        self.cost_usd = reconcile_inference_tokens(
+            reserved_input=self.reserved_input,
+            reserved_output=self.reserved_output,
+            actual_input=actual_input or 0,
+            actual_output=actual_output or 0,
+            reservation_date=self.reservation_date,
+            workflow_id=m.workflow_id,
+            workflow_run_id=m.workflow_run_id,
+            activity_id=m.activity_id,
+            attempt=m.attempt,
+            call_index=self.call_index,
+        )
+        self.status = "settled"
+        return self.cost_usd
+
+    def release(self) -> None:
+        """Refund the reservation: the provider answered with an error status,
+        so no completion was returned or billed."""
+        if self.status != "open":
+            return
+        m = self.meter
+        release_inference_reservation(
+            reserved_input=self.reserved_input,
+            reserved_output=self.reserved_output,
+            reservation_date=self.reservation_date,
+            workflow_id=m.workflow_id,
+            workflow_run_id=m.workflow_run_id,
+            activity_id=m.activity_id,
+            attempt=m.attempt,
+            call_index=self.call_index,
+        )
+        self.status = "released"
+        self.cost_usd = 0.0
+
+
+@dataclass
+class InferenceMeter:
+    """Meters the paid inference calls one activity attempt makes (issue #8).
+
+    The adapter that makes a paid call reserves through the current meter
+    right before sending the request, with the prompt estimate and the max
+    output tokens it sends, then settles or releases the call. Each call gets
+    its own reservation key (attempt + call index), so a retried attempt or a
+    second call in one attempt is counted, never folded into an earlier one.
+    """
+
+    workflow_id: str
+    workflow_run_id: str
+    activity_id: str
+    attempt: int
+    calls: List[InferenceCall] = field(default_factory=list)
+
+    def reserve(self, input_tokens: int, max_output_tokens: int) -> InferenceCall:
+        """Reserve one call. Raises BudgetExceeded (kill switch or daily cap)."""
+        call_index = len(self.calls) + 1
+        cost, reservation_date = reserve_inference_budget(
+            input_tokens=input_tokens,
+            output_tokens=max_output_tokens,
+            workflow_id=self.workflow_id,
+            workflow_run_id=self.workflow_run_id,
+            activity_id=self.activity_id,
+            attempt=self.attempt,
+            call_index=call_index,
+        )
+        call = InferenceCall(
+            meter=self,
+            call_index=call_index,
+            reserved_input=input_tokens,
+            reserved_output=max_output_tokens,
+            reserved_cost=cost,
+            reservation_date=reservation_date,
+            cost_usd=cost,
+        )
+        self.calls.append(call)
+        return call
+
+    @property
+    def cost_usd(self) -> float:
+        """Cost counted so far: actual for settled calls, reserved for open or kept."""
+        return sum(c.cost_usd for c in self.calls)
+
+    def summary(self) -> str:
+        if not self.calls:
+            return "no paid inference calls"
+        statuses = ", ".join(c.status for c in self.calls)
+        return f"{len(self.calls)} inference call(s) [{statuses}], cost ${self.cost_usd:.6f}"
+
+
+_current_meter: ContextVar[Optional[InferenceMeter]] = ContextVar("inference_meter", default=None)
+
+
+def current_inference_meter() -> Optional[InferenceMeter]:
+    """The meter of the activity attempt running in this context, or None.
+
+    None outside metered activities (adapter unit tests, offline scripts):
+    the call is then not budgeted, as before issue #8.
+    """
+    return _current_meter.get()
+
+
+@contextmanager
+def meter_inference() -> Iterator[InferenceMeter]:
+    """Meter the paid inference calls made inside this block for the current
+    activity attempt. Must run inside a Temporal activity."""
+    info = activity.info()
+    meter = InferenceMeter(
+        workflow_id=info.workflow_id,
+        workflow_run_id=info.workflow_run_id,
+        activity_id=info.activity_id,
+        attempt=info.attempt,
+    )
+    token = _current_meter.set(meter)
+    try:
+        yield meter
+    finally:
+        _current_meter.reset(token)
 
 
 def get_today_budget() -> dict:

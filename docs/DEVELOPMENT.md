@@ -148,6 +148,28 @@ This runs all replay tests with fake adapters. No API keys needed.
 - **ADR-0005:** Polling with spend limits
 - **ADR-0006:** Evidence trail and computed confidence
 
+### Budget accounting (issue #8)
+
+`backend/budget.py` keeps the ADR-0005 daily caps and kill switch. Each paid
+call is counted per Temporal activity attempt:
+
+- Reservations are keyed by workflow, run, activity and **attempt** (and a call
+  index for inference). A retry after a lost completion makes a new reservation,
+  so both paid calls are counted.
+- Inference calls reserve inside the adapter, right before the request, sized
+  from the prompt (`estimate_prompt_tokens`) plus the call's max output tokens
+  (`RESEARCH_MAX_OUTPUT_TOKENS`, `PLAN_MAX_OUTPUT_TOKENS`,
+  `DRAFT_MAX_OUTPUT_TOKENS`, sent as `max_completion_tokens`). The activity opens
+  the meter with `meter_inference()`; an adapter that makes a paid call reserves
+  through `current_inference_meter()`. Each call is then reconciled to the
+  reported usage.
+- An error status from the provider (OpenAI 4xx/5xx, X HTTP errors and 429s)
+  releases the reservation: no completion or posts were returned. A timeout,
+  connection error or crash leaves it counted at the reserved amount.
+- The OpenAI client runs with `max_retries=0`: Temporal's retry policy owns
+  retries, so each retried request is reserved and counted.
+- `FakeReplyAgent` makes no paid calls and reserves nothing.
+
 ## Fake Adapters
 
 For testing and CI, the system uses fake adapters:
