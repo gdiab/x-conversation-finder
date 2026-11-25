@@ -28,6 +28,18 @@ import unicodedata
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
+# Issue #9: identifiers come from the model. Gate errors flow into stored skip
+# reasons and redraft steers, and the removal duty cannot find a post quote
+# hidden in them, so only identifier-shaped values are echoed or kept.
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
+NOT_AN_IDENTIFIER = "<not an identifier>"
+
+
+def safe_identifier(value) -> str:
+    """A model-supplied identifier fit to store: itself if identifier-shaped."""
+    text = str(value)
+    return text if _IDENTIFIER.match(text) else NOT_AN_IDENTIFIER
+
 
 @dataclass
 class NonClaimPhrase:
@@ -334,19 +346,19 @@ def validate_draft_composition(segments: List[dict]) -> Optional[CompositionViol
             
             # Check for repeats
             if phrase_id in phrase_ids_seen:
-                return CompositionViolation(f"Phrase {phrase_id} repeats in draft")
+                return CompositionViolation(f"Phrase {safe_identifier(phrase_id)} repeats in draft")
             phrase_ids_seen.add(phrase_id)
             
             # Look up category
             phrase = get_phrase_by_id(phrase_id)
             if not phrase:
-                return CompositionViolation(f"Unknown phrase_id: {phrase_id}")
+                return CompositionViolation(f"Unknown phrase_id: {safe_identifier(phrase_id)}")
             
             category = phrase.category
             if category != "opener":
                 has_non_opener = True
         else:
-            return CompositionViolation(f"Invalid segment kind: {kind}")
+            return CompositionViolation(f"Invalid segment kind: {safe_identifier(kind)}")
         
         # Check order
         if categories_seen:

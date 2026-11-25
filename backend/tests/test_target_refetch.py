@@ -666,6 +666,46 @@ async def test_eval_rechecks_a_stale_pending_card_of_a_finished_review(make_revi
             # A workflow Temporal no longer knows is not running
             assert await temporal_review_is_running(env.client)("review:test:never-started") is False
 
+
+class QuoteAsIdentifierAgent(QuotingAgent):
+    """A drafting model that puts a post quote where a phrase_id belongs."""
+
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+        from backend.models import Segment
+
+        evidence = await super().draft(evidence, steer, idempotency_key, plan)
+        evidence.draft.segments = [Segment(kind="non_claim", phrase_id=QUESTION)]
+        return evidence
+
+
+@pytest.mark.asyncio
+async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_input):
+    """A gate failure must not carry a model-supplied quote of the post into
+    stored errors or the skip reason, where an eval removal could not find it."""
+    from backend.target_refetch import refetch_stored_card_target
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, TargetClient(["found"]), QuoteAsIdentifierAgent()):
+            review_input = make_review_input()
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run, review_input,
+                id=f"review:test:{review_input.post.id}_quote_as_id", task_queue="test",
+            )
+            assert await handle.result() == "skipped"
+            queried = await handle.query("get_card")
+    stored = _db_card(handle.id)
+    for card in (queried, stored):
+        assert "Unknown phrase_id" in json.dumps(card)
+        assert QUESTION not in card["skip_reason"]
+        assert QUESTION not in json.dumps(card["evidence"]["draft"])
+
+    assert await refetch_stored_card_target(
+        TargetClient(["gone"]), handle.id, "run1", review_is_running=_finished
+    ) == "removed"
+    dumped = json.dumps(_db_card(handle.id))
+    for fragment in POST_FRAGMENTS:
+        assert fragment not in dumped
+
 @pytest.mark.asyncio
 async def test_eval_refetch_unknown_card():
     from backend.target_refetch import refetch_stored_card_target

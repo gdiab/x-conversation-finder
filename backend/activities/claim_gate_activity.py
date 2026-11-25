@@ -19,7 +19,12 @@ import re
 import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
-from backend.gate.non_claim_set import is_closed_set_non_claim, normalize_for_closed_set
+from backend.gate.non_claim_set import (
+    NOT_AN_IDENTIFIER,
+    is_closed_set_non_claim,
+    normalize_for_closed_set,
+    safe_identifier,
+)
 # ends_with_abbreviation is re-exported: callers import it from this module.
 from backend.gate.sentence_boundary import (
     END,
@@ -264,6 +269,17 @@ def _splitter_version_error(segment: Segment, passage: str, sentence: str) -> st
     )
 
 
+def _storable_segment(seg: Segment) -> Segment:
+    """A rejected model segment without free text and with safe identifiers."""
+    return Segment(
+        kind=seg.kind if seg.kind in ("claim", "non_claim") else NOT_AN_IDENTIFIER,
+        text=None,
+        source_passage_id=safe_identifier(seg.source_passage_id) if seg.source_passage_id else None,
+        sentence_index=seg.sentence_index if isinstance(seg.sentence_index, int) else None,
+        phrase_id=safe_identifier(seg.phrase_id) if seg.phrase_id else None,
+    )
+
+
 def insert_claim_sentence(
     segment: Segment,
     materials_by_id: Dict[str, FounderMaterial]
@@ -285,7 +301,7 @@ def insert_claim_sentence(
         return False, "", "No source_passage_id provided"
     
     if segment.source_passage_id not in materials_by_id:
-        return False, "", f"source_passage_id '{segment.source_passage_id}' not found"
+        return False, "", f"source_passage_id '{safe_identifier(segment.source_passage_id)}' not found"
     
     if segment.sentence_index is None:
         return False, "", "No sentence_index provided"
@@ -689,9 +705,9 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         # S3 (QA R14): Validate kind - only 'claim' and 'non_claim' are allowed
         if seg.kind not in ("claim", "non_claim"):
             failed_sentences.append(
-                (f"[segment]", f"Invalid segment kind: '{seg.kind}' (must be 'claim' or 'non_claim')")
+                (f"[segment]", f"Invalid segment kind: '{safe_identifier(seg.kind)}' (must be 'claim' or 'non_claim')")
             )
-            activity.logger.warning(f"Invalid segment kind: {seg.kind}")
+            activity.logger.warning(f"Invalid segment kind: {safe_identifier(seg.kind)}")
             continue
         
         if seg.kind == "claim":
@@ -734,9 +750,9 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
             phrase_text = get_phrase_text(seg.phrase_id)
             if not phrase_text:
                 failed_sentences.append(
-                    (f"[non_claim segment]", f"Unknown phrase_id: {seg.phrase_id}")
+                    (f"[non_claim segment]", f"Unknown phrase_id: {safe_identifier(seg.phrase_id)}")
                 )
-                activity.logger.warning(f"Unknown phrase_id: {seg.phrase_id}")
+                activity.logger.warning(f"Unknown phrase_id: {safe_identifier(seg.phrase_id)}")
                 continue
             
             # Create processed segment with inserted text
@@ -751,7 +767,7 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     if not processed_segments:
         return ClaimGateResult(
             passed=False,
-            segments=input.segments,
+            segments=[_storable_segment(seg) for seg in input.segments],
             failed_sentences=failed_sentences,
             reasoning="No valid segments after processing",
         )
