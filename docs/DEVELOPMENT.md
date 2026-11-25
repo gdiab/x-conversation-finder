@@ -174,7 +174,7 @@ This runs all replay tests with fake adapters. No API keys needed.
 **The written check** (steps 2 to 4 of the amendment; `backend/gate/written_check.py`):
 
 1. Code splits the reply into sentences and runs the triggers. A sentence is checked as a product claim if it names the product (the "Product name" or an "Also called" name, never read from the brief), uses we/our/us/ours, contains a number, makes a comparison, or uses a feature term from the brief.
-2. If code can already reject the reply, it is not sent to the checker, and no call is paid for: no sentence, more than 3 sentences, more than 280 characters, more than one triggered sentence, a triggered question, a number that no brief sentence states, a sentence that may be two ("Acme ships.It retries."; a line break ends a sentence), or a triggered sentence when the plan said not to mention the product.
+2. If code can already reject the reply, it is not sent to the checker, and no call is paid for: no sentence, more than 3 sentences, more than 280 characters, more than one triggered sentence, a triggered question, a number that no brief sentence states, a sentence that may be two ("Acme ships.It retries."; a line break ends a sentence), a triggered sentence when the plan said not to mention the product, or a product claim that an empty brief could not support.
 3. Otherwise one checker call sees the reply's sentences, the brief sentences and the product name. It does not see the post, the plan, the drafting prompt or the brief sentences the drafter pointed at. It says which sentences are about the product, and for each of those and each triggered sentence returns `supported` with brief sentence ids, or `unsupported` with a reason.
 4. Code decides. A checked sentence passes only with `supported`, at least one cited id, every cited id existing in the brief, and no number that the cited sentences lack. A checked sentence that is a question fails. A missing or malformed answer counts as not supported; a malformed answer is never repaired.
 
@@ -190,7 +190,7 @@ Key features:
 - Delivery replay
 ```
 
-Each item of at most 6 words becomes a feature term, and a reply sentence that uses it is checked as a product claim. A brief without such a list has no feature terms; the card shows "Feature terms read from your brief: none".
+Each item of at most 6 words becomes a feature term, and a reply sentence that uses it is checked as a product claim. What names the list decides: the item it is nested under, else its lead-in line, else its heading. So a list introduced by "Plans:" under a "Features" heading, or the sub-items of a feature, are not feature terms. A brief without such a list has no feature terms; the card shows "Feature terms read from your brief: none".
 
 **Budget.** The checker call is one more inference call per draft, per nudge and per edit, metered like the others (`CHECK_MAX_OUTPUT_TOKENS`; see "Budget accounting").
 

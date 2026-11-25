@@ -252,6 +252,22 @@ describe('ReviewCard: written draft (issue #12)', () => {
     expect(screen.getByText(/Draft does not follow this plan/)).toBeInTheDocument();
   });
 
+  it('does not say "does not mention the product" for a draft the checker never classified', () => {
+    // Four sentences: rejected in code before the checker ran, so no row has a classification
+    const unchecked = makeSentenceCheck({
+      passed: false,
+      verdict: 'not_checked',
+      reason: 'The reply must have at most 3 sentences (got 4)',
+    });
+    const evidence = makeEvidence({
+      draft: makeWrittenDraft({ sentence_checks: [unchecked, unchecked, unchecked, unchecked] }),
+      reply_plan: makeReplyPlan({ mention_product: false }),
+    });
+    render(<ReviewCard card={makeCard({ status: 'skipped', skip_reason: 'Not enough evidence', evidence })} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByText(/does not mention the product/)).not.toBeInTheDocument();
+  });
+
   it('says a written reply without a product claim does not mention the product', () => {
     const draft = makeWrittenDraft({ sentence_checks: [makeSentenceCheck()] });
     const evidence = makeEvidence({

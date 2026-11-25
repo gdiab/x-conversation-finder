@@ -274,14 +274,22 @@ def test_inline_feature_list_is_read():
     assert brief_feature_terms(brief) == ["retries with backoff", "a dead-letter queue", "replay"]
 
 
-def test_feature_terms_need_the_nearest_heading_lead_in_or_parent_item_to_say_features():
-    under_heading = "# Features\nPlans:\n- Free tier\n"  # the heading says it
+def test_only_what_names_the_list_decides_whether_it_is_a_feature_list():
+    """The parent item, else the lead-in line, else the heading: the nearest one only."""
+    under_heading = "# Features\n- Replay\n- Signed deliveries\n"
+    intro_sentence = "# Features\nThese ship today.\n- Replay\n"  # a sentence is not a list name
     under_parent = "- Main features:\n  - Replay\n- Limits:\n  - Ten endpoints\n"
+    other_lead_in = "# Features\nPlans:\n- Free tier\n"  # the list is named "Plans"
+    other_parent = "## Features\n- Limitations\n  - Manual setup\n"
     far_above = "# Feature overview\n## Not supported yet\n- Single sign-on\n"
 
-    assert brief_feature_terms(under_heading) == ["Free tier"]
+    assert brief_feature_terms(under_heading) == ["Replay", "Signed deliveries"]
+    assert brief_feature_terms(intro_sentence) == ["Replay"]
     assert brief_feature_terms(under_parent) == ["Replay"]
-    assert brief_feature_terms(far_above) == []  # only the nearest heading counts
+    assert brief_feature_terms(other_lead_in) == []
+    # "Limitations" is a feature-list item; what is nested under it is not
+    assert brief_feature_terms(other_parent) == ["Limitations"]
+    assert brief_feature_terms(far_above) == []
 
 
 def test_lists_that_are_not_feature_lists_give_no_terms():

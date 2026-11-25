@@ -31,10 +31,12 @@ Rules:
 - Ids are "b1", "b2", ... in document order.
 
 Feature terms are the short items (at most MAX_FEATURE_TERM_WORDS words) of a
-list whose nearest heading, lead-in line or parent item contains the word
-"feature" or "features", and the comma-separated terms after such a lead-in
-on one line ("Features: a, b"). Nothing else in the brief is a feature term:
-the trigger must be predictable from what the founder wrote.
+list that is named a feature list: the word "feature" or "features" is in the
+item the list is nested under, else in its lead-in line ("Key features:"),
+else in the heading it stands under. Only that nearest name counts. The
+comma-separated terms after such a lead-in on one line ("Features: a, b") are
+feature terms too. Nothing else in the brief is a feature term: the trigger
+must be predictable from what the founder wrote.
 
 Like every sentence splitter, this runs only inside activities, never in
 workflow code (see ADR-0006, 2026-11-21 amendment, item 2).
@@ -79,6 +81,7 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     terms: List[str] = []
     headings: List[Tuple[int, str]] = []  # (level, text): the open heading path
     colon_lead: Optional[str] = None  # lead-in of the list or paragraph being read
+    lead_names_list = False  # the lead-in is a line that ends in a colon, not just the sentence before the list
     pending_lead: Optional[str] = None  # a "...:" sentence that may introduce what follows
     pending_parent: Optional[str] = None  # the lead-in the pending lead-in itself stands under
     # The last sentence of the paragraph just read, with its own lead-in: if a
@@ -176,11 +179,14 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             if pending_lead is not None:
                 take_pending_lead()
                 items.clear()
-            elif not items and intro is not None:
-                # The sentence right before a list introduces it, with or
-                # without a colon: a bold "Not supported yet" line, or "We
-                # do not integrate with these tools" (it stays a sentence too)
-                colon_lead = " > ".join(part for part in (intro[0], _clean_context(intro[1])) if part)
+                lead_names_list = True
+            elif not items:
+                lead_names_list = False
+                if intro is not None:
+                    # The sentence right before a list introduces it, with or
+                    # without a colon: a bold "Not supported yet" line, or "We
+                    # do not integrate with these tools" (it stays a sentence too)
+                    colon_lead = " > ".join(part for part in (intro[0], _clean_context(intro[1])) if part)
             intro = None
             indent, item = _indent(item_match.group(1)), item_match.group(2)
             while items and items[-1][0] >= indent:
@@ -190,8 +196,18 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             # "Not supported > Integrations" keeps the "not"
             index = add_unit(item, context(colon_lead, *parents))
             items.append([indent, item, index])
-            nearest = (parents[-1:] or [colon_lead or ""]) + [headings[-1][1] if headings else ""]
-            if any(_FEATURE_WORD_RE.search(part) for part in nearest):
+            # What names this list decides whether it is a feature list: the
+            # item it is nested under, else its lead-in line ("Key features:"),
+            # else the heading it stands under. Only that nearest one counts:
+            # under "## Features", the sub-items of "- Limitations" are not
+            # feature terms, and neither is a list introduced by "Plans:".
+            if parents:
+                named_by = parents[-1]
+            elif lead_names_list:
+                named_by = colon_lead or ""
+            else:
+                named_by = headings[-1][1] if headings else ""
+            if _FEATURE_WORD_RE.search(named_by):
                 # Read at the end: continuation lines may still extend the item
                 feature_items.append(items[-1])
             blank_since_item = False
