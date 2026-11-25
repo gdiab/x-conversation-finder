@@ -742,7 +742,10 @@ def _insert_legacy_card(workflow_id, with_reply_fit):
             "segments": [{"kind": "non_claim", "text": f"As you said, {QUESTION}",
                           "source_passage_id": None, "sentence_index": None},
                          {"kind": f"quote: {QUESTION}", "text": None,
-                          "source_passage_id": None, "sentence_index": None}],
+                          "source_passage_id": None, "sentence_index": None},
+                         # a number copied from the post as an unchecked index
+                         {"kind": "claim", "text": None,
+                          "source_passage_id": "passage_0", "sentence_index": 424242}],
             "claim_gate": {
                 "passed": False,
                 "segments": [{"kind": "non_claim", "text": f"As you said, {QUESTION}",
@@ -797,6 +800,7 @@ async def test_removal_scrubs_a_card_stored_before_issue_9(with_reply_fit):
     dumped = json.dumps(stored)
     for fragment in POST_FRAGMENTS:
         assert fragment not in dumped
+    assert "424242" not in dumped
     draft = stored["evidence"]["draft"]
     assert "Make it shorter" in draft["steers_applied"]  # founder nudge kept
     assert stored["skip_reason"].startswith("Not enough evidence:")
@@ -804,6 +808,41 @@ async def test_removal_scrubs_a_card_stored_before_issue_9(with_reply_fit):
         # Verified passages and the assembled draft stay
         assert stored["evidence"]["founder_materials"][0]["passage"] == "Our product records work."
         assert draft["text"] == "Thanks for sharing."
+
+
+@pytest.mark.asyncio
+async def test_update_on_a_removed_card_is_redacted_again():
+    """A late update_card with stale evidence (an in-flight redraft, another
+    Review's edit) cannot restore copies of a removed post."""
+    from backend.activities.store_activities import UpdateCardInput, _update_card_sync
+    from backend.models import ClaimGateResult, Draft, Evidence, Segment
+    from backend.target_refetch import refetch_stored_card_target
+
+    workflow_id = "review:test:late_update"
+    _insert_legacy_card(workflow_id, with_reply_fit=True)
+    assert await refetch_stored_card_target(
+        TargetClient(["gone"]), workflow_id, "run1", review_is_running=_finished
+    ) == "removed"
+
+    stale_segments = [Segment(kind="non_claim", text=f"As you said, {QUESTION}")]
+    stale = Evidence(
+        post_id=TARGET_ID, matched_topic="t", why_it_fits="w", confidence_score=0.9,
+        confidence_inputs={}, founder_materials=[],
+        draft=Draft(
+            text="Thanks for sharing.",
+            segments=stale_segments,
+            claim_gate=ClaimGateResult(
+                passed=False, segments=stale_segments,
+                failed_sentences=[("[non_claim segment]", f"Unknown phrase_id: {QUESTION}")],
+                reasoning=f"Composition violation: {QUESTION}",
+            ),
+            steers_applied=[f"Previous draft failed claim gate. Fix: {QUESTION}"],
+        ),
+    )
+    assert _update_card_sync(UpdateCardInput(workflow_id=workflow_id, idempotency_key="k", evidence=stale))
+    dumped = json.dumps(_db_card(workflow_id))
+    for fragment in POST_FRAGMENTS:
+        assert fragment not in dumped
 
 @pytest.mark.asyncio
 async def test_eval_refetch_unknown_card():

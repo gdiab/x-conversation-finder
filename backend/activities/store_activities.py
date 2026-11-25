@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import asyncio
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm.attributes import flag_modified
 
 from backend.models import ReviewCard, Evidence
@@ -72,6 +73,11 @@ def _redact_segment(segment: Dict[str, Any], passages: Dict[str, str]) -> Dict[s
         )
         if not inserted_by_code:
             redacted["text"] = None
+    # An index is kept only alongside verified code-inserted text: on older
+    # rejected segments it is unchecked model output (it could be a number
+    # copied from the post).
+    if not redacted.get("text"):
+        redacted["sentence_index"] = None
     return redacted
 
 
@@ -388,6 +394,10 @@ def _store_card_sync(input: StoreCardInput) -> bool:
     """Synchronous DB work for store_card (B3)."""
     db = get_db()
     try:
+        # issue #9: hold SQLite's write lock from the removal check to the
+        # commit (as backend/budget.py does), so a removal cannot interleave
+        # with this write, e.g. a timed-out attempt's thread still running
+        db.execute(sql_text("BEGIN IMMEDIATE"))
         card_db = _card_to_db(input.card)
         
         # issue #9: a removal already recorded for this post (by another
@@ -429,9 +439,13 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
     Synchronous DB work for update_card. B1: Works with typed fields instead of dict.
     
     QA R13: Checks edit_seq and ignores writes with lower seq than stored.
+    Issue #9: on a card that records a removal, the written evidence is
+    redacted again, so a late write (an in-flight redraft, or another
+    Review's stale evidence) cannot restore copies of the post.
     """
     db = get_db()
     try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))  # issue #9, see _store_card_sync
         card_db = db.query(ReviewCardDB).filter(
             ReviewCardDB.workflow_id == input.workflow_id
         ).first()
@@ -545,6 +559,11 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
             card_db.evidence_data = evidence_data
             flag_modified(card_db, "evidence_data")
         
+        if (card_db.post_data or {}).get("text_removed"):
+            card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
+            flag_modified(card_db, "evidence_data")
+            card_db.skip_reason = redact_skip_reason(card_db.skip_reason)
+        
         db.commit()
         return True
     finally:
@@ -645,6 +664,7 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
     """
     db = get_db()
     try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))  # issue #9, see _store_card_sync
         card_db = db.query(ReviewCardDB).filter(
             ReviewCardDB.workflow_id == input.workflow_id
         ).first()
