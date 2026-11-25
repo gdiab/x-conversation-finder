@@ -247,12 +247,30 @@ def test_the_five_2026_11_21_cases_that_are_not_product_claims_are_allowed_by_de
 
 
 def test_the_adr_records_criterion_1_and_names_the_five_allowed_cases():
-    """The amendment's wording and this file's two groups stay in step."""
+    """The amendment's wording and this file's two groups stay in step: the
+    first switch criterion is scoped to product claims, and the recorded
+    decision names exactly the five cases and says they are allowed by design."""
     amendment = ADR.read_text().split("## Amendment 2026-11-24", 1)[1]
 
-    assert "that makes a product claim is rejected by steps 2-4" in amendment
-    for text in ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS:
-        assert f"'{text}'" in amendment, text
+    criteria = amendment[amendment.index("**Switch criteria"):amendment.index("**Alternatives considered:**")]
+    first_criterion = criteria.split("\n- ")[1]
+    assert first_criterion.startswith(
+        "Every must-REJECT case in the 2026-11-21 amendment's edit-path list that makes a product claim "
+        "is rejected by steps 2-4."
+    )
+
+    [decision] = [
+        paragraph for paragraph in amendment.split("\n\n")
+        if paragraph.startswith("**Decided: switch criterion 1")
+    ]
+    assert "(George, 2026-11-25)" in decision
+    assert "out of scope for the claim gate by design" in decision
+    assert "caught by founder review" in decision
+    # The quoted sentences of the decision are the five cases, no more and no fewer
+    quoted = set(re.findall(r"'([^']*[.!?])'", decision))
+    assert quoted == ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS
+    # Nothing in the amendment still calls the criterion open
+    assert "Open, found while implementing" not in amendment
 
 
 def test_replies_that_should_pass_do():
