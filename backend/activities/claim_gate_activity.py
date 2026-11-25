@@ -27,6 +27,7 @@ from backend.gate.sentence_boundary import (
     ends_with_abbreviation,
     has_ambiguous_boundary,
     period_boundary,
+    sentence_terminator,
 )
 from backend.gate.legacy_split_v1 import split_into_sentences_v1
 
@@ -53,13 +54,15 @@ def split_into_sentences(text: str) -> List[str]:
     """
     Split text into sentences (ADR-0006 claim gate contract).
 
-    Deterministic rule: a word ending in '!' or '?' ends a sentence when
-    another word follows. A word ending in '.' ends one only where
+    Deterministic rule: a word ending in '!' or '?' (before any closing quotes
+    or brackets) ends a sentence when another word follows. A word ending in
+    '.' ends one only where
     backend.gate.sentence_boundary.period_boundary says END:
     - QA R14: company suffixes (Inc. Ltd. Co. Corp.) end a sentence when the
       next word is capitalized.
     - QA R13: prefix abbreviations (Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e.
-      approx.) and initials (J.) never end a sentence here.
+      approx.) never end a sentence before a lowercase word or a name
+      ("Dr. Smith"); an initial (J.) never ends one before a lowercase word.
     - Issue #10: etc., St., Ph.D., dotted initialisms (U.S.A.) and numbers
       (2021.) end a sentence only when the next word clearly starts a new one.
       Decimals (S-5: 99.99%) never split; a list marker ("1.") at the start of
@@ -79,22 +82,29 @@ def split_into_sentences(text: str) -> List[str]:
     # Words and the whitespace between them alternate in tokens.
     tokens = re.findall(r'\S+|\s+', text)
 
+    # Whether the current sentence already has a word (constant time per token).
+    has_word = False
+
     for i, token in enumerate(tokens):
         current.append(token)
-        if token.isspace() or not token.endswith(('.', '!', '?')):
+        if token.isspace():
+            continue
+        sentence_start = not has_word
+        has_word = True
+        terminator = sentence_terminator(token)
+        if not terminator:
             continue
         next_word = tokens[i + 2] if i + 2 < len(tokens) else None
         if next_word is None:
             # End of text: the remainder is added below.
             continue
-        if token.endswith('.'):
-            sentence_start = ''.join(current[:-1]).strip() == ''
-            if period_boundary(token, next_word, sentence_start=sentence_start) != END:
-                continue
+        if terminator == '.' and period_boundary(token, next_word, sentence_start=sentence_start) != END:
+            continue
         sentence = ''.join(current).strip()
         if sentence:
             result.append(sentence)
         current = []
+        has_word = False
 
     # Add remaining
     if current:
@@ -327,6 +337,23 @@ class SentenceGateResult:
     phrase_id: Optional[str] = None  # QA R13: Fixed phrase ID for non_claims
 
 
+def _verdict_reusable(seg: Segment, passage_sentences: Dict[str, tuple]) -> bool:
+    """May the edit re-gate keep this gated segment's verdict (issue #10)?
+
+    A claim gated under another sentence split may be a fragment of a founder
+    sentence: the pre-#10 split made "We sell in the U.S.A" out of "We sell in
+    the U.S.A. market today." Its verdict is kept only if its text is still a
+    whole, selectable sentence in the current split; otherwise the edited
+    sentence is checked like any other.
+    """
+    if seg.kind != "claim" or seg.splitter_version == SPLITTER_VERSION:
+        return True
+    if not seg.text:
+        return False
+    match = passage_sentences.get(normalize_text(seg.text.rstrip('.!?')))
+    return match is not None and not claim_selectability_error(match[2])
+
+
 @activity.defn(name="verify_edited_text")
 async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateResult]:
     """
@@ -404,6 +431,8 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
         # QA R13: Also check sentence type - questions match only questions, statements match statements
         matched_seg = None
         for seg in input.gated_segments:
+            if not _verdict_reusable(seg, passage_sentences):
+                continue
             if seg.text:
                 # Check if the segment is a question
                 seg_is_question = seg.text.rstrip().endswith('?')

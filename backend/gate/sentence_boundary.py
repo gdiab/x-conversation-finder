@@ -17,13 +17,22 @@ company suffix      CONTINUE                   END                       END
 (Inc. Ltd. Co. Corp., QA R14)
 prefix              CONTINUE                   AMBIGUOUS                 CONTINUE
 (Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e. approx.)
-initial (J. B.)     CONTINUE                   AMBIGUOUS                 CONTINUE
+initial (J. B.)     CONTINUE                   AMBIGUOUS                 AMBIGUOUS
 terminal            CONTINUE                   END                       AMBIGUOUS
 (etc. St. Ph.D. U.S. U.S.A. a.m.)
 number (2021. $5.)  CONTINUE                   END                       AMBIGUOUS
 list marker (1.)    CONTINUE                   AMBIGUOUS, or CONTINUE as the first word
                                                of a sentence ("1. The product ...")
 ==================  =========================  ========================  ==========
+
+A single capital letter before a capitalized word reads both as a name
+initial ("J. Smith") and as a sentence end ("Plan B. Customers pay"), so it
+is AMBIGUOUS: such a founder sentence is not selectable, and post text splits
+there.
+
+A word counts as ending in a period when its last character before any
+closing quotes or brackets is one ('We ship in the U.S." Customers' is
+checked like 'U.S. Customers'); sentence_terminator gives that character.
 
 A next word starting with a digit or symbol counts as lowercase, except after
 a terminal abbreviation, number or list marker, where it is AMBIGUOUS. The
@@ -167,12 +176,21 @@ def period_boundary(word: str, next_word: Optional[str], *, sentence_start: bool
         return AMBIGUOUS
     if kind == "company":
         return END
+    if kind == "initial":
+        return AMBIGUOUS
     starter = starts_new_sentence(next_word)
-    if kind in ("prefix", "initial"):
+    if kind == "prefix":
         return AMBIGUOUS if starter else CONTINUE
     if kind == "list_marker":
         return CONTINUE if sentence_start else AMBIGUOUS
     return END if starter else AMBIGUOUS
+
+
+def sentence_terminator(word: str) -> str:
+    """The word's last character before closing quotes and brackets if it is
+    '.', '!' or '?'; otherwise the empty string."""
+    last = word.rstrip(_CLOSERS)[-1:]
+    return last if last in (".", "!", "?") else ""
 
 
 def has_ambiguous_boundary(sentence: str) -> bool:
@@ -183,7 +201,7 @@ def has_ambiguous_boundary(sentence: str) -> bool:
     """
     words = sentence.split()
     return any(
-        word.endswith(".") and period_boundary(word, words[i + 1], sentence_start=i == 0) == AMBIGUOUS
+        sentence_terminator(word) == "." and period_boundary(word, words[i + 1], sentence_start=i == 0) == AMBIGUOUS
         for i, word in enumerate(words[:-1])
     )
 

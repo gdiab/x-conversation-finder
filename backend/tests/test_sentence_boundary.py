@@ -80,9 +80,12 @@ GOLDEN_SPLITS = [
     ("We support Slack, Teams, etc. Pricing is flat.", ["We support Slack, Teams, etc. Pricing is flat."]),
     ("Our office is on Main St. We host meetups.", ["Our office is on Main St.", "We host meetups."]),
     ("We met at St. Louis Station.", ["We met at St. Louis Station."]),  # "Main St. Louis ..." reads both ways
-    # Single-letter initials: a name follows; a starter word is ambiguous.
+    # Single-letter initials before a capitalized word are ambiguous (name
+    # initial or sentence end); before a lowercase word they continue.
     ("Built by J. Smith last year.", ["Built by J. Smith last year."]),
     ("Built by J. A. Smith last year.", ["Built by J. A. Smith last year."]),
+    ("We chose Plan B. Customers need help.", ["We chose Plan B. Customers need help."]),
+    ("Pick option B. or C.", ["Pick option B. or C."]),
     ("Built by J. The artist Smith in 2021.", ["Built by J. The artist Smith in 2021."]),
     ("We offer Plan B. It costs less.", ["We offer Plan B. It costs less."]),
     # Ph.D. (QA R11 test) splits before a clear sentence start.
@@ -103,6 +106,10 @@ GOLDEN_SPLITS = [
     ("We are Acme Inc. Our product supports SSO.", ["We are Acme Inc.", "Our product supports SSO."]),
     ("We are Acme Inc. and others.", ["We are Acme Inc. and others."]),
     ("We are Acme Corp. Pricing is flat.", ["We are Acme Corp.", "Pricing is flat."]),
+    # Terminators before closing quotes and brackets.
+    ('We said "ship it." Customers agreed.', ['We said "ship it."', "Customers agreed."]),
+    ("We ship in the U.S.\u201d Customers pay monthly.", ["We ship in the U.S.\u201d Customers pay monthly."]),
+    ("Fast setup (really!) Clear pricing.", ["Fast setup (really!)", "Clear pricing."]),
     # Ordinary sentence ends.
     ("Fast setup. Clear pricing! Any questions?", ["Fast setup.", "Clear pricing!", "Any questions?"]),
     ("Wait... Then it worked.", ["Wait...", "Then it worked."]),
@@ -115,8 +122,12 @@ AMBIGUOUS_SENTENCES = [
     "Foo vs. It is shipped.",
     "We support Slack, Teams, etc. Pricing is flat.",
     "We met at St. Louis Station.",
+    "Built by J. Smith last year.",
+    "Built by J. A. Smith last year.",
     "Built by J. The artist Smith in 2021.",
     "We offer Plan B. It costs less.",
+    "We chose Plan B. Customers need help.",
+    "We ship in the U.S.\u201d Customers pay monthly.",
     "We launched in 2021. Customers followed.",
     "Steps: 1. Install the CLI.",
     "We have 12. The rest are pending.",
@@ -212,10 +223,10 @@ def test_abbreviation_kind(word, kind):
         ("Dr.", "Smith", CONTINUE),
         ("Dr.", "We", AMBIGUOUS),
         ("approx.", "10", CONTINUE),
-        ("J.", "Smith", CONTINUE),
-        ("J.", "I.", CONTINUE),  # another initial
-        ("J.", "Will", CONTINUE),  # a name, deliberately not a starter
+        ("J.", "Smith", AMBIGUOUS),  # "J. Smith" or "Plan B. Customers"
+        ("J.", "smith", CONTINUE),
         ("J.", "The", AMBIGUOUS),
+        ('U.S."', "Customers", AMBIGUOUS),
         ("Inc.", "Customers", END),
         ("Inc.", "and", CONTINUE),
         ("Inc.", "3", CONTINUE),
@@ -256,7 +267,6 @@ def test_sentence_with_a_mid_sentence_abbreviation_is_selectable():
         "We launched in 2021.",
         "Our team has 12.",
         "1. The product supports SSO.",
-        "Built by J. Smith last year.",
         "Use a queue, e.g. Postgres or Redis.",
     ]:
         assert claim_selectability_error(sentence) == "", sentence
@@ -369,6 +379,57 @@ async def test_claim_gate_fails_an_unversioned_draft_into_a_changed_split():
 
 # ---------- claim gate and edit re-gate ----------
 
+async def test_claim_gate_rejects_two_sentences_hidden_by_a_closing_quote():
+    """Codex thermo r2: 'U.S.\u201d Customers' is checked like 'U.S. Customers'."""
+    result = await claim_gate(ClaimGateInput(
+        segments=[claim(0)],
+        founder_materials=[material("We ship in the U.S.\u201d Customers pay monthly.")],
+        idempotency_key="issue10_closer",
+    ))
+    assert not result.passed
+    assert result.failed_sentences[0][1] == AMBIGUOUS_BOUNDARY_REASON
+
+
+async def test_edit_regate_splits_after_a_quoted_sentence_end():
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text='We said "ship it." Customers agreed.',
+        gated_segments=[],
+        founder_materials=[material("Customers agreed.")],
+        idempotency_key="issue10_edit_closer",
+    ))
+    assert [r.sentence for r in results] == ['We said "ship it."', "Customers agreed."]
+    assert [r.passed for r in results] == [False, True]
+
+
+async def test_edit_regate_does_not_keep_a_v1_fragment_verdict():
+    """Codex thermo r2: a card gated under the pre-#10 split kept "We sell in the U.S.A"."""
+    passage = "We sell in the U.S.A. market today."
+    v1_fragment = split_into_sentences_v1(passage)[0].rstrip(".")
+    assert v1_fragment == "We sell in the U.S.A"
+    stored = Segment(kind="claim", text=v1_fragment, source_passage_id="passage_0", sentence_index=0)
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="We sell in the U.S.A.",
+        gated_segments=[stored],
+        founder_materials=[material(passage)],
+        idempotency_key="issue10_v1_fragment",
+    ))
+    assert len(results) == 1
+    assert not results[0].passed
+    assert not results[0].kept_segment
+
+
+async def test_edit_regate_keeps_an_unversioned_whole_sentence_verdict():
+    """In-flight cards gated before #10 keep claims that are still whole sentences."""
+    passage = "Our API is fast. We ship weekly."
+    stored = Segment(kind="claim", text="We ship weekly", source_passage_id="passage_0", sentence_index=1)
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="We ship weekly.",
+        gated_segments=[stored],
+        founder_materials=[material(passage)],
+        idempotency_key="issue10_v1_whole",
+    ))
+    assert results[0].passed and results[0].kept_segment
+
 async def test_claim_gate_passes_a_claim_with_a_mid_sentence_initialism():
     result = await claim_gate(ClaimGateInput(
         segments=[
@@ -456,7 +517,6 @@ def plan(target: str) -> ReplyPlan:
         ("Moving to Rust. Dr. Smith, can you help?", "Dr. Smith, can you help?"),
         ("Any tools for queues, e.g. Kafka or NATS?", "Any tools for queues, e.g. Kafka or NATS?"),
         ("Hiring in the U.K. soon. Who handles payroll?", "Who handles payroll?"),
-        ("Has J. Smith shipped it?", "Has J. Smith shipped it?"),
     ],
 )
 def test_whole_question_with_an_abbreviation_is_a_valid_target(post, question):
@@ -471,11 +531,27 @@ def test_whole_question_with_an_abbreviation_is_a_valid_target(post, question):
         # Codex review r1: an ambiguous period splits post text.
         ("Revenue doubled in 2021. Canals or railways?", "Revenue doubled in 2021.", "Canals or railways?"),
         ("We sell in the U.S. Customers pay monthly?", "We sell in the U.S.", "Customers pay monthly?"),
+        # Codex review r2: an initial before a capitalized word splits post text.
+        ("Version A. Anyone interested?", "Version A.", "Anyone interested?"),
+        ("We chose Plan B. Customers need help?", "We chose Plan B.", "Customers need help?"),
     ],
 )
 def test_statement_before_a_question_is_outside_it(post, statement, question):
     assert [post[a:b].strip() for a, b in question_spans(post)] == [question]
     assert validate_reply_plan(plan(statement), post) != []
+
+
+def test_claim_splitter_stays_linear_on_many_initials():
+    """Codex thermo r2: the sentence-start check must not rebuild the sentence."""
+    def elapsed(n: int) -> float:
+        text = "J. " * n + "Smith."
+        started = time.perf_counter()
+        split_into_sentences(text)
+        return time.perf_counter() - started
+
+    elapsed(1000)  # warm up
+    small, large = elapsed(2000), elapsed(16000)
+    assert large < small * 8 * 4  # 8x the input; allow 4x noise over linear
 
 
 def test_question_spans_stay_linear_on_many_periods():
