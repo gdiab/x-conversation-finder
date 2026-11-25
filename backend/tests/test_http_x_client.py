@@ -67,7 +67,8 @@ async def test_search_recent_success():
         mock_response_obj.json.return_value = mock_response
         mock_client.get.return_value = mock_response_obj
         
-        posts, newest_id = await client.search_recent("distributed systems", max_results=10)
+        result = await client.search_recent("distributed systems", max_results=10)
+        posts, newest_id = result.posts, result.newest_id
     
     assert len(posts) == 1
     assert posts[0].id == "1234567890"
@@ -123,11 +124,12 @@ async def test_search_recent_with_since_id():
         mock_response_obj.json.return_value = mock_response
         mock_client.get.return_value = mock_response_obj
         
-        posts, newest_id = await client.search_recent(
+        result = await client.search_recent(
             "test query",
             since_id="1234567890",
             max_results=10
         )
+        posts, newest_id = result.posts, result.newest_id
     
     # Verify since_id was passed in params
     call_args = mock_client.get.call_args
@@ -158,7 +160,8 @@ async def test_search_recent_no_results():
         mock_response_obj.json.return_value = mock_response
         mock_client.get.return_value = mock_response_obj
         
-        posts, newest_id = await client.search_recent("no results query")
+        result = await client.search_recent("no results query")
+        posts, newest_id = result.posts, result.newest_id
     
     assert posts == []
     assert newest_id is None
@@ -361,7 +364,8 @@ async def test_search_recent_tracks_newest_id():
         mock_response_obj.json.return_value = mock_response
         mock_client.get.return_value = mock_response_obj
         
-        posts, newest_id = await client.search_recent("test query")
+        result = await client.search_recent("test query")
+        posts, newest_id = result.posts, result.newest_id
     
     # Should track the highest ID (2000), not the most recent by timestamp
     assert newest_id == "2000"
@@ -455,7 +459,9 @@ async def test_lookup_post_not_authorized_is_gone():
 )
 async def test_lookup_post_other_bodies_without_data_raise(body):
     """Issue #9: a 200 without data and without a matching post-gone error
-    must not read as not found (that would remove the post text)."""
+    must not read as not found (that would remove the post text). Issue #17:
+    it raises LookupReturnedNoPost, which the activity releases (no post
+    object came back), not MalformedLookupResponse (billed post data)."""
     from temporalio.exceptions import ApplicationError
 
     client = HttpXClient("test_bearer_token_123")
@@ -463,4 +469,4 @@ async def test_lookup_post_other_bodies_without_data_raise(body):
         _mock_lookup_response(mock_client_class, body)
         with pytest.raises(ApplicationError) as excinfo:
             await client.lookup_post("1234567890")
-    assert excinfo.value.type == "MalformedLookupResponse"
+    assert excinfo.value.type == "LookupReturnedNoPost"

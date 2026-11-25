@@ -170,10 +170,14 @@ async def test_404_on_refetch_redacts_text_and_spans_and_skips(make_review_input
             assert before["evidence"]["reply_plan"]["target_point"] == QUESTION
             assert before["evidence"]["reply_fit"]["brief_problem_span"]
 
+            reads_before = _x_reads()
             with pytest.raises(WorkflowUpdateFailedError) as excinfo:
                 await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
             assert excinfo.value.cause.type == "PostRemoved"
             assert await handle.result() == "skipped"
+            # Issue #17: the gone post came back as no post object, which X
+            # does not bill, so the re-fetch counts no read
+            assert _x_reads() == reads_before
 
             for card in (await handle.query("get_card"), _db_card(handle.id)):
                 assert card["status"] == "skipped"
@@ -653,9 +657,11 @@ async def test_eval_refetch_404_removes_text_once(make_review_input):
     reads_before = _x_reads()
     with pytest.raises(RuntimeError):
         await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished)
-    # Both calls may have been billed, so both count (issue #8)
+    # The failed call may have been billed, so it counts (issue #8); the
+    # lookup that found the post gone returned no post object and is
+    # released (issue #17)
     assert await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished) == "removed"
-    assert _x_reads() - reads_before == 2
+    assert _x_reads() - reads_before == 1
     stored = _db_card(workflow_id)
     assert stored["post"]["text_removed"] is True
     assert stored["status"] == "expired"  # status is left as it was
@@ -678,7 +684,7 @@ async def test_eval_refetch_404_removes_text_once(make_review_input):
     # Already removed: no further X read
     assert await refetch_stored_card_target(client, workflow_id, "run2", review_is_running=_finished) == "removed"
     assert client.target_lookups == 2
-    assert _x_reads() - reads_before == 2
+    assert _x_reads() - reads_before == 1
 
 
 

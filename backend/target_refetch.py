@@ -87,7 +87,8 @@ async def refetch_stored_card_target(
     Reserves one X read through backend.budget before each lookup (raises
     BudgetExceeded over the cap, never reports "removed"). As for the
     lookup_post activity (issue #8), every call that may have been billed is
-    counted, including a retry; a request X refused is released. A card
+    counted, including a retry; a request X refused, and a lookup that found
+    the post gone (X returned no post object, issue #17), are released. A card
     already marked removed costs no read. The stored card's status is left
     as it is.
     """
@@ -124,6 +125,15 @@ async def refetch_stored_card_target(
     if post is not None:
         return "found"
 
+    # Issue #17: X returned no post object for the gone post and billed nothing
+    release_x_reservation(
+        reserved_reads=1,
+        reservation_date=reservation_date,
+        workflow_id=workflow_id,
+        workflow_run_id=EVAL_REFETCH_RUN_ID,
+        activity_id=call_id,
+        cost_per_read=settings.x_post_read_cost,
+    )
     _delete_post_text_sync(
         DeletePostTextInput(
             workflow_id=workflow_id,
