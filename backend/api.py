@@ -361,13 +361,14 @@ async def start_watch(request: StartWatchRequest):
     
     except Exception as e:
         if "already exists" in str(e).lower():
-            # A running watch keeps the brief, product name and key features
-            # it was started with (issue #12: stop it first to change them)
+            # A running watch keeps the brief, product name, other names and
+            # key features it was started with (issue #12: stop it first to
+            # change them)
             return StartWatchResponse(
                 workflow_id=workflow_id,
                 message=(
-                    f"Watch already running for topic '{request.topic}'. Its product name, key "
-                    "features and brief were not changed; stop the watch first to change them."
+                    f"Watch already running for topic '{request.topic}'. Its product name, other "
+                    "names, key features and brief were not changed; stop the watch first to change them."
                 ),
             )
         raise HTTPException(status_code=500, detail=str(e))

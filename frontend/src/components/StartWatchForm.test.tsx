@@ -96,7 +96,7 @@ describe('StartWatchForm: product name, "Also called" and "Key features" (issue 
     const user = userEvent.setup();
     startWatchMock.mockResolvedValue({
       workflow_id: 'watch:x:y',
-      message: "Watch already running for topic 'webhooks'. Its product name, key features and brief were not changed; stop the watch first to change them.",
+      message: "Watch already running for topic 'webhooks'. Its product name, other names, key features and brief were not changed; stop the watch first to change them.",
     });
     render(<StartWatchForm onSuccess={vi.fn()} />);
 

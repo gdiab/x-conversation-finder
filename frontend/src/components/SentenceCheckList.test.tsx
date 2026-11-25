@@ -188,9 +188,32 @@ describe('ReviewCard: written draft (issue #12)', () => {
     render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
 
     const citations = screen.getByTestId('drafter-citations');
-    expect(citations).toHaveTextContent('the checker was not shown it, and it is not a verdict');
+    expect(citations).toHaveTextContent("The drafter's own citations. The model that wrote the draft");
+    expect(citations).toHaveTextContent('the checker was not shown it, and it is not a verdict.');
+    expect(citations).not.toHaveTextContent('before your edit');
     expect(citations).toHaveTextContent('"Relay can retry a failed delivery up to five times.": b2, b3');
     expect(citations).toHaveTextContent('"We would love to hear how it goes.": no brief sentence named');
+  });
+
+  it("keeps the drafter's citations after an edit, labelled as the model's draft's", () => {
+    const draft = makeWrittenDraft();
+    draft.written = {
+      product_name: 'Acme Relay',
+      product_aliases: [],
+      feature_terms: [],
+      drafter_hints: [{ sentence: 'Relay can retry a failed delivery up to five times.', brief_sentence_ids: ['b2'] }],
+    };
+    const card = makeCard({
+      evidence: makeEvidence({ draft }),
+      edited_text_gate_state: 'passed',
+      edited_text_gate_results: [makeSentenceCheck({ sentence: 'That is a hard thing to get right.' })],
+    });
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    const citations = screen.getByTestId('drafter-citations');
+    expect(citations).toHaveTextContent("The drafter's own citations, for the model's draft (before your edit).");
+    expect(citations).toHaveTextContent('it is not a verdict. It says nothing about the edited text.');
+    expect(citations).toHaveTextContent('"Relay can retry a failed delivery up to five times.": b2');
   });
 
   it("shows no drafter's citations when there are none, as after a removal", () => {

@@ -484,13 +484,17 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           ) : (
             <SentenceCheckList checks={card.evidence.draft.sentence_checks ?? []} />
           )}
-          {/* ADR-0006 amendment 2026-11-24, step 1: the drafter's own list is provenance */}
-          {!edited && (card.evidence.draft.written?.drafter_hints ?? []).length > 0 && (
+          {/* ADR-0006 amendment 2026-11-24, step 1: the drafter's own list is provenance.
+              It stays on the card after an edit, labelled as the model's draft's. */}
+          {(card.evidence.draft.written?.drafter_hints ?? []).length > 0 && (
             <div data-testid="drafter-citations" style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
               <div style={{ marginBottom: '4px' }}>
-                <strong>The drafter's own citations.</strong> The model that wrote the draft named these
-                brief sentences as its support. This is a record only: the checker was not shown it, and
-                it is not a verdict.
+                <strong>
+                  {edited ? "The drafter's own citations, for the model's draft (before your edit)." : "The drafter's own citations."}
+                </strong>{' '}
+                The model that wrote the draft named these brief sentences as its support. This is a
+                record only: the checker was not shown it, and it is not a verdict.
+                {edited && ' It says nothing about the edited text.'}
               </div>
               {(card.evidence.draft.written?.drafter_hints ?? []).map((hint, idx) => (
                 <div key={idx}>

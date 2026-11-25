@@ -128,7 +128,7 @@ async def test_starting_a_running_watch_says_its_product_name_was_not_changed(mo
     response = await api.start_watch(_request())
 
     assert "already running" in response.message
-    assert "product name, key features and brief were not changed; stop the watch first" in response.message
+    assert "product name, other names, key features and brief were not changed; stop the watch first" in response.message
 
 
 # ---------- a nudge's response after a removal recorded elsewhere ----------
