@@ -1069,3 +1069,33 @@ def test_inputs_recorded_before_the_new_fields_decode_to_assembled_defaults():
     assert (old_result.draft_mode, old_result.draft_mode_note) == (None, None)
     defaults = {f.name: f.default for f in dataclasses.fields(DraftReplyInput)}
     assert (defaults["draft_mode"], defaults["key_features"]) == (None, None)
+
+
+# ---------- issue #29: written Reviews recorded before the steer moved to a module function ----------
+
+WRITTEN_HISTORIES = [
+    # Recorded on main 06db357 (before issue #29) with this file's WritingAgent:
+    # a failed check, a redraft steered by the failures, then a passing check
+    ("review_history_main_06db357_written_redraft.json", "review:test:1001_redraft_passes"),
+    # Two failed checks, then skipped as "not enough evidence"
+    ("review_history_main_06db357_written_skipped.json", "review:test:1001_redraft_fails_skipped"),
+]
+
+
+def test_written_fixtures_cover_a_steered_redraft():
+    for fixture, _ in WRITTEN_HISTORIES:
+        scheduled = [
+            e["activityTaskScheduledEventAttributes"]["activityType"]["name"]
+            for e in _events(fixture)
+            if "activityTaskScheduledEventAttributes" in e
+        ]
+        assert scheduled.count("draft_reply") == 2, fixture
+        assert scheduled.count("check_written_draft") == 2, fixture
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fixture,workflow_id", WRITTEN_HISTORIES)
+async def test_written_reviews_recorded_before_issue_29_replay(fixture, workflow_id):
+    """redraft_steer and record_written_check moved out of the workflow
+    class (issue #29); a written Review recorded before must replay."""
+    await Replayer(workflows=[ReviewWorkflow]).replay_workflow(_history(fixture, workflow_id))

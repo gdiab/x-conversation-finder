@@ -9,6 +9,7 @@ spend cap, and that its summary carries no text. Synthetic data only.
 import dataclasses
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -897,6 +898,14 @@ def test_the_script_never_writes_through_a_symlink_or_over_the_database(tmp_path
     try:
         with pytest.raises(SystemExit):
             redraft_harness.safe_write(db, "{}")
+    finally:
+        redraft_harness.PROTECTED.remove(db.resolve())
+    hard = tmp_path / "out" / "hard.json"
+    os.link(db, hard)
+    redraft_harness.PROTECTED.append(db.resolve())
+    try:
+        with pytest.raises(SystemExit):
+            redraft_harness.safe_write(hard, "{}")
     finally:
         redraft_harness.PROTECTED.remove(db.resolve())
     assert db.read_text() == "synthetic database"

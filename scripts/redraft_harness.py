@@ -22,6 +22,7 @@ git does not ignore. summary.md holds the aggregate numbers only.
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -76,7 +77,8 @@ def safe_write(path: Path, text: str) -> None:
     if path.is_symlink():
         sys.exit(f"Refusing to write {path}: it is a symlink")
     resolved = path.resolve()
-    if any(resolved == p for p in PROTECTED):
+    if any(resolved == p or (path.exists() and p.exists() and os.path.samefile(path, p)) for p in PROTECTED):
+        # samefile: a hard link to the database resolves to another path
         sys.exit(f"Refusing to write {path}: it is the input database")
     ensure_ignored(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,7 +247,10 @@ async def run(args) -> None:
     print(summary_markdown(summary))
     # The new report has the removals already; sweep again in case one was
     # recorded while it was written
-    if not (sweep_earlier_reports(out_root, is_removed) and swept):
+    swept_again = sweep_earlier_reports(out_root, is_removed)
+    if prune_removed_plans(plans, is_removed):
+        safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))
+    if not (swept_again and swept):
         sys.exit("Some reports could not be checked for recorded removals (see above)")
     print(f"wrote {out_dir}/report.json and summary.md")
 
