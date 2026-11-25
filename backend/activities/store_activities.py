@@ -421,6 +421,12 @@ def _store_card_sync(input: StoreCardInput) -> bool:
         # this write, so a late or retried store cannot put the text back
         if _post_removal_recorded(db, card_db.post_data["id"]):
             _remove_card_post_text(card_db)
+            # A late store (a timed-out attempt finishing after the removal)
+            # must not revert the removed card's later status either
+            existing = db.get(ReviewCardDB, card_db.workflow_id)
+            if existing is not None and (existing.post_data or {}).get("text_removed"):
+                card_db.status = existing.status
+                card_db.skip_reason = existing.skip_reason
         
         # Use INSERT...ON CONFLICT (B3)
         # SQLAlchemy's merge() provides upsert-like behavior

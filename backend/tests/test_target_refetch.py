@@ -461,6 +461,54 @@ async def test_approve_is_rejected_until_the_card_is_stored(make_review_input):
             assert _db_card(handle.id)["post"]["text"] == review_input.post.text
 
 
+@pytest.mark.asyncio
+async def test_late_store_after_removal_keeps_removed_status(make_review_input):
+    """A store_card attempt that finishes after the removal (a timed-out
+    attempt's thread) keeps the text redacted and the skipped status."""
+    from backend.activities.store_activities import StoreCardInput, _store_card_sync
+    from backend.models import ReviewCard
+
+    client = TargetClient(["gone"])
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, client):
+            review_input, handle = await _start(env, make_review_input, "late_store")
+            pending = await handle.query("get_card")
+            with pytest.raises(WorkflowUpdateFailedError):
+                await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
+            assert _db_card(handle.id)["status"] == "skipped"
+
+    # Replay the stale first store: the pending card as it was before approve
+    stale = ReviewCard(
+        workflow_id=handle.id, post=review_input.post, evidence=_evidence_from(pending["evidence"]),
+        status="pending", created_at=pending["created_at"], updated_at=pending["updated_at"],
+    )
+    assert _store_card_sync(StoreCardInput(card=stale, idempotency_key="stale"))
+    stored = _db_card(handle.id)
+    assert stored["status"] == "skipped"
+    assert stored["skip_reason"] == POST_REMOVED_SKIP_REASON
+    for fragment in POST_FRAGMENTS:
+        assert fragment not in json.dumps(stored)
+
+
+def _evidence_from(data):
+    """Rebuild an Evidence object from a get_card evidence dict (test helper)."""
+    from backend.models import ClaimGateResult, Draft, Evidence, FounderMaterial, Segment
+
+    draft = data["draft"]
+    segments = [Segment(kind=s["kind"], text=s.get("text"), source_passage_id=s.get("source_passage_id"),
+                        sentence_index=s.get("sentence_index"), phrase_id=s.get("phrase_id"))
+                for s in draft["segments"]]
+    return Evidence(
+        post_id=data["post_id"], matched_topic=data["matched_topic"], why_it_fits=data["why_it_fits"],
+        confidence_score=data["confidence_score"], confidence_inputs=data["confidence_inputs"],
+        founder_materials=[FounderMaterial(source=m["source"], passage=m["passage"], relevance=m["relevance"],
+                                           passage_id=m.get("passage_id"))
+                           for m in data["founder_materials"]],
+        draft=Draft(text=draft["text"], segments=segments,
+                    claim_gate=ClaimGateResult(passed=True, segments=segments, failed_sentences=[], reasoning="ok")),
+    )
+
+
 # ---------- the #5 fix still holds ----------
 
 
