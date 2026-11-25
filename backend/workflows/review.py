@@ -110,6 +110,13 @@ with workflow.unsafe.imports_passed_through():
     from backend.activities.written_check_activities import record_written_check
 
 
+# The offline redraft harness (issue #29, backend/eval/written_harness.py)
+# builds its steer and records its checks with the same functions the
+# workflow uses. The steer is an activity input recorded in workflow
+# history, so its wording must not change.
+redraft_steer = gate_steer
+
+
 @dataclass(frozen=True)
 class ReviewConfig:
     """Workflow config passed through input for determinism."""
