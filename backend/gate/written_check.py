@@ -488,7 +488,8 @@ def _judge_sentence(
 ) -> SentenceCheck:
     """Decide one sentence from its triggers and the checker's verdict.
 
-    Only two answers pass, and everything else fails:
+    Only two answers pass, and everything else fails (a sentence the checker
+    answered twice arrives here as malformed):
     - not a product claim: no trigger fired, and the checker said so cleanly
       (about_product false, no verdict, no citation);
     - a supported product claim: a statement, a clean "supported" verdict,
@@ -648,9 +649,14 @@ def judge(
 
     by_index: Dict[int, ClaimVerdict] = {}
     for v in verdicts:
-        # The first answer for a sentence stands; a repeat cannot overrule it
-        if isinstance(v.index, int) and not isinstance(v.index, bool):
-            by_index.setdefault(v.index, v)
+        if not isinstance(v.index, int) or isinstance(v.index, bool):
+            continue
+        if v.index in by_index:
+            # Two answers for one sentence: neither is taken, whichever came
+            # first and whatever they say. The sentence fails as malformed.
+            by_index[v.index] = ClaimVerdict(index=v.index, malformed=True)
+        else:
+            by_index[v.index] = v
     brief_by_id = {b.id: b for b in prepared.brief_sentences}
     checks = [
         _judge_sentence(

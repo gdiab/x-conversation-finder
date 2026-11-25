@@ -233,7 +233,6 @@ def test_malformed_items_are_dropped_or_marked_never_repaired():
         {"n": 9, "about_product": False},  # out of range
         {"n": True, "about_product": False},  # not a number
         {"n": 1, "about_product": "false", "verdict": "SUPPORTED", "brief_sentence_ids": "b1", "reason": 7},
-        {"n": 1, "about_product": False},  # a repeat: the first stands
         {"n": 2, "about_product": True, "verdict": "supported", "brief_sentence_ids": ["b1", 5, None]},
         {"n": 3, "about_product": False, "verdict": None, "brief_sentence_ids": None},  # nulls are fine
     ]})
@@ -244,6 +243,24 @@ def test_malformed_items_are_dropped_or_marked_never_repaired():
         ClaimVerdict(index=2, about_product=True, verdict="supported", brief_sentence_ids=[], malformed=True),
         ClaimVerdict(index=3, about_product=False),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_sentence_the_checker_answered_twice_fails():
+    """Supported first, unsupported second: the parser passes both on, and code takes neither."""
+    answer = {"sentences": [
+        {"n": 1, "about_product": False},
+        {"n": 2, "about_product": True, "verdict": "supported", "brief_sentence_ids": ["b2"]},
+        {"n": 2, "about_product": True, "verdict": "unsupported", "reason": "The brief says can, not will."},
+        {"n": 3, "about_product": False},
+    ]}
+    assert [v.index for v in parse_verdicts(json.dumps(answer), 3)] == [1, 2, 2, 3]
+    checker, _ = _checker([answer], require_budget_meter=True)
+
+    result = await _env().run(WrittenCheckActivities(checker).check_written_draft, _input())
+
+    assert not result.passed
+    assert "The checker's answer for it was malformed." in result.sentences[1].reason
 
 
 @pytest.mark.asyncio

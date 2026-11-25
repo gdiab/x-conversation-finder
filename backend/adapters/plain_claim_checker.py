@@ -91,7 +91,8 @@ def parse_verdicts(content: Any, sentence_count: int) -> List[ClaimVerdict]:
     """Read the checker's JSON strictly; anything unclear stays None or empty.
 
     A sentence without a usable object gets no verdict, and code then fails it
-    (backend.gate.written_check.judge). The first object for a number stands.
+    (backend.gate.written_check.judge). Every object for a number is passed
+    on: code fails a sentence that was answered twice.
     Nothing is repaired: a field of the wrong shape (a citation list holding a
     non-string, a verdict that is neither word) or a missing true/false
     "about_product" marks the verdict malformed, and code fails that sentence
@@ -105,14 +106,12 @@ def parse_verdicts(content: Any, sentence_count: int) -> List[ClaimVerdict]:
     if not isinstance(items, list):
         return []
     verdicts: List[ClaimVerdict] = []
-    seen = set()
     for item in items:
         if not isinstance(item, dict):
             continue
         n = item.get("n")
-        if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= sentence_count or n in seen:
+        if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= sentence_count:
             continue
-        seen.add(n)
         verdict = item.get("verdict")
         ids = item.get("brief_sentence_ids")
         reason = item.get("reason")

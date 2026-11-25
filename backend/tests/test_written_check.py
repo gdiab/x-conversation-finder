@@ -254,15 +254,41 @@ def test_only_two_answers_pass_a_sentence():
     assert _check(untriggered, NOT_PRODUCT, SUPPORTED_B1).passed
 
 
-def test_a_repeated_answer_cannot_overrule_the_first():
+@pytest.mark.parametrize("first,second", [
+    (dict(about_product=True, verdict="unsupported", reason="No."), SUPPORTED_B1),
+    (SUPPORTED_B1, dict(about_product=True, verdict="unsupported", reason="No.")),
+    (SUPPORTED_B1, SUPPORTED_B1),
+])
+def test_a_sentence_answered_twice_fails_whatever_the_answers_and_their_order(first, second):
+    """Two answers for one sentence contradict each other or say nothing new.
+    Neither is taken: taking the first would let "supported" stand over a
+    later "unsupported"."""
     verdicts = [
-        ClaimVerdict(index=2, about_product=True, verdict="unsupported", reason="No."),
-        ClaimVerdict(index=2, **SUPPORTED_B1),
+        ClaimVerdict(index=2, **first),
+        ClaimVerdict(index=2, **second),
         ClaimVerdict(index=1, **NOT_PRODUCT),
         ClaimVerdict(index=3, **NOT_PRODUCT),
     ]
 
-    assert not judge(_prepare(GOOD), verdicts).passed
+    result = judge(_prepare(GOOD), verdicts)
+
+    assert not result.passed
+    assert "The checker's answer for it was malformed." in result.sentences[1].reason
+
+
+def test_an_untriggered_sentence_answered_twice_fails_too():
+    """ "Not about the product" followed by a product verdict for the same sentence."""
+    text = f"{REACTION} It retries failed deliveries for you."
+    verdicts = [
+        ClaimVerdict(index=1, **NOT_PRODUCT),
+        ClaimVerdict(index=2, **NOT_PRODUCT),
+        ClaimVerdict(index=2, about_product=True, verdict="unsupported", reason="Not in the brief."),
+    ]
+
+    result = judge(_prepare(text), verdicts)
+
+    assert not result.passed
+    assert (result.sentences[1].kind, result.sentences[1].passed) == ("claim", False)
 
 
 # ---------- a product claim is a statement ----------
