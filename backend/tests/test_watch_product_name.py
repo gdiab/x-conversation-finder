@@ -110,7 +110,7 @@ async def test_starting_a_running_watch_says_its_product_name_was_not_changed(mo
 
 class _NudgeHandle:
     async def execute_update(self, name, args):
-        assert name == "nudge"
+        assert name in ("nudge", "edit")
         return "A redraft that quotes 'eventual consistency' from the post."
 
 
@@ -133,6 +133,20 @@ async def test_a_nudge_response_withholds_the_redraft_once_the_post_is_removed(m
 
     assert kept == {"message": "Nudged", "new_draft": "A redraft that quotes 'eventual consistency' from the post."}
     assert withheld == {"message": "Nudged", "new_draft": "[removed - post deleted]"}
+
+
+@pytest.mark.asyncio
+async def test_an_edit_response_withholds_the_text_once_the_post_is_removed(monkeypatch):
+    monkeypatch.setattr(api, "temporal_client", _NudgeTemporal())
+    request = api.EditRequest(new_text="x", client_request_id="r1")
+
+    monkeypatch.setattr(api, "card_post_text_removed", lambda workflow_id: False)
+    kept = await api.edit_review("review:test:1", request)
+    monkeypatch.setattr(api, "card_post_text_removed", lambda workflow_id: True)
+    withheld = await api.edit_review("review:test:1", request)
+
+    assert kept["new_text"] == "A redraft that quotes 'eventual consistency' from the post."
+    assert withheld == {"message": "Edited", "new_text": "[removed - post deleted]"}
 
 
 # ---------- TopicWatch passes the fields to each Review ----------

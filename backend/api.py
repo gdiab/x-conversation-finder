@@ -403,6 +403,12 @@ async def edit_review(workflow_id: str, request: EditRequest):
             args=[request.new_text, request.client_request_id]
         )
         
+        # As for a nudge below: if the post's removal was recorded while the
+        # edit was checked, the stored card is redacted and the text is not
+        # echoed back either
+        if card_post_text_removed(workflow_id):
+            result = POST_TEXT_REMOVED
+        
         return {"message": "Edited", "new_text": result}
     
     except Exception as e:

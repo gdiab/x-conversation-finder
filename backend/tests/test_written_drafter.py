@@ -1,8 +1,8 @@
 """The written drafter (issue #12; ADR-0006 amendment 2026-11-24, step 1).
 
 The model writes the reply as free text and returns, per product sentence,
-the brief sentence ids it says support it. That list is a hint for the
-checker, never a verdict. All calls are stubbed (bare JSON object string in
+the brief sentence ids it says support it. That list is never a verdict; it
+is kept on the draft as provenance and is not shown to the checker. All calls are stubbed (bare JSON object string in
 choices[0].message.content, JSON mode). Synthetic data only.
 """
 
