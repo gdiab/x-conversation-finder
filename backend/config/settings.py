@@ -162,7 +162,10 @@ class Settings(BaseSettings):
     # Retry policy
     activity_max_attempts: int = 3
     
-    # Claim gate settings
+    # Claim gate settings. Draft attempts per post in both draft modes: 2 means
+    # one redraft with the reasons, then skip, which is what ADR-0006 specifies
+    # (2026-11-21 amendment, item 6; unchanged by the 2026-11-24 amendment).
+    # Keep it at 2 outside experiments.
     claim_gate_max_attempts: int = 2
     
     # Continue-As-New threshold

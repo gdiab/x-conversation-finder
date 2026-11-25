@@ -199,6 +199,22 @@ describe('ReviewCard: written draft (issue #12)', () => {
     expect(screen.getByRole('note')).toHaveTextContent(note);
   });
 
+  it('does not say "does not mention the product" for a rejected draft that made a claim', () => {
+    const claim = makeSupportedClaim({ passed: false, verdict: 'not_checked', supporting: [] });
+    const draft = makeWrittenDraft({
+      sentence_checks: [claim],
+      plan_conformance_failures: ['the reply plan says not to mention the product, but the draft has a product claim'],
+    });
+    const evidence = makeEvidence({
+      draft,
+      reply_plan: makeReplyPlan({ mention_product: false }),
+    });
+    render(<ReviewCard card={makeCard({ status: 'skipped', skip_reason: 'Not enough evidence', evidence })} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByText(/does not mention the product/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Draft does not follow this plan/)).toBeInTheDocument();
+  });
+
   it('says a written reply without a product claim does not mention the product', () => {
     const draft = makeWrittenDraft({ sentence_checks: [makeSentenceCheck()] });
     const evidence = makeEvidence({

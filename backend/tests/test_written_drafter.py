@@ -116,10 +116,11 @@ async def test_written_draft_is_free_text_with_hints_and_no_segments(sample_post
 
     draft = evidence.draft
     assert draft.mode == "written"
+    # Spaces are tidied; the line break stays, because the check reads it as a sentence end
     assert draft.text == (
-        "Retries are the part people skip. Relay can retry a failed delivery up to five times. "
-        "How do you notice a miss today?"
-    )  # whitespace collapsed
+        "Retries are the part people skip.\n"
+        "Relay can retry a failed delivery up to five times. How do you notice a miss today?"
+    )
     assert draft.segments == []
     assert draft.claim_gate.passed is False  # nothing is checked yet
     assert draft.written.drafter_hints == [
@@ -196,6 +197,21 @@ async def test_steers_accumulate_on_the_draft(sample_post):
 ])
 def test_malformed_output_is_read_as_empty_not_raised(content, text, hints):
     assert parse_written_draft(content) == (text, hints)
+
+
+def test_line_breaks_survive_so_unpunctuated_lines_still_count_as_sentences():
+    """Four lines without full stops are four sentences to the check; joined
+    with spaces they would be one."""
+    from backend.gate.written_check import prepare_check
+
+    content = json.dumps({"reply": "Acme retries \n\n  Acme ships\nAcme scales\nAcme works", "support": []})
+
+    text, _ = parse_written_draft(content)
+
+    assert text == "Acme retries\nAcme ships\nAcme scales\nAcme works"
+    prepared = prepare_check(text, [], "Acme")
+    assert len(prepared.sentences) == 4
+    assert any("at most 3 sentences (got 4)" in reason for _, reason in prepared.structural_failures)
 
 
 @pytest.mark.asyncio

@@ -278,7 +278,9 @@ async def test_a_failed_check_is_redrafted_once_with_the_reasons(make_review_inp
 
 @pytest.mark.asyncio
 async def test_two_failed_checks_skip_the_post_with_the_reasons(make_review_input):
-    agent, checker = WritingAgent(texts=[UNSUPPORTED_DRAFT, UNSUPPORTED_DRAFT]), RecordingChecker()
+    # Two different drafts, both unsupported (an identical redraft is not checked again; see below)
+    second = f"{OPENER} Our product is quicker than anything. {CLOSER}"
+    agent, checker = WritingAgent(texts=[second, UNSUPPORTED_DRAFT]), RecordingChecker()
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, agent=agent, checker=checker):
             handle, workflow_id = await _start(env, make_review_input, "skip")
@@ -530,8 +532,10 @@ async def test_the_same_text_keeps_one_check_result_so_approve_names_what_was_se
             asked = [r.sentences for r in checker.requests]
             assert asked.count([FAILING_EDIT]) == 1  # and no second paid call for it
 
-            # Editing back to the model's checked draft reuses the draft's check
+            # An edit is checked as an edit (not held to the plan), once per text
+            await handle.execute_update("edit", args=[FAKE_DRAFT, str(uuid.uuid4())])
             calls = len(checker.requests)
+            await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
             await handle.execute_update("edit", args=[FAKE_DRAFT, str(uuid.uuid4())])
             card = await handle.query("get_card")
             assert card["edited_text_gate_state"] == "passed"
@@ -540,6 +544,66 @@ async def test_the_same_text_keeps_one_check_result_so_approve_names_what_was_se
             ]
             assert len(checker.requests) == calls
             await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
+
+
+class SecondOpinionChecker(RecordingChecker):
+    """Supports CLAIM with b1 the first time it is asked, with b5 afterwards:
+    a model that passes the same text twice with different citations."""
+
+    async def check(self, request, idempotency_key):
+        response = await super().check(request, idempotency_key)
+        asked_before = sum(1 for r in self.requests[:-1] if r.sentences == request.sentences)
+        if asked_before:
+            for verdict in response.verdicts:
+                if verdict.verdict == "supported":
+                    verdict.brief_sentence_ids = ["b5"]
+        return response
+
+
+@pytest.mark.asyncio
+async def test_a_nudge_that_returns_the_same_text_keeps_the_check_the_founder_saw(make_review_input):
+    """Approve names a draft by its text and gate state. A nudge that gives
+    back the same text must not swap the check under it."""
+    agent, checker = WritingAgent(), SecondOpinionChecker()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent, checker=checker):
+            handle, workflow_id = await _start(env, make_review_input, "nudge_same")
+            before = (await wait_for_card_ready(handle))["evidence"]["draft"]
+
+            new_text = await handle.execute_update("nudge", args=["Say it again", str(uuid.uuid4())])
+
+            assert new_text == before["text"] == FAKE_DRAFT
+            after = (await handle.query("get_card"))["evidence"]["draft"]
+            assert after["sentence_checks"] == before["sentence_checks"]
+            assert after["sentence_checks"][1]["supporting"][0]["id"] == "b1"
+            assert _db_card(workflow_id)["evidence"]["draft"]["sentence_checks"] == before["sentence_checks"]
+            assert len(checker.requests) == 1  # the nudged text was not sent to the checker again
+
+
+@pytest.mark.asyncio
+async def test_a_redraft_identical_to_the_failed_draft_is_not_checked_again(make_review_input):
+    agent, checker = WritingAgent(texts=[UNSUPPORTED_DRAFT, UNSUPPORTED_DRAFT]), FlippingAllChecker()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent, checker=checker):
+            handle, _ = await _start(env, make_review_input, "same_redraft")
+            # The second opinion would have passed the same text; the first verdict stands
+            assert await handle.result() == "skipped"
+    assert len(agent.requests) == 2 and len(checker.requests) == 1
+
+
+class FlippingAllChecker(RecordingChecker):
+    """Calls a text unsupported the first time and supported every time after."""
+
+    async def check(self, request, idempotency_key):
+        response = await super().check(request, idempotency_key)
+        if sum(1 for r in self.requests[:-1] if r.sentences == request.sentences):
+            from backend.models.written import ClaimVerdict
+            response.verdicts = [
+                ClaimVerdict(index=i, about_product=must, verdict="supported" if must else None,
+                             brief_sentence_ids=["b1"] if must else [])
+                for i, must in enumerate(request.must_verify, start=1)
+            ]
+        return response
 
 
 @pytest.mark.asyncio

@@ -660,6 +660,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 padding: '12px',
                 borderRadius: '4px',
                 marginBottom: '8px',
+                // A written draft or an edit can have line breaks; show them as they will be posted
+                whiteSpace: 'pre-wrap',
               }}>
                 {card.evidence.draft.text}
               </div>

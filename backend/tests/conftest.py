@@ -72,6 +72,18 @@ def test_db_isolation(tmp_path, monkeypatch, request):
     get_settings.cache_clear()
 
 
+@pytest.fixture(scope="function", autouse=True)
+def default_draft_mode(monkeypatch):
+    """Tests run with DRAFT_MODE=assembled unless they ask for written mode
+    (issue #12), whatever the developer's .env says: an environment variable
+    wins over the .env file. Tests of written mode pass draft_mode="written"
+    to ReplyActivities."""
+    monkeypatch.setenv("DRAFT_MODE", "assembled")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def x_activities():
     """Create XActivities instance with FakeXClient."""

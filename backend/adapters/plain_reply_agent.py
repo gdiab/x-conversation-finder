@@ -249,7 +249,12 @@ def parse_written_draft(content: Any) -> tuple[str, List[DrafterHint]]:
     if not isinstance(result, dict):
         result = {}
     reply = result.get("reply")
-    text = " ".join(reply.split()) if isinstance(reply, str) else ""
+    # Spaces are tidied within a line, but line breaks are kept: the check
+    # counts a line break as a sentence end, and joining the lines here would
+    # hide four unpunctuated lines from the three-sentence limit
+    text = "\n".join(
+        " ".join(line.split()) for line in reply.splitlines() if line.strip()
+    ) if isinstance(reply, str) else ""
     hints: List[DrafterHint] = []
     support = result.get("support")
     for item in support if isinstance(support, list) else []:

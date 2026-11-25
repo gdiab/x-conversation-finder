@@ -17,9 +17,13 @@ Rules:
   Its context is the heading path, the lead-in line that ends in a colon
   ("Key features:") when present, and the items it is nested under
   ("Integrations we do not support > Slack").
-- A line that ends in a colon is the context of the list or paragraph that
-  follows it (with or without a blank line between), and is a sentence of its
-  own only when nothing follows.
+- A line that ends in a colon is the context of the list or the one
+  paragraph that follows it (with or without a blank line between), and is a
+  sentence of its own only when nothing follows. Lead-ins chain ("Not
+  supported yet:" then "Integrations:" then a list).
+- The sentence right before a list is the context of its items even without
+  a colon (a bold "Not supported yet" line, "We do not integrate with these
+  tools"), and stays a sentence of its own.
 - A prose "sentence" of one or two words is joined to the sentence before it
   ("We do not offer these yet. Slack. Teams." is one sentence): alone it
   would lose what the sentence before says about it.
@@ -76,6 +80,10 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     headings: List[Tuple[int, str]] = []  # (level, text): the open heading path
     colon_lead: Optional[str] = None  # lead-in of the list or paragraph being read
     pending_lead: Optional[str] = None  # a "...:" sentence that may introduce what follows
+    pending_parent: Optional[str] = None  # the lead-in the pending lead-in itself stands under
+    # The last sentence of the paragraph just read, with its own lead-in: if a
+    # list comes next, this sentence introduces it
+    intro: Optional[Tuple[Optional[str], str]] = None
     paragraph: List[str] = []
     # The open items of the list being read: [indent, text, index in units or None]
     items: List[list] = []
@@ -93,7 +101,7 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         return len(units) - 1
 
     def flush_paragraph() -> None:
-        nonlocal pending_lead, colon_lead
+        nonlocal pending_lead, pending_parent, colon_lead, intro
         if not paragraph:
             return
         text = " ".join(paragraph)
@@ -104,7 +112,9 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         sentences = merge_at_unclear_boundaries(split_into_sentences(text))
         lead, colon_lead = colon_lead, None  # a lead-in covers one paragraph
         if sentences and sentences[-1].rstrip().endswith(":"):
-            pending_lead = sentences.pop()
+            # A lead-in under a lead-in keeps it: "Not supported yet:" then
+            # "Integrations:" then a list
+            pending_lead, pending_parent = sentences.pop(), lead
         # A one- or two-word "sentence" cannot stand alone as evidence: in
         # "We do not offer these yet. Slack. Teams." the names belong to the
         # sentence before them. Joining only gives the reader more context.
@@ -116,27 +126,29 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
                 whole.append(sentence)
         for sentence in whole:
             add_unit(sentence, context(lead))
+        intro = (lead, whole[-1]) if whole and pending_lead is None else None
 
     def emit_pending_lead() -> None:
         """Nothing followed the lead-in: it is a sentence of its own."""
-        nonlocal pending_lead
+        nonlocal pending_lead, pending_parent
         if pending_lead is not None:
-            add_unit(pending_lead, context())
-            pending_lead = None
+            add_unit(pending_lead, context(pending_parent))
+            pending_lead = pending_parent = None
 
     def take_pending_lead() -> None:
         """The lead-in introduces what follows: it becomes its context."""
-        nonlocal pending_lead, colon_lead
+        nonlocal pending_lead, pending_parent, colon_lead
         if pending_lead is not None:
-            colon_lead, pending_lead = _clean_context(pending_lead), None
+            colon_lead = " > ".join(part for part in (pending_parent, _clean_context(pending_lead)) if part)
+            pending_lead = pending_parent = None
 
     def open_heading(level: int, text: str) -> None:
-        nonlocal colon_lead
+        nonlocal colon_lead, intro
         while headings and headings[-1][0] >= level:
             headings.pop()
         if text:
             headings.append((level, text))
-        colon_lead = None
+        colon_lead = intro = None
         items.clear()
 
     for line in product_brief.splitlines():
@@ -164,6 +176,12 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             if pending_lead is not None:
                 take_pending_lead()
                 items.clear()
+            elif not items and intro is not None:
+                # The sentence right before a list introduces it, with or
+                # without a colon: a bold "Not supported yet" line, or "We
+                # do not integrate with these tools" (it stays a sentence too)
+                colon_lead = " > ".join(part for part in (intro[0], _clean_context(intro[1])) if part)
+            intro = None
             indent, item = _indent(item_match.group(1)), item_match.group(2)
             while items and items[-1][0] >= indent:
                 items.pop()
@@ -194,7 +212,7 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         else:
             if not paragraph:
                 items.clear()
-                colon_lead = None
+                colon_lead = intro = None
                 take_pending_lead()
             paragraph.append(line.strip())
             if line.rstrip().endswith(":"):

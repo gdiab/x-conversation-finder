@@ -121,6 +121,45 @@ def test_a_colon_line_keeps_its_scope_without_a_blank_line_after_it():
     ]
 
 
+def test_a_lead_in_under_a_lead_in_keeps_it():
+    brief = "Not supported yet:\nIntegrations:\n- Our Slack integration\n"
+
+    assert _texts(brief) == [("b1", "Not supported yet > Integrations", "Our Slack integration")]
+    # With blank lines between, and when nothing follows the second lead-in
+    assert _texts("Not supported yet:\n\nIntegrations:\n\n- Slack\n") == [
+        ("b1", "Not supported yet > Integrations", "Slack"),
+    ]
+    assert _texts("Not supported yet:\nIntegrations:\n") == [("b1", "Not supported yet", "Integrations:")]
+
+
+def test_the_sentence_before_a_list_is_its_context_even_without_a_colon():
+    """A bold line used as a heading, or a plain sentence that introduces the list."""
+    bold = "**Not supported yet**\n- Slack\n- Teams\n"
+    plain = "Relay delivers webhooks. We do not integrate with these tools.\n\n- Slack\n"
+
+    assert _texts(bold) == [
+        ("b1", "", "**Not supported yet**"),
+        ("b2", "Not supported yet", "Slack"),
+        ("b3", "Not supported yet", "Teams"),
+    ]
+    assert _texts(plain) == [
+        ("b1", "", "Relay delivers webhooks."),
+        ("b2", "", "We do not integrate with these tools."),
+        ("b3", "We do not integrate with these tools.", "Slack"),
+    ]
+
+
+def test_a_sentence_is_the_context_of_the_list_right_after_it_only():
+    brief = "We do not integrate with these tools.\n- Slack\n\nBilling is monthly for everyone.\n\n# Plans\n- Free tier\n"
+
+    assert _texts(brief) == [
+        ("b1", "", "We do not integrate with these tools."),
+        ("b2", "We do not integrate with these tools.", "Slack"),
+        ("b3", "", "Billing is monthly for everyone."),
+        ("b4", "Plans", "Free tier"),  # a heading in between: the sentence does not introduce this list
+    ]
+
+
 def test_a_one_or_two_word_sentence_stays_with_the_sentence_before_it():
     """ "Slack." alone would lose what the sentence before says about it."""
     assert [t for _, _, t in _texts("We do not offer these yet. Slack. Teams. Billing is monthly.")] == [

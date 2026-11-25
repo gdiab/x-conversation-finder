@@ -9,7 +9,7 @@ Per ADR-0002:
 - Follow-up timer after confirmation
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Optional, List
 import asyncio
@@ -221,12 +221,14 @@ class ReviewWorkflow:
         # Plain state, no commands, so replaying old histories is unaffected.
         self._stage = "researching"
         # issue #12: the written check's result for each text this Review has
-        # checked: text -> (per-sentence results, failed). The checker is a
-        # model, so asking it twice about the same text could give two
-        # answers. The first finished check of a text stands, so that the
-        # draft text and gate state still identify one result, which is what
-        # approve's expected_draft relies on (issue #15). An edit that could
-        # not be checked ("not_checked") is not kept: it is checked again.
+        # checked, by kind: ("draft", text) for the model's drafts and nudged
+        # redrafts, ("edit", text) for founder edits (not held to the plan).
+        # The checker is a model, so asking it twice about the same text
+        # could give two answers. The first finished check stands, in every
+        # path, so that the draft text and gate state still identify one
+        # result, which is what approve's expected_draft relies on
+        # (issue #15), and a repeated text costs no second call. A check that
+        # could not run raises and is not kept: that text is checked again.
         self._written_checks: dict = {}
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
@@ -426,6 +428,19 @@ class ReviewWorkflow:
             result_type=WrittenCheckResult,
         )
 
+    async def _written_check(
+        self, kind: str, text: str, key: str, mention_product: Optional[bool]
+    ) -> WrittenCheckResult:
+        """The check result of a text: asked once per kind, then reused
+        (see _written_checks). `kind` is "draft" or "edit"."""
+        result = self._written_checks.get((kind, text))
+        if result is None:
+            checked = await self._check_written_text(text, key, mention_product)
+            # setdefault: if another update checked the same text meanwhile,
+            # the result that finished first stands
+            result = self._written_checks.setdefault((kind, text), checked)
+        return result
+
     @staticmethod
     def _record_written_check(draft, result: WrittenCheckResult) -> None:
         """Put a written draft's check result on the draft (issue #12).
@@ -434,11 +449,10 @@ class ReviewWorkflow:
         gate verdict (the card, the skip path) works for both modes.
         """
         # The drafter's own hints stay on the draft as provenance; the check
-        # never saw them
+        # never saw them. replace(): the result is kept for reuse, unchanged.
         hints = list(draft.written.drafter_hints) if draft.written else []
         draft.sentence_checks = list(result.sentences)
-        draft.written = result.info
-        draft.written.drafter_hints = hints
+        draft.written = replace(result.info, drafter_hints=hints)
         draft.plan_conformance_failures = list(result.plan_failures)
         draft.claim_gate = ClaimGateResult(
             passed=result.passed,
@@ -496,7 +510,8 @@ class ReviewWorkflow:
                 if not evidence.draft:
                     last_failures = [("[reply]", "the draft is missing")]
                     continue
-                check = await self._check_written_text(
+                check = await self._written_check(
+                    "draft",
                     evidence.draft.text,
                     f"{input.post.id}:check:attempt{claim_gate_attempts}",
                     evidence.reply_plan.mention_product if evidence.reply_plan else None,
@@ -507,7 +522,6 @@ class ReviewWorkflow:
                 ]
                 if check.passed:
                     workflow.logger.info(f"Written draft passed its check on attempt {claim_gate_attempts}")
-                    self._written_checks.setdefault(evidence.draft.text, (list(check.sentences), False))
                     return evidence
                 workflow.logger.warning(
                     f"Written draft failed its check on attempt {claim_gate_attempts}: {check.reasoning}"
@@ -1008,8 +1022,10 @@ class ReviewWorkflow:
         # rather than approve what nobody has seen. The re-gate of a given
         # text is deterministic apart from "not_checked", so text and gate
         # state identify the result. (In written mode the check is a model
-        # call; the Review keeps the first result per text, _written_checks,
-        # so this holds there too.) Callers that send none are not checked.
+        # call; the Review keeps the first result per text for drafts and for
+        # edits, _written_checks, so this holds there too: a null gate state
+        # names the one check of that draft text, a non-null one the one
+        # check of that edited text.) Callers that send none are not checked.
         current = {
             "text": self.evidence.draft.text if self.evidence and self.evidence.draft else None,
             "gate_state": self.edited_text_gate_state,
@@ -1226,17 +1242,11 @@ class ReviewWorkflow:
                     # issue #12: an edit of a written draft runs through the
                     # same check as the draft (amendment item 5). It is not
                     # held to the reply plan: the founder decides that.
-                    checked = self._written_checks.get(new_text)
-                    if checked is None:
-                        check = await self._check_written_text(
-                            new_text, f"{workflow_id}:edit_check:{client_request_id}", None
-                        )
-                        results = list(check.sentences)
-                        failed = not check.passed or any(not r.passed for r in results)
-                        # setdefault: if another edit of the same text finished
-                        # first, its result stands (see _written_checks)
-                        checked = self._written_checks.setdefault(new_text, (results, failed))
-                    gate_results, has_failures = list(checked[0]), checked[1]
+                    check = await self._written_check(
+                        "edit", new_text, f"{workflow_id}:edit_check:{client_request_id}", None
+                    )
+                    gate_results = list(check.sentences)
+                    has_failures = not check.passed or any(not r.passed for r in gate_results)
                 else:
                     gate_results = await workflow.execute_activity(
                         verify_edited_text,
@@ -1430,9 +1440,6 @@ class ReviewWorkflow:
         self.evidence = redrafted
         self.edited_text_gate_results = None
         self.edited_text_gate_state = None
-        if redrafted.draft_mode == DRAFT_MODE_WRITTEN:
-            # The redraft passed its check; an edit back to this text reuses it
-            self._written_checks.setdefault(redrafted.draft.text, (list(redrafted.draft.sentence_checks), False))
         return self.evidence.draft.text
     
     async def _check_nudged_draft(self, redrafted: Evidence, client_request_id: str) -> None:
@@ -1447,7 +1454,8 @@ class ReviewWorkflow:
             # issue #12: the nudged text goes through the written check
             failures: List[str] = ["the draft is missing"]
             if draft:
-                check = await self._check_written_text(
+                check = await self._written_check(
+                    "draft",
                     draft.text,
                     f"{redrafted.post_id}:nudge_check:{client_request_id}",
                     redrafted.reply_plan.mention_product if redrafted.reply_plan else None,
