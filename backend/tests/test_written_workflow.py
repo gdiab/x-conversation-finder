@@ -802,6 +802,90 @@ async def test_a_removal_at_approve_redacts_the_written_draft_and_its_edit(make_
                 assert card["evidence"]["draft"]["sentence_checks"][1]["supporting"][0]["text"] == CLAIM
 
 
+def _record_removal_by_another_review(post_id="1001"):
+    """A card of the same post under another account, with its removal recorded."""
+    from backend.database import ReviewCardDB, get_db
+
+    db = get_db()
+    try:
+        db.add(ReviewCardDB(
+            workflow_id=f"review:other-account:{post_id}",
+            post_data={"id": post_id, "text": POST_TEXT_REMOVED, "text_removed": True},
+            evidence_data={},
+            status="skipped",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_written_review_is_skipped_when_another_review_recorded_the_posts_removal(make_review_input):
+    """This Review has no card yet, so only a post-wide lookup can know. The
+    written drafter is not sent the post, and the Review ends as "post removed"."""
+    agent, checker = WritingAgent(), RecordingChecker()
+    _record_removal_by_another_review()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent, checker=checker):
+            handle, workflow_id = await _start(env, make_review_input, "removed_elsewhere")
+            assert await handle.result() == "skipped"
+
+            assert agent.requests == [] and checker.requests == []
+            for card in (_db_card(workflow_id), await handle.query("get_card")):
+                assert card["status"] == "skipped"
+                assert card["skip_reason"].startswith("Post removed")
+                assert card["post"]["text_removed"] is True and card["post"]["text"] == POST_TEXT_REMOVED
+                assert card["evidence"]["draft"] is None
+                for fragment in POST_FRAGMENTS:
+                    assert fragment not in json.dumps(card)
+            assert _scheduled(await handle.fetch_history()) == [
+                "research_post", "plan_reply", "draft_reply", "store_card",
+            ]
+            await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
+
+
+class RemovedWhileDrafting(WritingAgent):
+    """The other Review records the removal while this one's draft is being written."""
+
+    async def draft_written(self, request, idempotency_key=None):
+        evidence = await super().draft_written(request, idempotency_key)
+        _record_removal_by_another_review(request.post.id)
+        return evidence
+
+
+@pytest.mark.asyncio
+async def test_a_draft_is_not_sent_to_the_checker_once_the_post_is_removed(make_review_input):
+    agent, checker = RemovedWhileDrafting(), RecordingChecker()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent, checker=checker):
+            handle, workflow_id = await _start(env, make_review_input, "removed_mid_draft")
+            assert await handle.result() == "skipped"
+
+            assert len(agent.requests) == 1 and checker.requests == []
+            card = _db_card(workflow_id)
+            assert card["skip_reason"].startswith("Post removed")
+            assert card["evidence"]["draft"] is None  # the draft written from the removed post is dropped
+            assert FAKE_DRAFT not in json.dumps(card)
+
+
+@pytest.mark.asyncio
+async def test_an_assembled_review_is_unchanged_by_the_post_wide_lookup(make_review_input):
+    """Assembled mode keeps issue #9's behavior: the Review drafts, and its
+    card is stored redacted. (Its drafter is not sent the post text.)"""
+    _record_removal_by_another_review()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, draft_mode="assembled"):
+            handle, workflow_id = await _start(env, make_review_input, "removed_assembled")
+            await wait_for_card_ready(handle)
+
+            card = _db_card(workflow_id)
+            assert card["status"] == "pending"
+            assert card["post"]["text_removed"] is True
+            assert "claim_gate" in _scheduled(await handle.fetch_history())
+
+
 # ---------- replay safety ----------
 
 # Recorded on main 2179673, before written drafts: a Review with the plan

@@ -17,7 +17,7 @@ import re
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 # Constants
 SECONDS_PER_DAY = 86400
@@ -422,6 +422,7 @@ class ReviewWorkflow:
                 idempotency_key=key,
                 product_aliases=input.product_aliases,
                 mention_product=mention_product,
+                post_id=input.post.id,
             ),
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
@@ -462,6 +463,40 @@ class ReviewWorkflow:
         )
 
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
+        """Draft and check the reply; None if the post is skipped.
+
+        issue #12: in written mode draft_reply and check_written_draft refuse
+        (PostRemoved) once any stored card of the post records its removal,
+        for example by another account's Review while this one was still
+        drafting. The Review then ends as skipped "post removed", with its
+        card stored redacted, instead of failing. Assembled Reviews never
+        get that refusal here (they have no card yet), so they run as before.
+        """
+        try:
+            return await self._draft_and_check(evidence, workflow_id, created_at)
+        except ActivityError as e:
+            cause = e.cause
+            if not (isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR):
+                raise
+        workflow.logger.warning(f"Post {self.input.post.id} was removed while its reply was drafted; skipping")
+        self.status = "skipped"
+        self.skipped = True
+        self.skip_reason = POST_REMOVED_SKIP_REASON
+        evidence.skip_reason = POST_REMOVED_SKIP_REASON
+        # The drafts in progress are dropped: a written draft can quote the post
+        evidence.draft = None
+        self.evidence = evidence
+        self._post_text_removed = True
+        card = self._build_card(workflow_id, self.input.post, created_at)
+        await workflow.execute_activity(
+            store_card,
+            StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:post_removed"),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+        )
+        self._card_stored = True
+        return None
+
+    async def _draft_and_check(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
         """
         Draft reply with claim gate validation retries. Returns None if validation fails.
         

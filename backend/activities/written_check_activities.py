@@ -13,7 +13,7 @@ from typing import List, Optional
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from backend.activities.store_activities import card_post_text_removed
+from backend.activities.store_activities import card_post_text_removed, post_removal_recorded
 from backend.budget import meter_inference
 from backend.gate.brief import brief_feature_terms, split_brief
 from backend.gate.written_check import judge, prepare_check
@@ -25,7 +25,8 @@ from backend.ports.claim_checker import ClaimCheckerPort
 class CheckWrittenDraftInput:
     """Input for check_written_draft.
 
-    The activity is given no post and no reply plan, only the plan's product
+    The activity is given no post text and no reply plan, only the post's id
+    (to ask whether its removal was recorded) and the plan's product
     decision, so nothing it passes to the checker can come from them.
     """
 
@@ -36,6 +37,8 @@ class CheckWrittenDraftInput:
     product_aliases: Optional[List[str]] = None
     # The reply plan's decision; None for a founder edit, which is not held to the plan
     mention_product: Optional[bool] = None
+    # The target post's id, for the removal lookup only; never sent to the checker
+    post_id: str = ""
 
 
 class WrittenCheckActivities:
@@ -70,8 +73,12 @@ class WrittenCheckActivities:
         )
 
         # Issue #9: once this Review's stored card records that the post was
-        # removed, its draft may quote a deleted post: do not send it to a model.
-        if card_post_text_removed(activity.info().workflow_id):
+        # removed, its draft may quote a deleted post: do not send it to a
+        # model. Issue #12: likewise when any other card of the post records
+        # it (another account's Review), before this Review has a card.
+        if card_post_text_removed(activity.info().workflow_id) or (
+            input.post_id and post_removal_recorded(input.post_id)
+        ):
             raise ApplicationError(
                 "Post removed: the target post was deleted or is no longer visible on X; not checking",
                 type="PostRemoved",

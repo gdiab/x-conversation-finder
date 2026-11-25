@@ -145,9 +145,11 @@ def test_the_port_and_the_activity_input_have_no_field_for_the_post_the_plan_or_
     assert {f.name for f in dataclasses.fields(ClaimCheckRequest)} == {
         "sentences", "brief_sentences", "product_name", "product_aliases", "must_verify",
     }
-    # The activity knows the plan's product decision (a boolean) and nothing else of the plan
+    # The activity knows the plan's product decision (a boolean) and the post's id (for
+    # the removal lookup), and nothing else of the plan or the post
     assert {f.name for f in dataclasses.fields(CheckWrittenDraftInput)} == {
         "text", "product_brief", "product_name", "idempotency_key", "product_aliases", "mention_product",
+        "post_id",
     }
     assert list(ClaimCheckerPort.check.__code__.co_varnames[:3]) == ["self", "request", "idempotency_key"]
 
@@ -423,6 +425,30 @@ async def test_a_text_is_not_sent_to_the_checker_once_the_post_is_removed(monkey
 
     assert info.value.type == "PostRemoved" and info.value.non_retryable
     assert completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_text_is_not_sent_once_any_card_of_the_post_records_its_removal(monkeypatch):
+    """Another account's Review of the same post recorded the removal; this
+    Review has no card yet. The post id is asked about, and never sent on."""
+    checker, completions = _checker([GOOD_ANSWER, GOOD_ANSWER])
+    asked = []
+
+    def recorded(post_id):
+        asked.append(post_id)
+        return post_id == "1001"
+
+    monkeypatch.setattr("backend.activities.written_check_activities.post_removal_recorded", recorded)
+    activities = WrittenCheckActivities(checker)
+
+    with pytest.raises(ApplicationError) as info:
+        await _env(activity_id="1").run(activities.check_written_draft, _input(post_id="1001"))
+    result = await _env(activity_id="2").run(activities.check_written_draft, _input(post_id="2002"))
+
+    assert info.value.type == "PostRemoved" and info.value.non_retryable
+    assert asked == ["1001", "2002"]
+    assert result.passed and len(completions.calls) == 1
+    assert "2002" not in completions.calls[0]["messages"][1]["content"]
 
 
 # ---------- the fake checker (CI and fake mode) ----------

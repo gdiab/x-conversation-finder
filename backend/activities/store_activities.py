@@ -520,6 +520,17 @@ def _post_removal_recorded(db, post_id: str) -> bool:
     ).first() is not None
 
 
+def post_removal_recorded(post_id: str) -> bool:
+    """Whether any stored card of this post records a removal: this Review's
+    own card, or the card of another account's Review of the same post
+    (issue #12: asked before a written-mode model call)."""
+    db = get_db()
+    try:
+        return _post_removal_recorded(db, post_id)
+    finally:
+        db.close()
+
+
 def card_post_text_removed(workflow_id: str) -> bool:
     """Whether this workflow's stored card records a removal (issue #9)."""
     card = _get_card_sync(GetCardInput(workflow_id=workflow_id))

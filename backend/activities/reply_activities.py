@@ -20,7 +20,7 @@ from backend.planning import (
 from backend.ports import ReplyAgentPort
 from backend.ports.reply_agent import WrittenDraftRequest
 from backend.budget import meter_inference
-from backend.activities.store_activities import card_post_text_removed
+from backend.activities.store_activities import card_post_text_removed, post_removal_recorded
 from backend.gate.reply_fit import assess_reply_fit
 
 
@@ -218,6 +218,16 @@ class ReplyActivities:
         if written and (input.plan is None or input.post is None):
             raise ApplicationError(
                 "A written draft needs the reply plan and the post", non_retryable=True
+            )
+        # Issue #12: the written drafter is sent the post itself, so it also
+        # stops when another Review of this post (another account's) has
+        # recorded its removal, before this Review has a card of its own.
+        # The Review then ends as skipped "post removed".
+        if written and post_removal_recorded(input.evidence.post_id):
+            raise ApplicationError(
+                "Post removed: the target post was deleted or is no longer visible on X; not drafting",
+                type="PostRemoved",
+                non_retryable=True,
             )
         
         # Budget (issue #8): metered per paid call of this attempt; see research_post.
