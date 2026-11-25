@@ -187,7 +187,7 @@ def review_error_response(exc: Exception, action: str, workflow_id: Optional[str
                 "gate_state": details.get("gate_state"),
                 "failing_sentences": list(details.get("failing_sentences") or []),
             }
-            if not extra["failing_sentences"] and workflow_id:
+            if details.get("results_ref") and workflow_id:
                 # issue #23: a text-free Review does not hold the sentences;
                 # it names the stored results of the check it refused on
                 extra["failing_sentences"] = stored_failing_sentences(workflow_id, details.get("results_ref"))
@@ -210,27 +210,24 @@ def review_error_response(exc: Exception, action: str, workflow_id: Optional[str
 
 
 def stored_failing_sentences(workflow_id: str, results_ref: Optional[dict] = None) -> List[str]:
-    """The failing sentences of an edit's check (issue #23): the stored
-    results the rejection named, so a later edit cannot change what the
-    founder is shown; else the stored card's."""
+    """The failing sentences of the edit check a text-free Review's
+    post_anyway_required names (issue #23): those stored results exactly,
+    so a later edit cannot change what the founder is shown. No reference
+    (a "not_checked" edit) means no sentences; after a removal, none."""
     from backend.activities.claim_gate_activity import SentenceGateResult
     from backend.models.written import WrittenCheckResult
 
-    card = get_stored_card(workflow_id) or {}
-    if isinstance(results_ref, dict) and card:
-        post_id = card["post"]["id"]
-        results = None
-        if isinstance(results_ref.get("results_slot"), str):
-            results = review_docs.find_doc(workflow_id, post_id, results_ref["results_slot"], List[SentenceGateResult])
-        elif isinstance(results_ref.get("check_slot"), str):
-            check = review_docs.find_doc(workflow_id, post_id, results_ref["check_slot"], WrittenCheckResult)
-            results = check.sentences if check else None
-        if results is not None:
-            return [r.sentence for r in results if not r.passed]
-    return [
-        r.get("sentence") for r in (card.get("edited_text_gate_results") or [])
-        if isinstance(r, dict) and not r.get("passed")
-    ]
+    card = get_stored_card(workflow_id)
+    if not isinstance(results_ref, dict) or not card:
+        return []
+    post_id = card["post"]["id"]
+    results = None
+    if isinstance(results_ref.get("results_slot"), str):
+        results = review_docs.find_doc(workflow_id, post_id, results_ref["results_slot"], List[SentenceGateResult])
+    elif isinstance(results_ref.get("check_slot"), str):
+        check = review_docs.find_doc(workflow_id, post_id, results_ref["check_slot"], WrittenCheckResult)
+        results = check.sentences if check else None
+    return [r.sentence for r in results or [] if not r.passed]
 
 
 def stored_nudge_rejection(workflow_id: str, cause: ApplicationError) -> Optional[str]:

@@ -264,7 +264,11 @@ class ReviewWorkflow:
         self._mention_product: Optional[bool] = None
         self._edit_result_count = 0
         self._edit_failing_count = 0
-        self._post_anyway_from_gate = False
+        # issue #23: the stored check results a post_anyway approval
+        # acknowledged (a copy of _edit_results_ref at approve)
+        self._post_anyway_results_ref: Optional[dict] = None
+        # Edit requests whose handler is still running (a duplicate waits)
+        self._edit_requests_running: set[str] = set()
         # The stored results of the current edit's check, by slot name
         # ({"results_slot"} or {"check_slot"}); approve's post_anyway
         # rejection names them so the API shows that check's sentences
@@ -1105,7 +1109,9 @@ class ReviewWorkflow:
                 post_anyway=self.post_anyway,
                 post_anyway_failing_sentences=self.post_anyway_failing_sentences,
                 # issue #23: the failing sentences are read from the card
-                post_anyway_failing_from_gate=True if self._post_anyway_from_gate else None,
+                post_id=self.input.post_id if self._post_anyway_results_ref else "",
+                post_anyway_results_slot=(self._post_anyway_results_ref or {}).get("results_slot", ""),
+                post_anyway_check_slot=(self._post_anyway_results_ref or {}).get("check_slot", ""),
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
@@ -1262,9 +1268,11 @@ class ReviewWorkflow:
         self.post_anyway = post_anyway if post_anyway else None
         
         # If post_anyway was used, record the failing sentences
-        if post_anyway and self._text_free and self._edit_result_count:
-            # issue #23: update_card reads them from the card
-            self._post_anyway_from_gate = True
+        if post_anyway and self._text_free:
+            # issue #23: update_card reads them from the stored results of
+            # the check the founder acknowledged, named here, so a later draft
+            # change cannot alter what is recorded
+            self._post_anyway_results_ref = dict(self._edit_results_ref) if self._edit_results_ref else None
         elif post_anyway and self.edited_text_gate_results:
             failing = [r.sentence for r in self.edited_text_gate_results if not r.passed]
             self.post_anyway_failing_sentences = failing
@@ -1643,6 +1651,7 @@ class ReviewWorkflow:
         self._edit_requests.add(client_request_id)
         if self._text_free:
             self._edit_in_flight_count += 1
+            self._edit_requests_running.add(client_request_id)
             try:
                 return await self._edit_text_free(client_request_id, text_ref)
             except Exception:
@@ -1652,6 +1661,7 @@ class ReviewWorkflow:
                 raise
             finally:
                 self._edit_in_flight_count -= 1
+                self._edit_requests_running.discard(client_request_id)
         
         workflow_id = workflow.info().workflow_id
         
@@ -1857,6 +1867,11 @@ class ReviewWorkflow:
         # after the validator checked its gate state
         if self._approve_in_flight_count > 0:
             raise _rejection("Cannot edit while an approval is in progress. Retry after it completes.", BUSY_ERROR)
+
+        # issue #23: a retry of an edit that is still running would be
+        # reported as saved before it is; it waits for the outcome instead
+        if client_request_id in self._edit_requests_running:
+            raise _rejection("This edit is still being checked. Retry after it completes.", BUSY_ERROR)
 
         self._validate_text_arg(new_text, text_ref, "New text")
     

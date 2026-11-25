@@ -198,6 +198,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       const wait = retryNotice(err);
       if (wait) setNotice(wait);
       else setError(err instanceof Error ? err.message : 'Failed to edit');
+      // issue #23: the edit is refused once the post's removal is recorded;
+      // reload to show the card without the post text
+      if (err instanceof PostRemovedError) {
+        setIsEditing(false);
+        onUpdate();
+      }
     } finally {
       setLoading(false);
     }

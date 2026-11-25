@@ -96,6 +96,17 @@ async def refetch_stored_card_target(
     if card is None:
         return "no_card"
     if card["post"].get("text_removed"):
+        # issue #23: an earlier removal may have committed with its WAL
+        # checkpoint still pending; finish it before reporting "removed"
+        from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
+        from backend.database import checkpoint_wal
+        from temporalio.exceptions import ApplicationError
+
+        if not checkpoint_wal():
+            raise ApplicationError(
+                "Post text removed; the WAL checkpoint is pending (a reader holds an old snapshot)",
+                type=WAL_CHECKPOINT_PENDING_ERROR,
+            )
         return "removed"
     if await review_is_running(workflow_id):
         return "live"

@@ -487,3 +487,59 @@ async def test_an_edit_whose_card_write_failed_can_be_retried(make_review_input)
             card = await query_card(handle)
             assert card["evidence"]["draft"]["text"] == "What is your stack?"
             assert card["evidence"]["draft"]["steers_applied"].count("manual_edit") == 1
+
+
+def test_a_late_attempt_cannot_overwrite_what_a_later_step_wrote(make_review_input):
+    """A timed-out attempt whose thread finishes after its retry (and after
+    the workflow moved on) writes nothing (review round 2)."""
+    from unittest import mock
+    from backend import review_docs
+    from backend.database import ReviewDocDB, get_db
+
+    review_input = make_review_input()
+    post_id = review_input.post_id
+
+    def write_as(seq, attempt, value):
+        with mock.patch.object(review_docs, "current_writer", return_value=(seq, attempt)):
+            review_docs.save_doc("review:test:late", post_id, "evidence", value)
+
+    write_as(1, 1, "research, first attempt")
+    write_as(2, 1, "plan")  # a later step
+    write_as(1, 1, "research, late thread")  # dropped
+    assert review_docs.load_doc("review:test:late", post_id, "evidence", str) == "plan"
+    write_as(2, 2, "plan, retry")  # a later attempt of the same step wins
+    write_as(2, 1, "plan, late thread")  # dropped
+    assert review_docs.load_doc("review:test:late", post_id, "evidence", str) == "plan, retry"
+    db = get_db()
+    try:
+        row = db.get(ReviewDocDB, ("review:test:late", "evidence"))
+        assert (row.writer_seq, row.writer_attempt) == (2, 2)
+    finally:
+        db.close()
+
+
+def test_the_post_anyway_sentences_are_the_ones_acknowledged(make_review_input):
+    """update_card records the failing sentences of the check the approve
+    names, not of whatever results the card holds then (review round 2)."""
+    from backend.activities.claim_gate_activity import SentenceGateResult
+    from backend.activities.store_activities import UpdateCardInput, _update_card_sync
+    from backend.database import ReviewCardDB, get_db
+    from backend.review_docs import save_doc
+
+    review_input = make_review_input()
+    wid = "review:test:1001_pa"
+    db = get_db()
+    db.add(ReviewCardDB(workflow_id=wid, post_data={"id": review_input.post_id, "text": "t"}, evidence_data={},
+                        status="approved", created_at="t", updated_at="t",
+                        edited_text_gate_results=[{"sentence": "A later edit.", "passed": False}]))
+    db.commit()
+    db.close()
+    save_doc(wid, review_input.post_id, "edit_results:r1",
+             [SentenceGateResult(sentence="The acknowledged one.", passed=False, kind="claim", reason="x", kept_segment=False)])
+    _update_card_sync(UpdateCardInput(workflow_id=wid, idempotency_key="k", post_anyway=True,
+                                      post_id=review_input.post_id, post_anyway_results_slot="edit_results:r1"))
+    db = get_db()
+    try:
+        assert db.get(ReviewCardDB, wid).post_anyway_failing_sentences == ["The acknowledged one."]
+    finally:
+        db.close()

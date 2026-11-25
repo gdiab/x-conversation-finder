@@ -407,8 +407,11 @@ class UpdateCardInput:
     edit_text_slot: str = ""
     edit_results_slot: str = ""
     edit_check_slot: str = ""
-    # post_anyway: record the card's failing edited sentences (approve)
-    post_anyway_failing_from_gate: Optional[bool] = None
+    # post_anyway (approve): record the failing sentences of the stored check
+    # results the founder acknowledged, by slot (the assembled re-gate's, or
+    # the written check's); an approve after a "not_checked" edit names none
+    post_anyway_results_slot: str = ""
+    post_anyway_check_slot: str = ""
 
 
 @dataclass
@@ -653,14 +656,35 @@ def _compose_card(workflow_id: str, ref: CardRef) -> ReviewCard:
     )
 
 
-def _store_card_sync(input: StoreCardInput) -> bool:
-    """Synchronous DB work for store_card (B3)."""
+def _store_card_sync(input: StoreCardInput, make_current: bool = False) -> bool:
+    """Synchronous DB work for store_card (B3).
+
+    make_current (issue #23): also make the card's evidence the Review's
+    current evidence document, in the same transaction. A late attempt (its
+    retry already stored the card, and an edit or nudge has since written
+    the current evidence) writes nothing.
+    """
+    from backend import review_docs
+
+    with review_docs.text_safe_db_errors():
+        return _store_card_in_transaction(input, make_current)
+
+
+def _store_card_in_transaction(input: StoreCardInput, make_current: bool) -> bool:
+    from backend import review_docs
+
     db = get_db()
     try:
         # issue #9: hold SQLite's write lock from the removal check to the
         # commit (as backend/budget.py does), so a removal cannot interleave
         # with this write, e.g. a timed-out attempt's thread still running
         db.execute(sql_text("BEGIN IMMEDIATE"))
+        if make_current:
+            post_id = input.card.post.id
+            if review_docs.doc_written_later(db, input.card.workflow_id, review_docs.EVIDENCE_SLOT):
+                db.commit()
+                return True
+            review_docs.save_doc_in(db, input.card.workflow_id, post_id, review_docs.EVIDENCE_SLOT, input.card.evidence)
         card_db = _card_to_db(input.card)
         
         # issue #9: a removal already recorded for this post (by another
@@ -697,25 +721,30 @@ async def store_card(input: StoreCardInput) -> bool:
     
     from backend.review_docs import text_safe_db_errors
 
+    make_current = False
     with text_safe_db_errors():  # issue #23: a failed write's parameters hold the text
         if input.card is None:
             # issue #23: compose here, where activity.info() is available
             card = await asyncio.to_thread(_compose_card, workflow_id, input.ref)
-            if input.ref.make_current and input.ref.evidence_slot != "evidence":
-                from backend import review_docs
-
-                await asyncio.to_thread(
-                    review_docs.save_doc, workflow_id, input.ref.post_id, review_docs.EVIDENCE_SLOT, card.evidence
-                )
+            make_current = input.ref.make_current and input.ref.evidence_slot != "evidence"
             input = StoreCardInput(card=card, idempotency_key=input.idempotency_key)
-        # B3: Run sync DB work in thread pool
-        result = await asyncio.to_thread(_store_card_sync, input)
+    # B3: Run sync DB work in thread pool
+    result = await asyncio.to_thread(_store_card_sync, input, make_current)
     
     activity.logger.info(f"Stored card {workflow_id}")
     return result
 
 
 def _update_card_sync(input: UpdateCardInput) -> bool:
+    """update_card's DB work; database errors without data (issue #23: the
+    follow-up replies check_followup writes go through here too)."""
+    from backend import review_docs
+
+    with review_docs.text_safe_db_errors():
+        return _update_card_in_transaction(input)
+
+
+def _update_card_in_transaction(input: UpdateCardInput) -> bool:
     """
     Synchronous DB work for update_card. B1: Works with typed fields instead of dict.
     
@@ -738,9 +767,17 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         # transaction, so a stale edit (below) writes neither the card nor them
         evidence_value = input.evidence
         workflow_id = input.workflow_id
-        # issue #23: a retry of an edit write that already committed
-        # (same edit_seq) must not apply the edit to the evidence twice
-        edit_already_applied = input.edit_seq is not None and input.edit_seq == (card_db.edit_seq or 0)
+        # issue #23: a write naming Review documents is dropped as a whole
+        # when it comes from a late attempt: a retry of an edit write that
+        # already committed (same edit_seq: the first one wrote it all), or a
+        # write the current evidence has moved past (a later edit or nudge)
+        if input.edit_text_slot and input.edit_seq is not None and input.edit_seq == (card_db.edit_seq or 0):
+            return True
+        if (input.evidence_slot or input.edit_text_slot):
+            from backend import review_docs
+
+            if review_docs.doc_written_later(db, input.workflow_id, review_docs.EVIDENCE_SLOT):
+                return True
         # QA R13: Check edit_seq - ignore stale writes
         if input.edit_seq is not None:
             stored_edit_seq = card_db.edit_seq or 0
@@ -781,12 +818,12 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         
         # issue #23: documents named instead of carried
         if input.evidence_slot or input.edit_text_slot:
-            evidence_value = _apply_text_free_update(db, card_db, input, edit_already_applied)
-        if input.post_anyway_failing_from_gate:
-            card_db.post_anyway_failing_sentences = [
-                r.get("sentence") for r in (card_db.edited_text_gate_results or [])
-                if isinstance(r, dict) and not r.get("passed")
-            ]
+            evidence_value = _apply_text_free_update(db, card_db, input)
+        if input.post_anyway_results_slot or input.post_anyway_check_slot:
+            card_db.post_anyway_failing_sentences = stored_failing_sentences_in(
+                db, input.workflow_id, input.post_id,
+                results_slot=input.post_anyway_results_slot, check_slot=input.post_anyway_check_slot,
+            )
             flag_modified(card_db, "post_anyway_failing_sentences")
         
         # B2: Update evidence_data JSON with flag_modified
@@ -893,17 +930,31 @@ async def update_card(input: UpdateCardInput) -> bool:
     return result
 
 
-def _apply_text_free_update(
-    db, card_db: ReviewCardDB, input: UpdateCardInput, edit_already_applied: bool = False
-) -> Evidence:
+def stored_failing_sentences_in(db, workflow_id: str, post_id: str, results_slot: str = "", check_slot: str = "") -> List[str]:
+    """The failing sentences of one stored edit check (issue #23): the
+    assembled re-gate's results, or the written check's."""
+    from backend import review_docs
+    from backend.models.written import WrittenCheckResult
+    from backend.activities.claim_gate_activity import SentenceGateResult
+
+    if results_slot:
+        results = review_docs.load_doc_in(db, workflow_id, post_id, results_slot, List[SentenceGateResult])
+    elif check_slot:
+        results = review_docs.load_doc_in(db, workflow_id, post_id, check_slot, WrittenCheckResult).sentences
+    else:
+        return []
+    return [r.sentence for r in results if not r.passed]
+
+
+def _apply_text_free_update(db, card_db: ReviewCardDB, input: UpdateCardInput) -> Evidence:
     """The document-backed part of update_card (issue #23). Returns the
     evidence whose draft goes on the card.
 
     - evidence_slot: a nudged redraft becomes the current evidence;
     - edit_text_slot: the founder's edit becomes the current draft's text
       ("manual_edit" steer appended), and its check results go on the card.
-    The caller has already applied the edit_seq check: a stale edit gets here
-    never, so the current evidence follows the card.
+    The caller has already dropped stale and late writes (edit_seq, and
+    review_docs.doc_written_later), so the current evidence follows the card.
     """
     from backend import review_docs
     from backend.models.written import WrittenCheckResult
@@ -918,10 +969,9 @@ def _apply_text_free_update(
         return evidence
     text = review_docs.load_doc_in(db, workflow_id, post_id, input.edit_text_slot, str)
     evidence = review_docs.load_doc_in(db, workflow_id, post_id, current, Evidence)
-    if not edit_already_applied:
-        evidence.draft.text = text
-        evidence.draft.steers_applied.append(MANUAL_EDIT_STEER)
-        review_docs.save_doc_in(db, workflow_id, post_id, current, evidence)
+    evidence.draft.text = text
+    evidence.draft.steers_applied.append(MANUAL_EDIT_STEER)
+    review_docs.save_doc_in(db, workflow_id, post_id, current, evidence)
     results: List[Any] = []
     if input.edit_results_slot:
         results = review_docs.load_doc_in(
@@ -1018,6 +1068,14 @@ def _remove_card_post_text(card_db: ReviewCardDB) -> None:
 
 
 def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
+    """delete_post_text's DB work; database errors without data (issue #23)."""
+    from backend import review_docs
+
+    with review_docs.text_safe_db_errors():
+        return _delete_post_text_in_transaction(input)
+
+
+def _delete_post_text_in_transaction(input: DeletePostTextInput) -> bool:
     """Synchronous DB work for delete_post_text (B8).
 
     Returns whether the card for input.workflow_id exists. With post_id set

@@ -589,4 +589,17 @@ describe('ReviewCard: post removed (issue #9)', () => {
     expect(screen.queryByText(/Post removed: the post was deleted/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
   });
+  it('reloads the card when an edit is refused because the post was removed (issue #23)', async () => {
+    const { PostRemovedError } = await import('../api/client');
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    editMock.mockRejectedValueOnce(new PostRemovedError('removed'));
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Save Edit' })).not.toBeInTheDocument();
+  });
 });

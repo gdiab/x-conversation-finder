@@ -251,6 +251,34 @@ def find_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T]) -> O
         db.close()
 
 
+def current_writer() -> Optional[tuple]:
+    """(activity id, attempt) of the running activity, or None outside one
+    (the API) or when the id is not a number."""
+    from temporalio import activity
+
+    try:
+        info = activity.info()
+    except RuntimeError:
+        return None
+    try:
+        return int(info.activity_id), int(info.attempt)
+    except (TypeError, ValueError):
+        return None
+
+
+def written_later(row, writer: Optional[tuple]) -> bool:
+    """Whether `row` was written by a later step, or a later attempt of the
+    same step, than `writer`: then `writer` is a late attempt (its retry has
+    finished and the workflow moved on), and its write is dropped."""
+    if row is None or writer is None or row.writer_seq is None:
+        return False
+    return (row.writer_seq, row.writer_attempt or 0) > writer
+
+
+def doc_written_later(db, workflow_id: str, slot: str, writer: Optional[tuple] = None) -> bool:
+    return written_later(db.get(ReviewDocDB, (workflow_id, slot)), writer or current_writer())
+
+
 @_text_safe
 def save_doc(workflow_id: str, post_id: str, slot: str, value: Any, first_wins: bool = False) -> Any:
     """Write a Review document; refused (PostRemoved) once the post's removal
@@ -259,33 +287,40 @@ def save_doc(workflow_id: str, post_id: str, slot: str, value: Any, first_wins: 
     first_wins: keep a document already in the slot and return it decoded as
     `value`'s type (the written check: the first finished check of a text
     stands, see ReviewWorkflow._written_checks).
+
+    A write from a late attempt (written_later) is dropped: what a later
+    step wrote stays.
     """
     db = get_db()
     try:
         db.execute(sql_text("BEGIN IMMEDIATE"))
         if _post_removed(db, post_id):
             raise post_removed_error("not storing it")
-        if first_wins:
-            existing = db.get(ReviewDocDB, (workflow_id, slot))
-            if existing is not None:
-                db.commit()
-                return from_json(existing.data, type(value))
-        db.merge(ReviewDocDB(
-            workflow_id=workflow_id, slot=slot, post_id=post_id, data=to_json(value), updated_at=_now()
-        ))
+        existing = db.get(ReviewDocDB, (workflow_id, slot))
+        if first_wins and existing is not None:
+            db.commit()
+            return from_json(existing.data, type(value))
+        save_doc_in(db, workflow_id, post_id, slot, value)
         db.commit()
         return value
     finally:
         db.close()
 
 
-def save_doc_in(db, workflow_id: str, post_id: str, slot: str, value: Any) -> None:
-    """save_doc inside a caller's transaction (update_card's edit_seq check)."""
+def save_doc_in(db, workflow_id: str, post_id: str, slot: str, value: Any) -> bool:
+    """save_doc inside a caller's transaction. Returns False when the write
+    was dropped as a late attempt's."""
     if _post_removed(db, post_id):
         raise post_removed_error("not storing it")
+    writer = current_writer()
+    if written_later(db.get(ReviewDocDB, (workflow_id, slot)), writer):
+        logger.info(f"Dropped a late attempt's write of {slot!r} ({workflow_id})")
+        return False
     db.merge(ReviewDocDB(
-        workflow_id=workflow_id, slot=slot, post_id=post_id, data=to_json(value), updated_at=_now()
+        workflow_id=workflow_id, slot=slot, post_id=post_id, data=to_json(value), updated_at=_now(),
+        writer_seq=writer[0] if writer else None, writer_attempt=writer[1] if writer else None,
     ))
+    return True
 
 
 def load_doc_in(db, workflow_id: str, post_id: str, slot: str, type_hint: Type[T]) -> T:

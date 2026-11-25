@@ -75,6 +75,12 @@ class ReviewDocDB(Base):
     post_id = Column(String, nullable=False, index=True)
     data = Column(JSON, nullable=False)
     updated_at = Column(String, nullable=False)
+    # The activity that wrote it: its id (Temporal numbers a workflow's
+    # activities in scheduling order) and attempt. A late attempt (a
+    # timed-out one whose thread finished after its retry) or an earlier
+    # step cannot overwrite what a later one wrote. None outside an activity.
+    writer_seq = Column(Integer, nullable=True)
+    writer_attempt = Column(Integer, nullable=True)
 
 
 class BudgetLedgerDB(Base):
