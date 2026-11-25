@@ -40,15 +40,16 @@ from backend.database import get_db, ReviewCardDB
 
 # Hang guard only: every wait below ends on an event, and this bound is hit
 # only if the awaited event never happens (a real failure, not load).
-WAIT_TIMEOUT_SEC = 30
+WAIT_TIMEOUT_SEC = 60
 
 
 class CardWrites:
     """Records each store_card/update_card call the worker has finished, by
     idempotency key, so a test can wait for a specific write.
 
-    The key is recorded after the real activity returns, so the row is
-    committed when wait_for() returns. The pending card is stored after the
+    The key is recorded only after the real activity returns True (the row
+    was committed), so the row is committed when wait_for() returns; a write
+    that found no row is not recorded and the wait times out. The pending card is stored after the
     workflow sets self.evidence, so once ":store:pending" is recorded the
     edit/approve validators see the draft.
     """
@@ -85,13 +86,15 @@ class CardWrites:
         @activity.defn(name="store_card")
         async def store_card_recorded(input: StoreCardInput) -> bool:
             result = await store_card(input)
-            await self._record(input.idempotency_key)
+            if result:
+                await self._record(input.idempotency_key)
             return result
 
         @activity.defn(name="update_card")
         async def update_card_recorded(input: UpdateCardInput) -> bool:
             result = await update_card(input)
-            await self._record(input.idempotency_key)
+            if result:
+                await self._record(input.idempotency_key)
             return result
 
         return [store_card_recorded, update_card_recorded]
@@ -553,7 +556,9 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
                 args=["https://x.com/test/status/999", client_request_id, False]
             )
             
-            # Fetch history
+            # Fetch history only after run() wrote the approval, so the
+            # replayed history includes the post-approve update_card command
+            await card_writes.wait_for_approved(workflow_id)
             history = await handle.fetch_history()
             
             # Replay the history
@@ -656,23 +661,33 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
     from temporalio.client import WorkflowUpdateFailedError
     from temporalio.exceptions import ApplicationError
     
-    # Setup blocking gate activity
-    gate_called_event = asyncio.Event()
-    gate_block_event = asyncio.Event()
+    # One gate start/release event pair per edit, keyed by a marker in the
+    # edit text, so the test controls which edit finishes first.
+    gate_started = {"FIRST": asyncio.Event(), "SECOND": asyncio.Event()}
+    gate_release = {"FIRST": asyncio.Event(), "SECOND": asyncio.Event()}
     
     from temporalio import activity as activity_module
     
     @activity_module.defn(name="verify_edited_text")
     async def verify_edited_text_blocking(input):
-        """Blocking version of verify_edited_text for concurrency test."""
-        from temporalio import activity
-        activity.logger.info("Gate activity started, will block on event")
-        gate_called_event.set()
-        # Block until event is set
-        await gate_block_event.wait()
-        activity.logger.info("Gate activity unblocked, proceeding")
-        # Return passing results
-        return []
+        """Gate that blocks each edit until the test releases it."""
+        marker = "FIRST" if "FIRST" in input["edited_text"] else "SECOND"
+        gate_started[marker].set()
+        await gate_release[marker].wait()
+        return []  # passing results
+    
+    async def assert_approve_rejected_in_flight():
+        with pytest.raises(WorkflowUpdateFailedError) as exc_info:
+            await handle.execute_update(
+                "approve",
+                args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
+            )
+        # Verify the error message (robust for Python 3.11 and 3.13)
+        error_str = str(exc_info.value)
+        cause = exc_info.value.cause
+        if cause:
+            error_str += " " + str(cause)
+        assert "edit gate is in progress" in error_str.lower()
     
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -700,41 +715,28 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
             
             await card_writes.wait_for_pending(workflow_id)
             
-            # Start first edit (will block in gate activity)
-            gate_called_event.clear()
-            gate_block_event.clear()
-            
+            # Start two edits; both block in their gate activity
             edit1_task = asyncio.create_task(
-                handle.execute_update(
-                    "edit",
-                    args=["First edit text. Thanks!", str(uuid.uuid4())]
-                )
+                handle.execute_update("edit", args=["FIRST edit text. Thanks!", str(uuid.uuid4())])
             )
+            await asyncio.wait_for(gate_started["FIRST"].wait(), timeout=WAIT_TIMEOUT_SEC)
+            edit2_task = asyncio.create_task(
+                handle.execute_update("edit", args=["SECOND edit text. Thanks!", str(uuid.uuid4())])
+            )
+            await asyncio.wait_for(gate_started["SECOND"].wait(), timeout=WAIT_TIMEOUT_SEC)
             
-            # Wait for gate activity to be called
-            await asyncio.wait_for(gate_called_event.wait(), timeout=WAIT_TIMEOUT_SEC)
+            # Two edits in flight: approve is rejected
+            await assert_approve_rejected_in_flight()
             
-            # Now try to approve while edit is in flight - should fail
-            from temporalio.client import WorkflowUpdateFailedError
-            with pytest.raises(WorkflowUpdateFailedError) as exc_info:
-                await handle.execute_update(
-                    "approve",
-                    args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
-                )
-            # Verify the error message (robust for Python 3.11 and 3.13)
-            error_str = str(exc_info.value)
-            cause = exc_info.value.cause
-            if cause:
-                error_str += " " + str(cause)
-            assert "edit gate is in progress" in error_str.lower()
-            
-            # Unblock the gate
-            gate_block_event.set()
-            
-            # Wait for edit to complete
+            # Finish FIRST; SECOND is still gating. A bool flag would now read
+            # False and let approve through; the counter is still 1.
+            gate_release["FIRST"].set()
             await edit1_task
+            await assert_approve_rejected_in_flight()
             
-            # Now approve should work (counter is 0)
+            # Finish SECOND: counter is 0, approve works
+            gate_release["SECOND"].set()
+            await edit2_task
             approve_result = await handle.execute_update(
                 "approve",
                 args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
