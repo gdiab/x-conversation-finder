@@ -16,7 +16,7 @@ Fake adapters and synthetic posts only; no X or OpenAI calls.
 import asyncio
 import json
 import uuid
-from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -60,8 +60,8 @@ class TargetClient(FakeXClient):
     """Fake X client with a scripted outcome for lookups of the target post.
 
     outcomes: per target lookup, "found", "gone" (404), "error" (transient
-    failure), or "block" (wait for `release`, then found). Past the end of
-    the list, the last outcome repeats.
+    failure), "block" (wait for `release`, then found) or "block_gone" (wait,
+    then 404). Past the end of the list, the last outcome repeats.
     """
 
     def __init__(self, outcomes):
@@ -69,6 +69,7 @@ class TargetClient(FakeXClient):
         self.outcomes = list(outcomes)
         self.target_lookups = 0
         self.release = asyncio.Event()
+        self.blocked = asyncio.Event()
 
     async def lookup_post(self, post_id):
         if post_id != TARGET_ID:
@@ -76,12 +77,14 @@ class TargetClient(FakeXClient):
         index = min(self.target_lookups, len(self.outcomes) - 1)
         self.target_lookups += 1
         outcome = self.outcomes[index]
+        if outcome.startswith("block"):
+            self.blocked.set()
+            await self.release.wait()
+            outcome = "gone" if outcome == "block_gone" else "found"
         if outcome == "gone":
             return None
         if outcome == "error":
             raise RuntimeError("synthetic transient X error")
-        if outcome == "block":
-            await self.release.wait()
         return await super().lookup_post(post_id)
 
 
@@ -315,6 +318,40 @@ async def test_edit_nudge_and_second_approve_rejected_while_refetch_in_flight(ma
             assert (await handle.query("get_card"))["status"] == "approved"
 
 
+@pytest.mark.asyncio
+async def test_skip_during_refetch_waits_for_the_removal(make_review_input):
+    """A founder skip while the re-fetch is running must not let the
+    workflow close before a 404's removal is done."""
+    client = TargetClient(["block_gone"])
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, client):
+            _, handle = await _start(env, make_review_input, "refetch_skip_race")
+            approve = await handle.start_update(
+                "approve",
+                args=[APPROVE_URL, str(uuid.uuid4()), False],
+                wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+            )
+            await client.blocked.wait()
+            await handle.signal("skip", args=["Not relevant", str(uuid.uuid4())])
+            await env.sleep(1)
+            client.release.set()
+
+            with pytest.raises(WorkflowUpdateFailedError) as excinfo:
+                await approve.result()
+            assert excinfo.value.cause.type == "PostRemoved"
+            assert await handle.result() == "skipped"
+            for card in (await handle.query("get_card"), _db_card(handle.id)):
+                assert card["post"]["text_removed"] is True
+                for fragment in POST_FRAGMENTS:
+                    assert fragment not in json.dumps(card)
+            await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
+
+
+# The expiry race (the 48h timer firing during approve's re-fetch) takes the
+# same wait as the skip race above. It is not tested directly: the
+# time-skipping test server cannot advance time while an activity runs.
+
+
 # ---------- the #5 fix still holds ----------
 
 
@@ -402,12 +439,31 @@ async def test_approved_history_fails_replay_without_patch_guard(monkeypatch):
 
 
 async def _stored_card(make_review_input, suffix):
-    """Run a Review to a pending card and return its workflow id."""
+    """Run a Review until it expires (a past card) and return its workflow id."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, TargetClient(["found"])):
             _, handle = await _start(env, make_review_input, suffix)
-            await handle.terminate("test: keep only the stored card")
+            await env.sleep(timedelta(hours=2))  # review_timeout_hours=1 in tests
+            assert await handle.result() == "expired"
             return handle.id
+
+
+@pytest.mark.asyncio
+async def test_eval_refetch_leaves_a_live_review_alone(make_review_input):
+    """A pending Review holds its own copy of the evidence, so the eval must
+    not remove text behind its back: no X read, no change."""
+    from backend.target_refetch import refetch_stored_card_target
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, TargetClient(["found"])):
+            review_input, handle = await _start(env, make_review_input, "eval_live")
+            client = TargetClient(["gone"])
+            reads_before = _x_reads()
+            assert await refetch_stored_card_target(client, handle.id, "run1") == "live"
+            assert client.target_lookups == 0
+            assert _x_reads() == reads_before
+            assert _db_card(handle.id)["post"]["text"] == review_input.post.text
+            assert (await handle.query("get_card"))["post"]["text"] == review_input.post.text
 
 
 @pytest.mark.asyncio
@@ -438,7 +494,7 @@ async def test_eval_refetch_404_removes_text_once_and_is_idempotent(make_review_
     assert _x_reads() - reads_before == 1
     stored = _db_card(workflow_id)
     assert stored["post"]["text_removed"] is True
-    assert stored["status"] == "pending"  # the Review re-fetches again at approve
+    assert stored["status"] == "expired"  # status is left as it was
     dumped = json.dumps(stored)
     for fragment in POST_FRAGMENTS:
         assert fragment not in dumped

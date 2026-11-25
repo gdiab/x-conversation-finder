@@ -387,3 +387,50 @@ async def test_lookup_post_without_author_raises_instead_of_not_found():
             await client.lookup_post("1234567890")
     assert excinfo.value.type == "MalformedLookupResponse"
     assert not excinfo.value.non_retryable
+
+
+@pytest.mark.asyncio
+async def test_lookup_post_not_authorized_is_gone():
+    """Issue #9: a post whose author went protected is no longer visible to
+    us; the removal duty treats it like a deleted post."""
+    client = HttpXClient("test_bearer_token_123")
+    body = {
+        "errors": [
+            {
+                "value": "1234567890",
+                "detail": "Sorry, you are not authorized to see the Tweet with id: [1234567890].",
+                "title": "Authorization Error",
+                "resource_type": "tweet",
+                "parameter": "id",
+                "resource_id": "1234567890",
+                "type": "https://api.twitter.com/2/problems/not-authorized-for-resource",
+            }
+        ]
+    }
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        assert await client.lookup_post("1234567890") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"errors": "not a list"},
+        {"errors": [{"title": "Invalid Request", "type": "https://api.twitter.com/2/problems/invalid-request"}]},
+        # A not-found error about a different resource (e.g. an expansion)
+        {"errors": [{"resource_id": "999", "type": "https://api.twitter.com/2/problems/resource-not-found"}]},
+    ],
+)
+async def test_lookup_post_other_bodies_without_data_raise(body):
+    """Issue #9: a 200 without data and without a matching post-gone error
+    must not read as not found (that would remove the post text)."""
+    from temporalio.exceptions import ApplicationError
+
+    client = HttpXClient("test_bearer_token_123")
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        with pytest.raises(ApplicationError) as excinfo:
+            await client.lookup_post("1234567890")
+    assert excinfo.value.type == "MalformedLookupResponse"

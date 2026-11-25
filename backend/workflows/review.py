@@ -460,7 +460,18 @@ class ReviewWorkflow:
                 lambda: self.approved or self.skipped,
                 timeout=timedelta(hours=timeout_hours),
             )
+            timed_out = False
         except asyncio.TimeoutError:
+            timed_out = True
+
+        # issue #9: an approve whose target re-fetch is still running must
+        # finish (approve, or remove the text) before the workflow decides, or
+        # Temporal would abandon it with a 404's removal undone. Without a
+        # re-fetch in flight (always so on old histories) this adds no commands.
+        if self._approve_in_flight_count > 0:
+            await workflow.wait_condition(lambda: self._approve_in_flight_count == 0)
+
+        if timed_out and not (self.approved or self.skipped):
             self.status = "expired"
             workflow.logger.info(f"Review expired after {timeout_hours}h")
             

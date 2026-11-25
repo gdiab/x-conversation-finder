@@ -10,6 +10,10 @@ a post deleted since the card was stored is removed rather than replayed.
 Pending cards are not re-checked on a schedule (decided in issue #9): X cost
 stays proportional to approvals and eval runs, and a pending Review
 re-fetches again when the founder approves.
+
+The eval replays past cards only. A card whose Review is still live
+(pending or approved) is left alone: its workflow holds its own copy of the
+evidence and re-fetches at approve, so a removal here would not reach it.
 """
 
 from typing import Literal
@@ -24,7 +28,10 @@ from backend.budget import reserve_x_budget
 from backend.config import get_settings
 from backend.ports import XClientPort
 
-RefetchOutcome = Literal["found", "removed", "no_card"]
+RefetchOutcome = Literal["found", "removed", "live", "no_card"]
+
+# Stored statuses of a Review that is still running; the eval must not use them
+LIVE_STATUSES = ("pending", "approved")
 
 # Budget reservation scope for eval re-fetches; with the card's workflow id and
 # the caller's run key it makes the reservation idempotent per eval run.
@@ -42,20 +49,28 @@ async def refetch_stored_card_target(
     - "removed": the post is gone (now, or at an earlier re-fetch); the stored
       post text and every evidence copy of it are removed, and the card must
       not be replayed with post text.
+    - "live": the card's Review is still running (status pending or
+      approved); nothing is read or changed, and the card must not be
+      replayed. Its workflow re-fetches the post at approve.
     - "no_card": no stored card has this workflow id.
 
     Reserves one X read through backend.budget first (raises BudgetExceeded
     over the cap, never reports "removed"). Calling again with the same
     run_key on the same UTC day reuses the reservation, so a retried eval run
     is not charged twice by our ledger. A card already marked removed costs
-    no read. The stored card's status is left as it is; a pending Review
-    re-fetches again at approve and ends as skipped there.
+    no read. The stored card's status is left as it is.
+
+    X itself bills a repeated read of the same post once per UTC day
+    (ADR-0005), so a retried lookup under a reused reservation costs nothing
+    extra.
     """
     card = _get_card_sync(GetCardInput(workflow_id=workflow_id))
     if card is None:
         return "no_card"
     if card["post"].get("text_removed"):
         return "removed"
+    if card["status"] in LIVE_STATUSES:
+        return "live"
 
     settings = get_settings()
     reserve_x_budget(
