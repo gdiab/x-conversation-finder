@@ -30,7 +30,7 @@ def _post_is_gone(body: dict, post_id: str) -> bool:
         if not isinstance(error, dict) or error.get("type") not in POST_GONE_PROBLEM_TYPES:
             continue
         resource_id = error.get("resource_id", error.get("value"))
-        if resource_id is None or str(resource_id) == str(post_id):
+        if resource_id is not None and str(resource_id) == str(post_id):
             return True
     return False
 

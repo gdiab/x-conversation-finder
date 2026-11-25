@@ -88,6 +88,7 @@ async def refetch_stored_card_target(
         DeletePostTextInput(
             workflow_id=workflow_id,
             idempotency_key=f"{workflow_id}:delete_text:eval:{run_key}",
+            post_id=card["post"]["id"],
         )
     )
     return "removed"

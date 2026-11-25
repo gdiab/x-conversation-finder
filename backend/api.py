@@ -24,7 +24,7 @@ from backend.config import get_settings
 from backend.workflows import TopicWatchInput, ReviewInput
 from backend.workflows.topic_watch import TopicWatchWorkflow
 from backend.workflows.review import ReviewWorkflow
-from backend.activities.store_activities import get_all_cards
+from backend.activities.store_activities import apply_stored_removal, get_all_cards
 from backend.database import init_db
 from backend.budget import get_today_budget
 
@@ -298,7 +298,9 @@ async def get_review(workflow_id: str):
         handle = temporal_client.get_workflow_handle(workflow_id)
         result = await handle.query("get_card")
         
-        return result
+        # issue #9: a removal recorded outside this workflow (eval re-fetch,
+        # another account's Review of the post) applies to the query too
+        return apply_stored_removal(workflow_id, result)
     
     except Exception as e:
         raise HTTPException(status_code=404, detail="Review not found")

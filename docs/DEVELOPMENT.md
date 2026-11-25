@@ -159,6 +159,8 @@ Post text is kept only while the post exists; a 404 on a re-fetch deletes it. Th
 
 If a skip or the review timeout arrives while approve's re-fetch is running, the workflow waits for the re-fetch (and any removal) to finish before it ends. A 200 lookup without the post counts as removed only when X's error names this post as not found or not authorized; any other body fails the lookup and removes nothing.
 
+A removal applies to every stored card of the post (the same post can have a card per account). The Review workflow's own state still holds the text when the removal happened elsewhere, so `GET /api/reviews/{id}` applies the stored removal to the `get_card` query result.
+
 Each re-fetch reserves one X read through `backend/budget.py` (about $0.005, ADR-0005). Over budget it raises and removes nothing. A 404 on the founder's *reply* URL does not touch the target post's text.
 
 Pending cards are **not** re-checked on a schedule, so X cost stays proportional to approvals and eval runs. A deleted post's text can therefore stay on a card that is never approved (pending, skipped or expired) until the eval re-fetches it.

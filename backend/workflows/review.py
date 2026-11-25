@@ -729,8 +729,9 @@ class ReviewWorkflow:
 
         delete_post_text replaces the stored post text and every evidence copy
         of it (redact_post_text_copies: why_it_fits, the problem span, the plan
-        target point, ...) and marks the card; get_card applies the same
-        redaction. A pending Review then ends as skipped "post removed". The
+        target point, ...) and marks the card, on every stored card of this
+        post; get_card applies the same redaction. A pending Review (or one
+        the founder skipped meanwhile) then ends as skipped "post removed". The
         card is written before the state changes, so the main loop cannot
         finish the workflow with the card still pending.
         """
@@ -740,11 +741,14 @@ class ReviewWorkflow:
             DeletePostTextInput(
                 workflow_id=workflow_id,
                 idempotency_key=f"{workflow_id}:delete_text:target",
+                post_id=self.input.post.id,
             ),
             start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
         )
         self._post_text_removed = True
-        if self.status != "pending":
+        # Pending, or skipped by the founder during the re-fetch (the main loop
+        # waits for this handler): either way the card ends as "post removed".
+        if self.status not in ("pending", "skipped"):
             return
         await workflow.execute_activity(
             update_card,

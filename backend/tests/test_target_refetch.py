@@ -341,6 +341,8 @@ async def test_skip_during_refetch_waits_for_the_removal(make_review_input):
             assert excinfo.value.cause.type == "PostRemoved"
             assert await handle.result() == "skipped"
             for card in (await handle.query("get_card"), _db_card(handle.id)):
+                assert card["status"] == "skipped"
+                assert card["skip_reason"] == POST_REMOVED_SKIP_REASON
                 assert card["post"]["text_removed"] is True
                 for fragment in POST_FRAGMENTS:
                     assert fragment not in json.dumps(card)
@@ -350,6 +352,43 @@ async def test_skip_during_refetch_waits_for_the_removal(make_review_input):
 # The expiry race (the 48h timer firing during approve's re-fetch) takes the
 # same wait as the skip race above. It is not tested directly: the
 # time-skipping test server cannot advance time while an activity runs.
+
+
+@pytest.mark.asyncio
+async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
+    """Two accounts review the same post. A 404 at one account's approve
+    removes the text from both stored cards, and the other Review's query
+    (its workflow state still holds the text) is redacted on read."""
+    from backend.activities.store_activities import apply_stored_removal
+
+    client = TargetClient(["gone"])
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, client):
+            review_input, first = await _start(env, make_review_input, "refetch_multi_a")
+            other_input = make_review_input(account="other")
+            other = await env.client.start_workflow(
+                ReviewWorkflow.run, other_input,
+                id=f"review:other:{other_input.post.id}_refetch_multi_b", task_queue="test",
+            )
+            await env.sleep(1)
+            assert _db_card(other.id)["post"]["text"] == review_input.post.text
+
+            with pytest.raises(WorkflowUpdateFailedError):
+                await first.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
+
+            stored_other = _db_card(other.id)
+            assert stored_other["post"]["text_removed"] is True
+            assert stored_other["status"] == "pending"  # it ends at its own approve
+            for fragment in POST_FRAGMENTS:
+                assert fragment not in json.dumps(stored_other)
+
+            queried = await other.query("get_card")
+            assert queried["post"]["text"] == review_input.post.text  # workflow state
+            redacted = apply_stored_removal(other.id, queried)
+            assert redacted["post"]["text_removed"] is True
+            assert redacted["status"] == "pending"
+            for fragment in POST_FRAGMENTS:
+                assert fragment not in json.dumps(redacted)
 
 
 # ---------- the #5 fix still holds ----------
@@ -498,6 +537,19 @@ async def test_eval_refetch_404_removes_text_once_and_is_idempotent(make_review_
     dumped = json.dumps(stored)
     for fragment in POST_FRAGMENTS:
         assert fragment not in dumped
+    # A query of the closed Review (workflow state still holds the text) is
+    # redacted on read through the stored removal
+    from backend.activities.store_activities import apply_stored_removal
+
+    queried = {
+        "post": {"id": TARGET_ID, "text": "Struggling with distributed systems reliability."},
+        "evidence": {"why_it_fits": f"The post asks '{QUESTION}'", "reply_plan": {"target_point": QUESTION}},
+        "status": "expired",
+    }
+    redacted = apply_stored_removal(workflow_id, queried)
+    assert redacted["post"]["text_removed"] is True
+    for fragment in POST_FRAGMENTS:
+        assert fragment not in json.dumps(redacted)
     # Already removed: no further X read
     assert await refetch_stored_card_target(client, workflow_id, "run2") == "removed"
     assert client.target_lookups == 2

@@ -421,6 +421,8 @@ async def test_lookup_post_not_authorized_is_gone():
         {"errors": [{"title": "Invalid Request", "type": "https://api.twitter.com/2/problems/invalid-request"}]},
         # A not-found error about a different resource (e.g. an expansion)
         {"errors": [{"resource_id": "999", "type": "https://api.twitter.com/2/problems/resource-not-found"}]},
+        # A not-found error that does not say which resource
+        {"errors": [{"title": "Not Found Error", "type": "https://api.twitter.com/2/problems/resource-not-found"}]},
     ],
 )
 async def test_lookup_post_other_bodies_without_data_raise(body):

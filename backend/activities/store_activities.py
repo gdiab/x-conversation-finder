@@ -114,6 +114,9 @@ class DeletePostTextInput:
     
     workflow_id: str
     idempotency_key: str
+    # issue #9: the removed post's id; when set, every stored card of this
+    # post (e.g. under another account) loses its copy of the text too
+    post_id: Optional[str] = None
 
 
 def _card_to_db(card: ReviewCard) -> ReviewCardDB:
@@ -483,32 +486,69 @@ async def get_card(input: GetCardInput) -> Optional[Dict]:
     return result
 
 
+def _remove_card_post_text(card_db: ReviewCardDB) -> None:
+    """Replace a stored card's post text and every evidence copy of it."""
+    post_data = dict(card_db.post_data)
+    post_data["text"] = POST_TEXT_REMOVED
+    # issue #9: record the removal on the card (the UI shows "Post removed")
+    post_data["text_removed"] = True
+    card_db.post_data = post_data
+    flag_modified(card_db, "post_data")
+
+    card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
+    flag_modified(card_db, "evidence_data")
+
+
 def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
-    """Synchronous DB work for delete_post_text (B8)."""
+    """Synchronous DB work for delete_post_text (B8).
+
+    Returns whether the card for input.workflow_id exists. With post_id set
+    (issue #9), every other stored card of that post is redacted as well.
+    """
     db = get_db()
     try:
         card_db = db.query(ReviewCardDB).filter(
             ReviewCardDB.workflow_id == input.workflow_id
         ).first()
         
-        if not card_db:
-            return False
+        cards = [card_db] if card_db else []
+        if input.post_id:
+            cards += [
+                other
+                for other in db.query(ReviewCardDB).filter(
+                    ReviewCardDB.post_data["id"].as_string() == input.post_id,
+                    ReviewCardDB.workflow_id != input.workflow_id,
+                )
+            ]
         
         # Delete post text on 404 per X API compliance, keep structure
-        post_data = dict(card_db.post_data)
-        post_data["text"] = POST_TEXT_REMOVED
-        # issue #9: record the removal on the card (the UI shows "Post removed")
-        post_data["text_removed"] = True
-        card_db.post_data = post_data
-        flag_modified(card_db, "post_data")
-
-        card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
-        flag_modified(card_db, "evidence_data")
+        for card in cards:
+            _remove_card_post_text(card)
         
         db.commit()
-        return True
+        return card_db is not None
     finally:
         db.close()
+
+
+def apply_stored_removal(workflow_id: str, card: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Redact a card read from elsewhere (the Review's get_card query) when the
+    stored card records a removal (issue #9).
+
+    A removal can happen outside the workflow (the eval re-fetch, or another
+    account's Review of the same post); the workflow's own state still holds
+    the text, so readers of the query must apply the stored removal.
+    """
+    if not card or not isinstance(card.get("post"), dict) or card["post"].get("text_removed"):
+        return card
+    stored = _get_card_sync(GetCardInput(workflow_id=workflow_id))
+    if not stored or not stored["post"].get("text_removed"):
+        return card
+    return {
+        **card,
+        "post": {**card["post"], "text": POST_TEXT_REMOVED, "text_removed": True},
+        "evidence": redact_post_text_copies(card.get("evidence")),
+    }
 
 
 @activity.defn(name="delete_post_text")
