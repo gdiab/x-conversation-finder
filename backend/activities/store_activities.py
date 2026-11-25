@@ -28,6 +28,88 @@ def _redact_material(material: Dict[str, Any]) -> Dict[str, Any]:
     return redacted
 
 
+# Issue #9: gate-derived text the Review workflow builds from model output.
+# Cards stored before the gate stopped echoing model identifiers can carry a
+# post quote in these, so a removal redacts them by provenance (this prefix
+# and the [marker] failure rows are code-written; founder text is kept).
+GATE_SKIP_REASON_PREFIX = "Not enough evidence:"  # review.py _draft_and_validate
+GATE_STEER_PREFIX = "Previous draft failed claim gate."  # review.py _draft_and_validate
+GATE_DETAILS_REMOVED = "details removed with the post"
+
+
+def redact_skip_reason(reason: Optional[str]) -> Optional[str]:
+    """A skip reason without gate details built from model output (issue #9)."""
+    if isinstance(reason, str) and reason.startswith(GATE_SKIP_REASON_PREFIX):
+        return f"{GATE_SKIP_REASON_PREFIX} {GATE_DETAILS_REMOVED}"
+    return reason
+
+
+def _redact_segment(segment: Dict[str, Any], passages: Dict[str, str]) -> Dict[str, Any]:
+    """A stored segment keeping only known identifiers and code-inserted text:
+    a listed phrase's text, or a claim sentence found verbatim in its passage."""
+    from backend.gate.non_claim_set import UNKNOWN_IDENTIFIER, get_phrase_text, known_phrase_id
+
+    redacted = dict(segment)
+    if redacted.get("phrase_id"):
+        redacted["phrase_id"] = known_phrase_id(redacted["phrase_id"])
+    source = redacted.get("source_passage_id")
+    if source and source not in passages:
+        redacted["source_passage_id"] = UNKNOWN_IDENTIFIER
+    text = redacted.get("text")
+    if text:
+        core = text.strip().rstrip(".!?")
+        phrase = get_phrase_text(redacted.get("phrase_id") or "") or ""
+        passage = passages.get(redacted.get("source_passage_id") or "", "")
+        inserted_by_code = (
+            (redacted.get("kind") == "non_claim" and phrase and core == phrase.strip().rstrip(".!?"))
+            or (redacted.get("kind") == "claim" and core and core in passage)
+        )
+        if not inserted_by_code:
+            redacted["text"] = None
+    return redacted
+
+
+def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
+    """A stored draft without model-derived gate details (issue #9).
+
+    The assembled draft text and segments inserted by code are kept; free
+    text or unknown identifiers in segments, gate failure rows built from
+    segment markers, and gate-generated steers are removed. Founder nudges
+    and edits are the founder's own text and stay.
+    """
+    passages = {
+        m.get("passage_id"): m.get("passage") or ""
+        for m in (materials if isinstance(materials, list) else [])
+        if isinstance(m, dict) and m.get("passage_id")
+    }
+    redacted = dict(draft)
+    if isinstance(redacted.get("segments"), list):
+        redacted["segments"] = [
+            _redact_segment(s, passages) if isinstance(s, dict) else s for s in redacted["segments"]
+        ]
+    if isinstance(redacted.get("steers_applied"), list):
+        redacted["steers_applied"] = [
+            f"{GATE_STEER_PREFIX} {GATE_DETAILS_REMOVED}"
+            if isinstance(s, str) and s.startswith(GATE_STEER_PREFIX) else s
+            for s in redacted["steers_applied"]
+        ]
+    gate = redacted.get("claim_gate")
+    if isinstance(gate, dict):
+        gate = dict(gate)
+        if isinstance(gate.get("segments"), list):
+            gate["segments"] = [
+                _redact_segment(s, passages) if isinstance(s, dict) else s for s in gate["segments"]
+            ]
+        if isinstance(gate.get("failed_sentences"), list):
+            gate["failed_sentences"] = [
+                {**f, "reason": GATE_DETAILS_REMOVED}
+                if isinstance(f, dict) and str(f.get("sentence", "")).startswith("[") else f
+                for f in gate["failed_sentences"]
+            ]
+        redacted["claim_gate"] = gate
+    return redacted
+
+
 def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return a copy of a card's evidence dict with every copy of the post text removed.
 
@@ -40,7 +122,9 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
       "product_brief" is kept);
     - issue #4: reply_fit.brief_problem_span and reply_fit.rejected_span;
     - issue #5: reply_plan.target_point, reply_plan.mention_product_reason,
-      and reply_plan.reply_type when it is not one of the known values.
+      and reply_plan.reply_type when it is not one of the known values;
+    - issue #9: the draft's model-derived gate details (_redact_draft) and a
+      gate-failure skip reason (redact_skip_reason).
     Pure and deterministic (the workflow calls it from a query).
     """
     from backend.models.reply_plan import REPLY_TYPES
@@ -73,6 +157,10 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
         if redacted.get("reply_type") and redacted["reply_type"] not in REPLY_TYPES:
             redacted["reply_type"] = POST_TEXT_REMOVED
         evidence_data["reply_plan"] = redacted
+    if isinstance(evidence_data.get("draft"), dict):
+        evidence_data["draft"] = _redact_draft(evidence_data["draft"], evidence_data.get("founder_materials"))
+    if evidence_data.get("skip_reason"):
+        evidence_data["skip_reason"] = redact_skip_reason(evidence_data["skip_reason"])
     return evidence_data
 from backend.database import get_db, ReviewCardDB
 
@@ -530,6 +618,7 @@ def _remove_card_post_text(card_db: ReviewCardDB) -> None:
 
     card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
     flag_modified(card_db, "evidence_data")
+    card_db.skip_reason = redact_skip_reason(card_db.skip_reason)
 
 
 def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
@@ -581,6 +670,7 @@ def apply_stored_removal(workflow_id: str, card: Optional[Dict[str, Any]]) -> Op
         **card,
         "post": {**card["post"], "text": POST_TEXT_REMOVED, "text_removed": True},
         "evidence": redact_post_text_copies(card.get("evidence")),
+        "skip_reason": redact_skip_reason(card.get("skip_reason")),
     }
 
 

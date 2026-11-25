@@ -681,6 +681,8 @@ class QuoteAsIdentifierAgent(QuotingAgent):
         evidence.draft.segments = [
             Segment(kind="non_claim", phrase_id=self.quote),
             Segment(kind="claim", source_passage_id=self.quote, sentence_index=0),
+            # A number copied from the post as an out-of-range index
+            Segment(kind="claim", source_passage_id=evidence.founder_materials[0].passage_id, sentence_index=424242),
         ]
         return evidence
 
@@ -703,9 +705,10 @@ async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_inp
             queried = await handle.query("get_card")
     stored = _db_card(handle.id)
     for card in (queried, stored):
-        assert "Unknown phrase_id" in json.dumps(card)
-        assert quote not in card["skip_reason"]
-        assert quote not in json.dumps(card["evidence"]["draft"])
+        assert card["skip_reason"].startswith("Not enough evidence")
+        for value in (quote, "424242"):
+            assert value not in card["skip_reason"]
+            assert value not in json.dumps(card["evidence"]["draft"])
 
     assert await refetch_stored_card_target(
         TargetClient(["gone"]), handle.id, "run1", review_is_running=_finished
@@ -713,6 +716,73 @@ async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_inp
     dumped = json.dumps(_db_card(handle.id))
     for fragment in POST_FRAGMENTS:
         assert fragment not in dumped
+
+
+@pytest.mark.asyncio
+async def test_removal_scrubs_gate_details_of_a_card_stored_before_issue_9():
+    """Cards stored before the gate stopped echoing model identifiers can hold
+    a post quote in gate failures, rejected segments, gate steers and the
+    skip reason. A removal scrubs those by provenance and keeps founder text."""
+    from backend.database import ReviewCardDB, get_db
+    from backend.target_refetch import refetch_stored_card_target
+
+    workflow_id = "review:test:legacy_gate_card"
+    founder_nudge = "Make it shorter"
+    db = get_db()
+    try:
+        db.add(ReviewCardDB(
+            workflow_id=workflow_id,
+            post_data={"id": TARGET_ID, "text": "Struggling with distributed systems reliability.",
+                       "author": {"id": "a", "username": "synthetic_dev", "name": "Synthetic Dev",
+                                  "followers_count": 1, "verified": False}},
+            evidence_data={
+                "post_id": TARGET_ID,
+                "matched_topic": "reliability",
+                "why_it_fits": "fits",
+                "founder_materials": [{"source": "product_brief", "passage": "Our product records work.",
+                                       "relevance": "r", "passage_id": "passage_0"}],
+                "draft": {
+                    "text": "Thanks for sharing.",
+                    "segments": [{"kind": "non_claim", "text": f"As you said, {QUESTION}",
+                                  "source_passage_id": None, "sentence_index": None}],
+                    "claim_gate": {
+                        "passed": False,
+                        "segments": [{"kind": "claim", "text": "Our product records work",
+                                      "source_passage_id": "passage_0", "sentence_index": 0}],
+                        "failed_sentences": [
+                            {"sentence": "[non_claim segment]", "reason": f"Unknown phrase_id: {QUESTION}"},
+                            {"sentence": "Thanks for sharing.", "reason": "Sentence does not map to any segment"},
+                        ],
+                        "reasoning": "r", "claims": [], "failed_claims": [],
+                    },
+                    "steers_applied": [
+                        founder_nudge,
+                        f"Previous draft failed claim gate. Fix these issues: '[non_claim segment]...': Unknown phrase_id: {QUESTION}",
+                    ],
+                },
+                "skip_reason": f"Not enough evidence: [non_claim segment]... (Unknown phrase_id: {QUESTION})",
+            },
+            status="skipped",
+            created_at="2026-11-20T00:00:00+00:00",
+            updated_at="2026-11-20T00:00:00+00:00",
+            skip_reason=f"Not enough evidence: [non_claim segment]... (Unknown phrase_id: {QUESTION})",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    assert await refetch_stored_card_target(
+        TargetClient(["gone"]), workflow_id, "run1", review_is_running=_finished
+    ) == "removed"
+    stored = _db_card(workflow_id)
+    dumped = json.dumps(stored)
+    for fragment in POST_FRAGMENTS:
+        assert fragment not in dumped
+    draft = stored["evidence"]["draft"]
+    assert founder_nudge in draft["steers_applied"]  # founder text kept
+    assert draft["claim_gate"]["segments"][0]["text"] == "Our product records work"  # code-inserted, kept
+    assert draft["claim_gate"]["failed_sentences"][1]["reason"] == "Sentence does not map to any segment"
+    assert stored["skip_reason"].startswith("Not enough evidence:")
 
 @pytest.mark.asyncio
 async def test_eval_refetch_unknown_card():

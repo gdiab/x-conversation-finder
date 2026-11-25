@@ -279,7 +279,13 @@ def _storable_segment(seg: Segment, passage_ids) -> Segment:
             (seg.source_passage_id if seg.source_passage_id in passage_ids else UNKNOWN_IDENTIFIER)
             if seg.source_passage_id else None
         ),
-        sentence_index=seg.sentence_index if isinstance(seg.sentence_index, int) else None,
+        sentence_index=(
+            seg.sentence_index
+            if isinstance(seg.sentence_index, int)
+            and seg.source_passage_id in passage_ids
+            and 0 <= seg.sentence_index < len(split_into_sentences(passage_ids[seg.source_passage_id].passage))
+            else None
+        ),
         phrase_id=known_phrase_id(seg.phrase_id) if seg.phrase_id else None,
     )
 
@@ -314,7 +320,8 @@ def insert_claim_sentence(
     sentences = split_into_sentences(passage)
     
     if segment.sentence_index < 0 or segment.sentence_index >= len(sentences):
-        return False, "", f"sentence_index {segment.sentence_index} out of range (0-{len(sentences)-1})"
+        # issue #9: the index is model output; do not echo it
+        return False, "", f"sentence_index out of range (0-{len(sentences)-1})"
     
     sentence = sentences[segment.sentence_index]
     

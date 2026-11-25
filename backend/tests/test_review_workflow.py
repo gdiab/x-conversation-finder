@@ -695,7 +695,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             failed_sentences = card["evidence"]["draft"]["claim_gate"]["failed_sentences"]
             assert len(failed_sentences) == 1
             assert failed_sentences[0]["sentence"] == "[claim segment]"
-            assert "sentence_index 99 out of range" in failed_sentences[0]["reason"]
+            assert "sentence_index out of range" in failed_sentences[0]["reason"]
             
             # Verify full evidence is stored for each failed sentence
             for failure in failed_sentences:
@@ -729,7 +729,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
                 persisted_failed_sentences = persisted_card.evidence_data["draft"]["claim_gate"]["failed_sentences"]
                 assert len(persisted_failed_sentences) == 1
                 assert persisted_failed_sentences[0]["sentence"] == "[claim segment]"
-                assert "sentence_index 99 out of range" in persisted_failed_sentences[0]["reason"]
+                assert "sentence_index out of range" in persisted_failed_sentences[0]["reason"]
                 
                 # Verify skip_reason is persisted
                 assert persisted_card.skip_reason is not None

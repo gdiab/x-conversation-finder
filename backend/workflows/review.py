@@ -74,6 +74,7 @@ with workflow.unsafe.imports_passed_through():
         POST_TEXT_REMOVED,
         POST_REMOVED_SKIP_REASON,
         redact_post_text_copies,
+        redact_skip_reason,
     )
     from backend.config.confidence import CONFIDENCE_THRESHOLD
 
@@ -1278,4 +1279,5 @@ class ReviewWorkflow:
             card_dict["post"]["text"] = POST_TEXT_REMOVED
             card_dict["post"]["text_removed"] = True  # issue #9, as on the stored card
             card_dict["evidence"] = redact_post_text_copies(card_dict["evidence"])
+            card_dict["skip_reason"] = redact_skip_reason(card_dict.get("skip_reason"))
         return card_dict
