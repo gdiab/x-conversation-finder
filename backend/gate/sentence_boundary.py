@@ -39,7 +39,11 @@ Callers resolve the unclear cases in the safe direction for their use:
 A word ends in a period when its last character before any closing quotes or
 brackets is one ('U.S." Customers' is checked like 'U.S. Customers');
 sentence_terminator gives that character. A period run ("..."), "!" and "?"
-always end a sentence. Decimals (S-5: "99.99%") contain no word-final period
+end a sentence, except that any terminator inside closing quotes before a
+lowercase word is unclear ('"Is it fast?" asked a customer'; word_boundary).
+A terminator with no space before a capitalized word ("fast.It saves") is
+unclear too: the claim splitter does not split there, and the sentence is not
+selectable. Decimals (S-5: "99.99%") contain no word-final period
 and never split.
 
 Known limits: abbreviations missing from the lists below are ordinary words,
@@ -207,21 +211,45 @@ def period_boundary(word: str, next_word: Optional[str], *, sentence_start: bool
     return LIKELY_END if starts_new_sentence(next_word) else LIKELY_CONTINUE
 
 
+def word_boundary(word: str, next_word: Optional[str], *, sentence_start: bool = False) -> Boundary:
+    """Classify the end of a word whose terminator is '.', '!' or '?'.
+
+    A terminator inside closing quotes or brackets before a lowercase word is
+    unclear: '"Is it fast?" asked a customer' continues, '"Ship it." Then'
+    does not. Otherwise '!' and '?' end the sentence, and a period follows
+    period_boundary.
+    """
+    if next_word is None:
+        return END
+    if word != word.rstrip(_CLOSERS) and next_word.lstrip(_OPENERS)[:1].islower():
+        return LIKELY_CONTINUE
+    if sentence_terminator(word) == ".":
+        return period_boundary(word, next_word, sentence_start=sentence_start)
+    return END
+
+
+# A terminator with no space before a capitalized word ("fast.It saves"): a
+# missing space, or a joined name. "Node.js", "ASP.NET" and "U.S.A" do not match.
+_JOINED_SENTENCES_RE = re.compile(r"[a-z]{2}[.!?][A-Z][a-z]")
+
+
 def _boundary_after(sentence: str, next_sentence: str) -> Boundary:
     """The boundary between two consecutive sentences of a split."""
     words = sentence.split()
-    if not words or sentence_terminator(words[-1]) != ".":
+    if not words or not sentence_terminator(words[-1]):
         return END
     following = next_sentence.split()
-    return period_boundary(words[-1], following[0] if following else None, sentence_start=len(words) == 1)
+    return word_boundary(words[-1], following[0] if following else None, sentence_start=len(words) == 1)
 
 
 def has_unclear_boundary_inside(sentence: str) -> bool:
-    """True if a period inside the sentence might end a sentence."""
+    """True if a terminator inside the sentence might end a sentence."""
+    if _JOINED_SENTENCES_RE.search(sentence):
+        return True
     words = sentence.split()
     return any(
-        sentence_terminator(word) == "."
-        and period_boundary(word, words[i + 1], sentence_start=i == 0) in UNCLEAR
+        sentence_terminator(word)
+        and word_boundary(word, words[i + 1], sentence_start=i == 0) in UNCLEAR
         for i, word in enumerate(words[:-1])
     )
 

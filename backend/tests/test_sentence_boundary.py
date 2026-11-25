@@ -122,6 +122,12 @@ GOLDEN_SPLITS = [
     ("We are Acme Corp. Pricing is flat.", ["We are Acme Corp.", "Pricing is flat."], [0, 1]),
     # Terminators before closing quotes and brackets.
     ('We said "ship it." Customers agreed.', ['We said "ship it."', "Customers agreed."], []),
+    # Codex review r8: a quoted terminator before a lowercase word is unclear.
+    ('Our product is "fast." according to customers.', ['Our product is "fast." according to customers.'], [0]),
+    ('"Is it fast?" asked a customer. Yes.', ['"Is it fast?" asked a customer.', "Yes."], [0]),
+    # Codex thermo r8: a missing space joins two sentences; unclear.
+    ("Our product is fast.It saves money.", ["Our product is fast.It saves money."], [0]),
+    ("We build on Node.js and ASP.NET today.", ["We build on Node.js and ASP.NET today."], []),
     ("Fast setup (really!) Clear pricing.", ["Fast setup (really!)", "Clear pricing."], []),
     # Ordinary sentence ends.
     ("Fast setup. Clear pricing! Any questions?", ["Fast setup.", "Clear pricing!", "Any questions?"], []),
@@ -592,6 +598,15 @@ def test_whole_question_with_an_abbreviation_is_a_valid_target(post, question):
 def test_statement_before_a_question_is_outside_it(post, statement, question):
     assert [post[a:b].strip() for a, b in question_spans(post)] == [question]
     assert validate_reply_plan(plan(statement), post) != []
+
+
+def test_missing_space_before_a_question_splits_post_text():
+    """Codex thermo r8."""
+    post = "We grew.Is that good?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["Is that good?"]
+    assert validate_reply_plan(plan("We grew."), post) != []
+    post = "Anyone using Node.js for queues?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == [post]
 
 
 def test_score_before_a_question_is_outside_it():

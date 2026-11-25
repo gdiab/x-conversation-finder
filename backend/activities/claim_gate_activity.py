@@ -26,8 +26,8 @@ from backend.gate.sentence_boundary import (
     SPLITTER_VERSION,
     ends_with_abbreviation,
     LIKELY_END,
-    period_boundary,
     sentence_has_unclear_boundary,
+    word_boundary,
     sentence_terminator,
 )
 from backend.gate.legacy_split_v1 import split_into_sentences_v1
@@ -100,7 +100,7 @@ def split_into_sentences(text: str) -> List[str]:
         if next_word is None:
             # End of text: the remainder is added below.
             continue
-        if terminator == '.' and period_boundary(token, next_word, sentence_start=sentence_start) not in (END, LIKELY_END):
+        if word_boundary(token, next_word, sentence_start=sentence_start) not in (END, LIKELY_END):
             continue
         sentence = ''.join(current).strip()
         if sentence:

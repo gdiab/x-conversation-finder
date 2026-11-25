@@ -29,8 +29,10 @@ _URL_RE = re.compile(r"https?://\S+?(?=[.,;:!?？)\]}»\"'”’]*(?:\s|$))", re
 # ready?", "Dr. Smith, can you help?"). An AMBIGUOUS period ("in 2021.
 # Canals or railways?") is a boundary here, so a statement before a question
 # never counts as part of it (issue #10; backend.gate.sentence_boundary).
+# A period with no space before a capitalized word ("We grew.Is that good?")
+# is a boundary as well; "Node.js" and "ASP.NET" are not.
 _BOUNDARY_RE = re.compile(
-    r"[.!?？]+[\"'”’)\]}»]*(?=\s|$)|[!?？]+[\"'”’)\]}»]*(?=\w)|\n"
+    r"[.!?？]+[\"'”’)\]}»]*(?=\s|$)|[!?？]+[\"'”’)\]}»]*(?=\w)|(?<=[a-z][a-z])\.(?=[A-Z][a-z])|\n"
 )
 _QUESTION_MARKS = ("?", "？")
 _CLOSERS = "\"'”’)]}»"
