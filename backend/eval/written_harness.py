@@ -90,7 +90,7 @@ class StoredReview:
 # Why a stored card is not used
 EXCLUDED_REMOVED = "post_text_removed"
 EXCLUDED_NOT_DRAFTED = "not_drafted"  # skipped before drafting (research rules, confidence)
-EXCLUDED_PLAN_SKIPPED = "plan_skipped"  # a live Review skipped it at the plan stage
+EXCLUDED_PLAN_SKIPPED = "plan_skipped"  # its stored plan was invalid twice: a live Review skipped it
 EXCLUDED_NO_TOPIC = "no_review_topic"  # its Review's watch topic is unknown (not in the export)
 EXCLUDED_NO_SETTINGS = "no_watch_settings"  # no watch settings for its account and topic
 EXCLUDED_NO_PRODUCT_NAME = "no_product_name"  # its watch has none: a live Review stays assembled
@@ -140,8 +140,8 @@ def load_stored_reviews(
 
     A card reached drafting when it has a draft or a reply plan; a card
     skipped by the research rules or the confidence threshold has neither.
-    A card with a plan that a live Review skipped (an invalid plan, or a
-    plan-stage skip rule) is left out too. A card whose post text was
+    A card whose stored plan was invalid twice is left out too (a card
+    skipped only by the assembled-mode needs_written_drafts rule stays). A card whose post text was
     removed is left out: its text must not be sent to a model.
 
     `review_topics` maps each Review's workflow id to the topic of the watch
@@ -174,9 +174,10 @@ def load_stored_reviews(
         if not evidence_dict.get("draft") and not evidence_dict.get("reply_plan"):
             excluded[EXCLUDED_NOT_DRAFTED] += 1
             continue
-        if evidence_dict.get("reply_plan") and (
-            evidence_dict.get("reply_plan_errors") or evidence_dict.get("reply_plan_skip_rule")
-        ):
+        # A plan invalid twice ends a live Review whatever the mode. A valid
+        # plan skipped by needs_written_drafts stays: that rule applies to
+        # assembled drafts only, and a written Review drafts the plan.
+        if evidence_dict.get("reply_plan") and evidence_dict.get("reply_plan_errors"):
             excluded[EXCLUDED_PLAN_SKIPPED] += 1
             continue
         try:
@@ -361,11 +362,16 @@ FAILURE_KINDS = (
 _CHECKER_TEXT_MARKER = "The brief does not support it:"
 
 
+_QUOTED_RE = re.compile(r'"[^"]*"')
+
+
 def _code_written(reason: str) -> str:
-    """A reason without the checker's own words, which follow the marker:
-    a phrase in them must not count as a failure kind."""
+    """A reason without the checker's own words, which follow the marker,
+    and without the quoted text a trigger matched ('names the product
+    ("Acme")', a key feature): a phrase in either must not count as a
+    failure kind."""
     head, marker, _ = reason.partition(_CHECKER_TEXT_MARKER)
-    return head + marker
+    return _QUOTED_RE.sub('""', head) + marker
 
 
 def failure_kinds(result: WrittenCheckResult) -> List[str]:
@@ -717,6 +723,21 @@ def redact_removed_report(report: Dict[str, Any], is_removed: Callable[[str], bo
             for sentence in attempt.get("sentences") or []:
                 sentence.update({"sentence": "", "reason": ""})
         changed = changed or json.dumps(post, sort_keys=True) != before
+    if changed and isinstance(report.get("summary"), dict):
+        # Recount the outcomes, rates and failure kinds without the removed
+        # posts, as summarize does for a new run; the calls, tokens and cost
+        # were paid and stay as they were. A report this code cannot read back
+        # keeps its old numbers, marked stale; its text is redacted anyway.
+        old = report["summary"]
+        try:
+            records = [
+                value_to_type(PostRecord, post) for post in report.get("posts") or [] if isinstance(post, dict)
+            ]
+            fresh = summarize(records, Counter(old.get("excluded") or {}), None,
+                              stopped_by_cap=bool(old.get("stopped_by_spend_cap")))
+            report["summary"] = {**old, **fresh, "removals_applied_after_run": True}
+        except Exception:
+            report["summary"] = {**old, "removals_applied_after_run": True, "summary_stale": True}
     return changed
 
 

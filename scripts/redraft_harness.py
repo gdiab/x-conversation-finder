@@ -124,6 +124,30 @@ async def export_settings(args) -> None:
     print(f"wrote {out}")
 
 
+def sweep_earlier_reports(out_root: Path, is_removed) -> bool:
+    """Apply recorded removals to every report.json under out_root (and its
+    summary.md). Each file on its own: one that cannot be read or written is
+    named, and the others are still swept. Returns whether all were swept."""
+    from backend.eval.written_harness import redact_removed_report, summary_markdown
+
+    complete = True
+    for earlier in sorted(out_root.glob("*/report.json")):
+        try:
+            report = json.loads(earlier.read_text())
+            if not redact_removed_report(report, is_removed):
+                continue
+            ensure_ignored(earlier)
+            earlier.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+            if isinstance(report.get("summary"), dict):
+                (earlier.parent / "summary.md").write_text(summary_markdown(report["summary"]))
+            print(f"applied recorded removals to {earlier}")
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            complete = False
+            print(f"could not apply recorded removals to {earlier}: {type(e).__name__}; check it by hand",
+                  file=sys.stderr)
+    return complete
+
+
 async def run(args) -> None:
     from openai import AsyncOpenAI
 
@@ -134,7 +158,6 @@ async def run(args) -> None:
         WatchSettings,
         load_stored_reviews,
         prune_removed_plans,
-        redact_removed_report,
         removal_recorded,
         safe_label,
         report_json,
@@ -189,22 +212,21 @@ async def run(args) -> None:
             is_removed=is_removed,
         )
     finally:
-        # Also when the run failed: no cached plan of a removed post is kept
+        # Also when the run failed: no cached plan of a removed post is kept,
+        # and earlier reports get the removals recorded since they were written
         prune_removed_plans(plans, is_removed)
         plans_path.parent.mkdir(parents=True, exist_ok=True)
         plans_path.write_text(json.dumps(plans, indent=2, ensure_ascii=False))
+        swept = sweep_earlier_reports(out_root, is_removed)
     summary = summarize(records, excluded, cap, stopped_by_cap=stopped)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(report_json(args.label, records, summary, sorted({c.model for c in cap.calls})))
     (out_dir / "summary.md").write_text(summary_markdown(summary))
     print(summary_markdown(summary))
-    # Reports of earlier runs under the same root: apply removals recorded since
-    for earlier in sorted(out_root.glob("*/report.json")):
-        report = json.loads(earlier.read_text())
-        if redact_removed_report(report, is_removed):
-            ensure_ignored(earlier)
-            earlier.write_text(json.dumps(report, indent=2, ensure_ascii=False))
-            print(f"applied recorded removals to {earlier}")
+    # The new report has the removals already; sweep again in case one was
+    # recorded while it was written
+    if not (sweep_earlier_reports(out_root, is_removed) and swept):
+        sys.exit("Some reports could not be checked for recorded removals (see above)")
     print(f"wrote {out_dir}/report.json and summary.md")
 
 

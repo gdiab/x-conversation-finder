@@ -786,3 +786,84 @@ async def test_an_earlier_report_is_redacted_for_a_removal_recorded_since(tmp_pa
     assert first["outcome"] == "removed" and all(a["text"] == "" for a in first["attempts"])
     assert POST_TEXT not in json.dumps(first)
     assert second["outcome"] != "removed" and second["attempts"][0]["text"]
+
+
+
+# ---------- review round 6 ----------
+
+
+def test_a_plan_skipped_only_by_needs_written_drafts_stays_in_the_sample(tmp_path):
+    db = tmp_path / "cards.db"
+    _make_db(db)
+    engine = create_engine(f"sqlite:///{db}")
+    evidence = _evidence("2006", draft=False, plan=True)
+    evidence["reply_plan_skip_rule"] = "needs_written_drafts"
+    now = datetime.now(timezone.utc).isoformat()
+    with sessionmaker(bind=engine)() as session:
+        session.add(ReviewCardDB(
+            workflow_id="review:t:2006", post_data=_post("2006"), evidence_data=evidence, status="skipped",
+            created_at=now, updated_at=now, edit_seq=0,
+        ))
+        session.commit()
+    engine.dispose()
+
+    reviews, excluded = load_stored_reviews(db, {**TOPICS, "review:t:2006": TOPIC})
+
+    assert "review:t:2006" in [r.workflow_id for r in reviews]
+    assert excluded["plan_skipped"] == 1  # only the invalid plan (2005)
+
+
+def test_a_key_feature_quoted_in_a_reason_is_not_read_as_a_failure_kind():
+    from backend.models.written import SentenceCheck, WrittenCheckResult
+
+    reason = (
+        'Checked as a product claim (uses a key feature ("The reply is empty")). '
+        "The brief does not support it: synthetic."
+    )
+    result = WrittenCheckResult(
+        passed=False, sentences=[SentenceCheck("S.", False, "claim", reason)], failures=[["S.", reason]],
+    )
+
+    assert harness.failure_kinds(result) == ["unsupported"]
+
+
+@pytest.mark.asyncio
+async def test_redacting_an_earlier_report_recounts_its_summary(tmp_path, no_x):
+    reviews, excluded = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, excluded=excluded,
+    )
+    summary = summarize(records, excluded, None)
+    summary["cost_usd"] = 0.5  # paid, kept
+    report = json.loads(report_json("before", records, summary))
+    assert report["summary"]["outcomes"] == {"passed_first": 2}
+
+    harness.redact_removed_report(report, lambda post_id: post_id == "2001")
+
+    assert report["summary"]["outcomes"] == {"passed_first": 1, "removed": 1}
+    assert report["summary"]["pass_rate"] == 1.0 and report["summary"]["drafts"] == 1
+    assert report["summary"]["cost_usd"] == 0.5
+    assert report["summary"]["removals_applied_after_run"] is True
+
+
+def test_the_sweep_goes_on_past_a_report_it_cannot_read(tmp_path, capsys):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "redraft_harness.py"
+    sys.path.insert(0, str(script.parent))
+    try:
+        import redraft_harness
+    finally:
+        sys.path.remove(str(script.parent))
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "report.json").write_text("{not json")
+    (tmp_path / "b").mkdir()
+    good = {"summary": {}, "posts": [{"workflow_id": "review:t:2001", "outcome": "passed_first",
+                                      "attempts": [{"text": "synthetic draft", "sentences": []}]}]}
+    (tmp_path / "b" / "report.json").write_text(json.dumps(good))
+
+    complete = redraft_harness.sweep_earlier_reports(tmp_path, lambda post_id: post_id == "2001")
+
+    assert complete is False
+    swept = json.loads((tmp_path / "b" / "report.json").read_text())
+    assert swept["posts"][0]["attempts"][0]["text"] == ""
+    assert swept["summary"]["summary_stale"] is True  # too old a shape to recount
+    assert "could not apply recorded removals" in capsys.readouterr().err
