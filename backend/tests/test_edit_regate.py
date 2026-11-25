@@ -105,6 +105,50 @@ def card_writes() -> CardWrites:
     return CardWrites()
 
 
+def _past_approve_write(history) -> bool:
+    """True when the history shows run() past the approval write: the approve
+    Update was accepted, the update_card activity scheduled after it
+    completed, and the workflow then started its confirm_posted timer."""
+    from temporalio.api.enums.v1 import EventType
+
+    approve_accepted = False
+    approve_write_id = None
+    approve_write_done = False
+    for event in history.events:
+        kind = event.event_type
+        if kind == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED:
+            name = event.workflow_execution_update_accepted_event_attributes.accepted_request.input.name
+            approve_accepted = approve_accepted or name == "approve"
+        elif kind == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED and approve_accepted:
+            if event.activity_task_scheduled_event_attributes.activity_type.name == "update_card":
+                approve_write_id = event.event_id
+        elif kind == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED and approve_write_id is not None:
+            if event.activity_task_completed_event_attributes.scheduled_event_id == approve_write_id:
+                approve_write_done = True
+        elif kind == EventType.EVENT_TYPE_TIMER_STARTED and approve_write_done:
+            return True
+    return False
+
+
+async def fetch_history_past_approve(handle):
+    """Return the workflow history once Temporal has recorded run() moving
+    past the approval write (see _past_approve_write).
+
+    Re-fetches until the recorded events show it; the result depends only on
+    the history's content, never on how long the fetches take. (The test
+    server's wait_new_event long-poll returns no events here, so it cannot be
+    used as the barrier.)
+    """
+    async def _poll():
+        while True:
+            history = await handle.fetch_history()
+            if _past_approve_write(history):
+                return history
+            await asyncio.sleep(0.05)
+
+    return await asyncio.wait_for(_poll(), WAIT_TIMEOUT_SEC)
+
+
 @pytest.mark.asyncio
 async def test_edit_passing_text_approve_works(make_review_input, x_activities, reply_activities, card_writes):
     """Edit with passing text -> approve works without post_anyway. S-6: Assert stored card."""
@@ -556,10 +600,17 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
                 args=["https://x.com/test/status/999", client_request_id, False]
             )
             
-            # Fetch history only after run() wrote the approval, so the
-            # replayed history includes the post-approve update_card command
-            await card_writes.wait_for_approved(workflow_id)
-            history = await handle.fetch_history()
+            # Fetch history only after Temporal recorded run() moving past the
+            # approval write (update_card completed, confirm timer started), so
+            # the replay covers the same events on every run
+            history = await fetch_history_past_approve(handle)
+            accepted_updates = [
+                e.workflow_execution_update_accepted_event_attributes.accepted_request.input.name
+                for e in history.events
+                if e.HasField("workflow_execution_update_accepted_event_attributes")
+            ]
+            assert accepted_updates == ["edit", "approve"]
+            assert any(e.HasField("timer_started_event_attributes") for e in history.events)
             
             # Replay the history
             replayer = Replayer(workflows=[ReviewWorkflow])
