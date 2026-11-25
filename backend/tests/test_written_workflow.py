@@ -495,6 +495,70 @@ async def test_an_edit_whose_check_cannot_run_is_not_checked(make_review_input):
             assert _rejection(refused.value).type == POST_ANYWAY_REQUIRED_ERROR
 
 
+class FlippingChecker(RecordingChecker):
+    """Answers differently each time it is asked about FAILING_EDIT: first the
+    usual "unsupported", afterwards "supported"."""
+
+    async def check(self, request, idempotency_key):
+        response = await super().check(request, idempotency_key)
+        asked_before = sum(1 for r in self.requests[:-1] if r.sentences == request.sentences)
+        if request.sentences == [FAILING_EDIT] and asked_before:
+            from backend.models.written import ClaimVerdict
+            response.verdicts = [ClaimVerdict(index=1, about_product=True, verdict="supported", brief_sentence_ids=["b1"])]
+        return response
+
+
+@pytest.mark.asyncio
+async def test_the_same_text_keeps_one_check_result_so_approve_names_what_was_seen(make_review_input):
+    """The checker is a model: asked twice about one text it may answer twice.
+    The Review keeps the first result per text, so the draft text and gate
+    state the founder saw still identify one result (issue #15)."""
+    checker = FlippingChecker()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, checker=checker):
+            handle, _ = await _start(env, make_review_input, "same_text")
+            await wait_for_card_ready(handle)
+
+            await handle.execute_update("edit", args=[FAILING_EDIT, str(uuid.uuid4())])
+            first = (await handle.query("get_card"))["edited_text_gate_results"]
+            await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
+            await handle.execute_update("edit", args=[FAILING_EDIT, str(uuid.uuid4())])  # the same text again
+
+            card = await handle.query("get_card")
+            assert card["edited_text_gate_state"] == "failed"
+            assert card["edited_text_gate_results"] == first  # not the checker's second opinion
+            asked = [r.sentences for r in checker.requests]
+            assert asked.count([FAILING_EDIT]) == 1  # and no second paid call for it
+
+            # Editing back to the model's checked draft reuses the draft's check
+            calls = len(checker.requests)
+            await handle.execute_update("edit", args=[FAKE_DRAFT, str(uuid.uuid4())])
+            card = await handle.query("get_card")
+            assert card["edited_text_gate_state"] == "passed"
+            assert [r["verdict"] for r in card["edited_text_gate_results"]] == [
+                "not_a_product_claim", "supported", "not_a_product_claim",
+            ]
+            assert len(checker.requests) == calls
+            await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_could_not_be_checked_is_checked_again(make_review_input):
+    checker = RecordingChecker()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, checker=checker):
+            handle, _ = await _start(env, make_review_input, "retry_check")
+            await wait_for_card_ready(handle)
+            checker.error = RuntimeError("synthetic: checker unavailable")
+            await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
+            assert (await handle.query("get_card"))["edited_text_gate_state"] == "not_checked"
+
+            checker.error = None
+            await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
+
+            assert (await handle.query("get_card"))["edited_text_gate_state"] == "passed"
+
+
 # ---------- nudges ----------
 
 

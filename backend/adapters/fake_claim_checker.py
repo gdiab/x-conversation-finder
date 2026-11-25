@@ -2,15 +2,27 @@
 
 A deterministic stand-in for the checker model, not a paraphrase checker: a
 sentence is "supported" only when it is a brief sentence word for word (after
-the claim gate's normalization, ignoring the final punctuation), and it is
+the claim gate's normalization, ignoring the final punctuation) and that
+sentence does not stand under a heading that may negate it, and it is
 "about the product" only when code already requires a verdict for it. The
 real checker's judgement of paraphrase can be measured only with a live model
 run (the ADR-0006 blind comparison).
 """
 
+import re
+
 from backend.gate.sentence_split import normalize_text
 from backend.models.written import ClaimCheckRequest, ClaimCheckResponse, ClaimVerdict
 from backend.ports.claim_checker import ClaimCheckerPort
+
+
+# A heading or lead-in that may turn the sentences under it into their
+# opposite ("Not supported yet", "Roadmap"). The fake cannot read context, so
+# it supports nothing that stands under one.
+_NEGATING_CONTEXT_RE = re.compile(
+    r"\b(?:not|no|never|without|unsupported|unavailable|roadmap|planned|soon|later|future|yet)\b|n't",
+    re.IGNORECASE,
+)
 
 
 class FakeClaimChecker(ClaimCheckerPort):
@@ -19,6 +31,8 @@ class FakeClaimChecker(ClaimCheckerPort):
     async def check(self, request: ClaimCheckRequest, idempotency_key: str) -> ClaimCheckResponse:
         by_text = {}
         for brief_sentence in request.brief_sentences:
+            if _NEGATING_CONTEXT_RE.search(brief_sentence.context or ""):
+                continue  # fail closed: "Slack" under "Not supported yet" supports nothing
             by_text.setdefault(normalize_text(brief_sentence.text.rstrip(".!?")), brief_sentence.id)
         verdicts = []
         for index, sentence in enumerate(request.sentences, start=1):

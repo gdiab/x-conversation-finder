@@ -326,31 +326,42 @@ SAFE_DOT_ENDINGS = frozenset(
     md json yaml yml toml html css txt csv xml
     """.split()
 )
-_LETTER = r"[^\W\d_]"
-_JOINED_TERMINATOR_RE = re.compile(rf"{_LETTER}([.!?\u2026]+){_LETTER}")
+_TERMINATOR_RUN_RE = re.compile(r"[.!?\u2026]+")
+_CLOSING_MARKS = "\"')]}>\u201d\u2019\u00bb"
+_LEADING_WORD_RE = re.compile(r"[^\W_]*")
+_TRAILING_WORD_RE = re.compile(r"[^\W_]*$")
 
 
 def has_joined_sentences(sentence: str) -> bool:
     """True if a word of the reply joins two sentences without a space.
 
-    The claim gate's rule (has_unclear_boundary_inside) sees a join only
-    before a capital letter ("fast.It"). In a reply the lowercase join counts
-    too, or "Acme works.it retries.it scales." would be one sentence and one
-    claim. Dotted abbreviations ("e.g", "U.S.A") and names with a known
-    ending ("Node.js") are not joins.
+    A terminator inside a word, with a letter or digit anywhere after it in
+    that word, may end a sentence: "ships.It", "works.it", "agree?yes",
+    "works!" followed by an emoji and "It". The claim gate's own rule
+    (has_unclear_boundary_inside) sees such a join only before a capital
+    letter, which is enough for founder passages but lets a reply pack four
+    sentences and four claims into one. A single dot is not a join in:
+    - a number ("3.5", "v2.0");
+    - a dotted abbreviation ("e.g.", "U.S.A", "U.S.-based");
+    - a name whose last part is a known ending ("Node.js", "docs.example.com").
     """
     for word in sentence.split():
-        joins = _JOINED_TERMINATOR_RE.findall(word)
-        if not joins:
-            continue
-        if any(join != "." for join in joins):
-            return True  # "agree?yes", "wait...what"
-        labels = [label for label in re.split(r"\.", word.strip("\"'()[]{}<>,;:!?")) if label]
-        if all(len(label) == 1 for label in labels):
-            continue  # "e.g", "U.S.A"
-        if re.sub(r"\W+$", "", labels[-1]).casefold() in SAFE_DOT_ENDINGS:
-            continue  # "Node.js", "docs.example.com"
-        return True
+        last_label = _LEADING_WORD_RE.match(word.rsplit(".", 1)[-1]).group()
+        named = "." in word and last_label.casefold() in SAFE_DOT_ENDINGS
+        for run in _TERMINATOR_RUN_RE.finditer(word):
+            before, after = word[:run.start()], word[run.end():]
+            if not any(ch.isalnum() for ch in after.lstrip(_CLOSING_MARKS)):
+                continue  # the word ends here: an ordinary sentence end, or none
+            if run.group() != ".":
+                return True  # "agree?yes", "wait...what", "works!" + emoji + "It"
+            if before[-1:].isdigit() and after[:1].isdigit():
+                continue  # a decimal or a version number
+            previous, following = _TRAILING_WORD_RE.search(before).group(), _LEADING_WORD_RE.match(after).group()
+            if len(previous) == 1 and previous.isalpha() and len(following) <= 1:
+                continue  # a dotted abbreviation
+            if named:
+                continue
+            return True
     return False
 
 
@@ -479,8 +490,14 @@ def _judge_sentence(
     if verdict is None:
         return fail("The checker returned no verdict for it.")
     cited = verdict.brief_sentence_ids
-    if verdict.malformed or not isinstance(cited, list) or any(not isinstance(i, str) for i in cited):
-        # Not repaired: a citation list with one bad entry is not a citation list
+    if (
+        verdict.malformed
+        or not isinstance(verdict.about_product, bool)
+        or not isinstance(cited, list)
+        or any(not isinstance(i, str) for i in cited)
+    ):
+        # Not repaired, and not read charitably: an answer without a clear
+        # classification, or a citation list with one bad entry, is no answer
         return fail("The checker's answer for it was malformed.")
     if verdict.verdict != VERDICT_SUPPORTED:
         stated = _one_line(verdict.reason) or "The checker did not find it in the brief."

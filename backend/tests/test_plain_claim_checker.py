@@ -243,6 +243,14 @@ def test_malformed_items_are_dropped_or_marked_never_repaired():
     ]
 
 
+def test_an_object_without_about_product_is_malformed():
+    content = json.dumps({"sentences": [{"n": 2, "verdict": "supported", "brief_sentence_ids": ["b2"]}]})
+
+    assert parse_verdicts(content, 3) == [
+        ClaimVerdict(index=2, about_product=None, verdict="supported", brief_sentence_ids=["b2"], malformed=True),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_a_mixed_citation_list_fails_the_claim_although_one_id_is_real():
     answer = {"sentences": [
@@ -412,4 +420,25 @@ async def test_fake_checker_supports_only_a_brief_sentence_word_for_word():
         (False, None, []),
         (True, "supported", ["b2"]),
         (True, "unsupported", []),
+    ]
+
+
+
+@pytest.mark.asyncio
+async def test_fake_checker_supports_nothing_under_a_heading_that_may_negate_it():
+    """ "Our Slack integration" under "Not supported yet" is not support for the claim."""
+    sentences = brief("Our Slack integration", "Our webhook retries")
+    sentences[0].context = "Acme Relay > Not supported yet"
+    sentences[1].context = "Acme Relay > Key features"
+    request = _request(
+        sentences=["Our Slack integration.", "Our webhook retries."],
+        brief_sentences=sentences,
+        must_verify=[True, True],
+    )
+
+    response = await FakeClaimChecker().check(request, "key")
+
+    assert [(v.verdict, v.brief_sentence_ids) for v in response.verdicts] == [
+        ("unsupported", []),
+        ("supported", ["b2"]),
     ]

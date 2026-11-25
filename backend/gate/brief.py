@@ -18,7 +18,11 @@ Rules:
   ("Key features:") when present, and the items it is nested under
   ("Integrations we do not support > Slack").
 - A line that ends in a colon is the context of the list or paragraph that
-  follows it, and is a sentence of its own only when nothing follows.
+  follows it (with or without a blank line between), and is a sentence of its
+  own only when nothing follows.
+- A prose "sentence" of one or two words is joined to the sentence before it
+  ("We do not offer these yet. Slack. Teams." is one sentence): alone it
+  would lose what the sentence before says about it.
 - Text without a letter or digit (a horizontal rule) is not a sentence.
 - Ids are "b1", "b2", ... in document order.
 
@@ -40,6 +44,8 @@ from backend.gate.sentence_boundary import merge_at_unclear_boundaries
 from backend.models.written import BriefSentence
 
 MAX_FEATURE_TERM_WORDS = 6
+# A prose "sentence" with fewer words is joined to the sentence before it
+MIN_SENTENCE_WORDS = 3
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s*(.*?)\s*#*\s*$")
 # A Setext underline: the paragraph above it is a heading (=== level 1, --- level 2)
@@ -73,6 +79,7 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     paragraph: List[str] = []
     # The open items of the list being read: [indent, text, index in units or None]
     items: List[list] = []
+    feature_items: List[list] = []  # items of a feature list; read once they are complete
     blank_since_item = False
 
     def context(*inner: Optional[str]) -> str:
@@ -98,7 +105,16 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         lead, colon_lead = colon_lead, None  # a lead-in covers one paragraph
         if sentences and sentences[-1].rstrip().endswith(":"):
             pending_lead = sentences.pop()
+        # A one- or two-word "sentence" cannot stand alone as evidence: in
+        # "We do not offer these yet. Slack. Teams." the names belong to the
+        # sentence before them. Joining only gives the reader more context.
+        whole: List[str] = []
         for sentence in sentences:
+            if whole and len(_WORD_RE.findall(sentence)) < MIN_SENTENCE_WORDS:
+                whole[-1] = f"{whole[-1]} {sentence}"
+            else:
+                whole.append(sentence)
+        for sentence in whole:
             add_unit(sentence, context(lead))
 
     def emit_pending_lead() -> None:
@@ -155,10 +171,11 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             # Everything the item stands under, so an item under
             # "Not supported > Integrations" keeps the "not"
             index = add_unit(item, context(colon_lead, *parents))
+            items.append([indent, item, index])
             nearest = (parents[-1:] or [colon_lead or ""]) + [headings[-1][1] if headings else ""]
             if any(_FEATURE_WORD_RE.search(part) for part in nearest):
-                terms.append(item)
-            items.append([indent, item, index])
+                # Read at the end: continuation lines may still extend the item
+                feature_items.append(items[-1])
             blank_since_item = False
         elif items and not paragraph and (
             not blank_since_item or _indent(line[: len(line) - len(line.lstrip())]) > items[-1][0]
@@ -180,8 +197,14 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
                 colon_lead = None
                 take_pending_lead()
             paragraph.append(line.strip())
+            if line.rstrip().endswith(":"):
+                # A lead-in line ends its paragraph even without a blank line
+                # after it, so "Not supported yet:" stays the context of the
+                # lines below instead of being joined with their first sentence
+                flush_paragraph()
     flush_paragraph()
     emit_pending_lead()
+    terms.extend(item[1] for item in feature_items)
     return units, terms
 
 

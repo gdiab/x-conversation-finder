@@ -163,12 +163,24 @@ describe('ReviewCard: written draft (issue #12)', () => {
 
     expect(screen.getByRole('heading', { name: 'Check of the Edited Text' })).toBeInTheDocument();
     expect(screen.getByText(/The draft was edited after this check/)).toBeInTheDocument();
+    // The PASSED summary is labelled as the earlier draft's, so it is not read as the edit's
+    expect(screen.getByText("Product claim check of the model's draft (before your edit):")).toBeInTheDocument();
+    expect(screen.queryByText('Product claim check:')).not.toBeInTheDocument();
     const rows = screen.getAllByTestId('sentence-check');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveTextContent('"Ours is 10x quicker."');
     expect(screen.getByText('Gate State: FAILED')).toBeInTheDocument();
     expect(screen.getByText(/Approval requires "Post anyway" acknowledgement/)).toBeInTheDocument();
     expect(screen.getByText(/went through the same product-claim check as the draft/)).toBeInTheDocument();
+  });
+
+  it('says so when the check of an edit could not run', () => {
+    const card = writtenCard({ edited_text_gate_state: 'not_checked', edited_text_gate_results: null });
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText(/the check of the edited text could not run/)).toBeInTheDocument();
+    expect(screen.queryByTestId('sentence-check')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Check of the Edited Text' })).not.toBeInTheDocument();
   });
 
   it('keeps the segment display for an assembled draft', () => {

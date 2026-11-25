@@ -200,6 +200,17 @@ def test_a_verdict_marked_malformed_fails_a_triggered_and_an_untriggered_sentenc
     assert not untriggered.passed and untriggered.sentences[1].kind == "claim"
 
 
+def test_an_answer_without_a_true_or_false_classification_fails_even_if_it_says_supported():
+    """Every object must say whether the sentence is about the product. An
+    answer that skips that is not read charitably."""
+    unclassified = ClaimVerdict(index=2, verdict="supported", brief_sentence_ids=["b1"])  # about_product missing
+
+    result = judge(_prepare(GOOD), [ClaimVerdict(1, False), unclassified, ClaimVerdict(3, False)])
+
+    assert not result.passed
+    assert "The checker's answer for it was malformed." in result.sentences[1].reason
+
+
 def test_a_repeated_answer_cannot_overrule_the_first():
     verdicts = [
         ClaimVerdict(index=2, about_product=True, verdict="unsupported", reason="No."),
@@ -340,6 +351,9 @@ def test_two_triggered_sentences_fail_without_a_checker_call():
     "That is hard.Really hard.What are you using?",
     "Acme works.it retries.it ships.it scales.",  # lowercase joins: four sentences, four claims
     "That is hard,right?yes it is.",  # a question mark between letters
+    "Acme works!" + chr(0x1F642) + "It scales!" + chr(0x1F642) + "It ships!" + chr(0x1F642) + "Done",  # emoji between
+    'He said "it works."It shipped.',  # a closing quote between
+    "Plan B.It works.",
     "Hmm...that depends on the queue.",
     "Well... that depends on the queue.",  # an ellipsis may end a sentence
 ])
@@ -357,7 +371,11 @@ def test_a_sentence_that_may_be_two_fails_before_any_checker_call(text):
     "Put it in config.yaml and restart.",
     "That is roughly 5 of them, e.g. the retry queue.",
     "It shipped in the U.S.A before anywhere else.",
+    "A U.S.-based team hit the same wall.",
     "Version 2.0 fixed that.",
+    "The fix is in main.py:12 if you want it.",
+    "That was a great week!" + chr(0x1F680),  # an emoji after the end is not a join
+    "(It works.)",
 ])
 def test_ordinary_dots_inside_a_sentence_are_fine(text):
     prepared = prepare_check(text, brief("We count 5 of them in version 2.0."), "Acme", [], [])

@@ -100,13 +100,36 @@ def test_setext_headings_are_headings_and_rules_are_not_sentences():
 
 def test_a_colon_line_is_the_context_of_the_paragraph_that_follows_it():
     """ "Not offered yet:" must stay attached to the sentences it introduces."""
-    brief = "Not offered yet:\n\nSingle sign-on. Audit logs.\n\nBilling is monthly."
+    brief = "Not offered yet:\n\nSingle sign-on for teams. Audit logs for admins.\n\nBilling is monthly."
 
     assert _texts(brief) == [
-        ("b1", "Not offered yet", "Single sign-on."),
-        ("b2", "Not offered yet", "Audit logs."),
+        ("b1", "Not offered yet", "Single sign-on for teams."),
+        ("b2", "Not offered yet", "Audit logs for admins."),
         ("b3", "", "Billing is monthly."),  # the lead-in covers one paragraph
     ]
+
+
+def test_a_colon_line_keeps_its_scope_without_a_blank_line_after_it():
+    """The lines of one paragraph are joined, but a lead-in line is not
+    joined with the first sentence it introduces."""
+    brief = "Relay delivers webhooks.\nNot supported yet:\nSlack for alerts. Teams for alerts.\n"
+
+    assert _texts(brief) == [
+        ("b1", "", "Relay delivers webhooks."),
+        ("b2", "Not supported yet", "Slack for alerts."),
+        ("b3", "Not supported yet", "Teams for alerts."),
+    ]
+
+
+def test_a_one_or_two_word_sentence_stays_with_the_sentence_before_it():
+    """ "Slack." alone would lose what the sentence before says about it."""
+    assert [t for _, _, t in _texts("We do not offer these yet. Slack. Teams. Billing is monthly.")] == [
+        "We do not offer these yet. Slack. Teams.",
+        "Billing is monthly.",
+    ]
+    assert _texts("Not supported yet:\nSlack. Teams.") == [("b1", "Not supported yet", "Slack. Teams.")]
+    # The first sentence of a paragraph has nothing before it to join
+    assert [t for _, _, t in _texts("Fast.\n\nReliable too.")] == ["Fast.", "Reliable too."]
 
 
 def test_a_colon_line_that_introduces_nothing_stays_a_sentence():
@@ -195,6 +218,15 @@ def test_feature_terms_come_from_a_features_heading_too():
     brief = "## Features\n- **Signed deliveries** - every request carries a signature\n- `Replay`: resend a delivery\n"
 
     assert brief_feature_terms(brief) == ["Signed deliveries", "Replay"]
+
+
+def test_a_wrapped_feature_item_gives_the_whole_term():
+    """Read after its continuation line, or the term would be "Signed" and
+    fire on "I signed up yesterday"."""
+    brief = "Key features:\n- Signed\n  deliveries\n- Replay\n"
+
+    assert brief_feature_terms(brief) == ["Signed deliveries", "Replay"]
+    assert [t for _, _, t in _texts(brief)] == ["Signed deliveries", "Replay"]
 
 
 def test_inline_feature_list_is_read():

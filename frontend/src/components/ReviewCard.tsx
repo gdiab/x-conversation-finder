@@ -367,7 +367,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
 
         {card.evidence.draft && (
           <div style={{ marginTop: '12px' }}>
-            <strong>{written ? 'Product claim check:' : 'Claim Gate:'}</strong>{' '}
+            {/* Once a written draft was edited, this result is the model's draft's, not the current text's */}
+            <strong>
+              {written
+                ? (edited ? "Product claim check of the model's draft (before your edit):" : 'Product claim check:')
+                : 'Claim Gate:'}
+            </strong>{' '}
             <span style={{ color: card.evidence.draft.claim_gate.passed ? 'green' : 'red' }}>
               {card.evidence.draft.claim_gate.passed ? 'PASSED' : 'FAILED'}
             </span>
@@ -447,7 +452,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           </div>
           {edited ? (
             <div style={{ fontSize: '14px', color: '#666' }}>
-              The draft was edited after this check. The check of the edited text is shown below the draft.
+              {card.edited_text_gate_state === 'not_checked'
+                ? 'The draft was edited after this check, and the check of the edited text could not run. Approving it needs "Post anyway".'
+                : 'The draft was edited after this check. The check of the edited text is shown below the draft.'}
             </div>
           ) : (
             <SentenceCheckList checks={card.evidence.draft.sentence_checks ?? []} />

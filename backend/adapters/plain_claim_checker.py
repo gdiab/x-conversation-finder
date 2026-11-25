@@ -91,8 +91,9 @@ def parse_verdicts(content: Any, sentence_count: int) -> List[ClaimVerdict]:
     A sentence without a usable object gets no verdict, and code then fails it
     (backend.gate.written_check.judge). The first object for a number stands.
     Nothing is repaired: a field of the wrong shape (a citation list holding a
-    non-string, a verdict that is neither word) marks the verdict malformed,
-    and code fails that sentence too.
+    non-string, a verdict that is neither word) or a missing true/false
+    "about_product" marks the verdict malformed, and code fails that sentence
+    too.
     """
     try:
         result = json.loads(content)
@@ -113,15 +114,17 @@ def parse_verdicts(content: Any, sentence_count: int) -> List[ClaimVerdict]:
         verdict = item.get("verdict")
         ids = item.get("brief_sentence_ids")
         reason = item.get("reason")
+        about_product = _strict_bool(item.get("about_product"))
         verdict_ok = verdict is None or verdict in ("supported", "unsupported")
         ids_ok = ids is None or (isinstance(ids, list) and all(isinstance(i, str) for i in ids))
         verdicts.append(ClaimVerdict(
             index=n,
-            about_product=_strict_bool(item.get("about_product")),
+            about_product=about_product,
             verdict=verdict if verdict in ("supported", "unsupported") else None,
             brief_sentence_ids=list(ids) if ids_ok and ids else [],
             reason=reason if isinstance(reason, str) else "",
-            malformed=not (verdict_ok and ids_ok),
+            # Every object must say whether the sentence is about the product
+            malformed=not (about_product is not None and verdict_ok and ids_ok),
         ))
     return verdicts
 
