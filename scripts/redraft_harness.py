@@ -129,6 +129,13 @@ async def _refetcher(args, settings, cap, db: Path):
     except Exception as e:
         sys.exit(f"The re-fetch asks Temporal whether each card's Review still runs; connecting failed: "
                  f"{type(e).__name__}")
+    # A checkpoint an earlier run left pending (a reader held an old
+    # snapshot): try it again, as every later removal does
+    from backend.database import checkpoint_wal
+
+    if not checkpoint_wal():
+        print("note: the database's WAL checkpoint did not complete (a reader holds an old snapshot)",
+              file=sys.stderr)
     run_key = f"harness:{args.label}:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     return Refetcher(
         HttpXClient(bearer_token=settings.x_bearer_token), run_key,
@@ -308,6 +315,13 @@ async def run(args) -> None:
     swept_again = sweep_earlier_reports(out_root, is_removed)
     if prune_removed_plans(plans, is_removed):
         safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))
+    if refetch is not None and refetch.incomplete_removals:
+        sys.exit(
+            f"{refetch.removal_failed} removal(s) X asked for could not be recorded (the post text is still "
+            f"stored), and {refetch.checkpoint_pending} removal(s) committed with the WAL checkpoint pending "
+            "(old pages can stay in the -wal file until a checkpoint completes). Run the harness again "
+            "(the re-fetch retries them), or restart the API process if a reader holds an old snapshot."
+        )
     if not (swept_again and swept):
         sys.exit("Some reports could not be checked for recorded removals (see above)")
     print(f"wrote {out_dir}/report.json and summary.md")

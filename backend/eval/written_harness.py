@@ -106,6 +106,7 @@ EXCLUDED_REMOVED_AT_REFETCH = "removed_at_refetch"  # X says the post is gone; t
 EXCLUDED_LOOKUP_FAILED = "lookup_failed"  # the lookup failed (network, rate limit, budget): nothing recorded
 EXCLUDED_REVIEW_RUNNING = "review_running"  # its Review still runs: it re-fetches at approve
 EXCLUDED_CARD_MISSING = "card_missing"  # the card was gone when the re-fetch read it
+EXCLUDED_REMOVAL_FAILED = "removal_failed"  # X says gone, but recording the removal kept failing
 
 
 def post_id_of(workflow_id: str) -> str:
@@ -647,6 +648,7 @@ REFETCH_EXCLUDED = {
     "failed": EXCLUDED_LOOKUP_FAILED,
     "live": EXCLUDED_REVIEW_RUNNING,
     "no_card": EXCLUDED_CARD_MISSING,
+    "removal_failed": EXCLUDED_REMOVAL_FAILED,
 }
 
 
@@ -671,19 +673,29 @@ class Refetcher:
       or kill switch, Temporal unreachable): nothing is recorded, and the
       review is left out. `failures` counts the error type names.
     - "live": the card's Review workflow still runs; nothing is looked up.
-      It re-fetches at approve. Asked per card, not cached per post.
+      It re-fetches at approve. Asked per card (also when the post's lookup
+      is cached: another card of the post can have a running Review).
     - "no_card": the card is gone.
 
-    Each lookup is checked against the spend cap first (it raises
-    SpendCapReached and nothing is looked up) and recorded on it as
+    Only a lookup that is about to be made is checked against the spend
+    cap, right before the app's re-fetch reserves the read (after its
+    removed and liveness checks): it raises SpendCapReached and nothing is
+    reserved or looked up. Each lookup is recorded on the cap as
     X_LOOKUP_CALL. The app's eval re-fetch reserves the read in the app's
     budget ledger too (ADR-0005 daily cap and kill switch).
 
-    A removal whose WAL checkpoint is still pending (a reader holds an old
-    snapshot, issue #23) has committed; the call is repeated (no further X
-    read: the card is marked removed) up to `checkpoint_attempts` times, and
-    the post counts as removed either way; `checkpoint_pending` counts those
-    whose checkpoint never completed.
+    When X said the post is gone but the re-fetch then raised (recording
+    the removal failed, e.g. the database was locked; or its WAL checkpoint
+    is pending because a reader holds an old snapshot, issue #23), the
+    removal is retried through the app's removal path (delete_post_text,
+    idempotent) without another X lookup, up to `removal_attempts` times:
+    - it completes: "removed";
+    - only the WAL checkpoint stays pending (the removal has committed):
+      "removed", counted in `checkpoint_pending`;
+    - recording the removal kept failing: "removal_failed", counted in
+      `removal_failed`. The post is skipped; its text is still stored.
+    A caller must report both counters as an unfinished removal
+    (`incomplete_removals`).
     """
 
     def __init__(
@@ -694,68 +706,126 @@ class Refetcher:
         cap: Optional[SpendCap],
         cost_per_read: float,
         *,
-        checkpoint_attempts: int = 5,
-        checkpoint_wait_seconds: float = 1.0,
+        removal_attempts: int = 5,
+        removal_wait_seconds: float = 1.0,
     ):
-        self._x_client = cap.wrap_x(x_client, cost_per_read) if cap is not None else x_client
+        metered = cap.wrap_x(x_client, cost_per_read) if cap is not None else x_client
+        self._x_said_gone: set = set()  # posts X answered gone in this run
+        refetcher = self
+
+        class _NotesGone:
+            async def lookup_post(self, post_id: str):
+                post = await metered.lookup_post(post_id)
+                if post is None:
+                    refetcher._x_said_gone.add(str(post_id))
+                return post
+
+        self._x_client = _NotesGone()
         self._run_key = run_key
         self._review_is_running = review_is_running
         self._cap = cap
         self._cost_per_read = cost_per_read
-        self._checkpoint_attempts = max(1, checkpoint_attempts)
-        self._checkpoint_wait_seconds = checkpoint_wait_seconds
+        self._removal_attempts = max(1, removal_attempts)
+        self._removal_wait_seconds = removal_wait_seconds
         self._by_post: Dict[str, str] = {}
         self.outcomes: Counter = Counter()  # per post, and per card for live / no_card
-        self.failures: Counter = Counter()  # error type names of failed lookups
+        self.failures: Counter = Counter()  # error type names of failed lookups and removals
         self.checkpoint_pending = 0
+        self.removal_failed = 0
+
+    @property
+    def incomplete_removals(self) -> int:
+        """Removals X asked for that did not fully complete in this run."""
+        return self.checkpoint_pending + self.removal_failed
 
     async def __call__(self, review: StoredReview) -> str:
         post_id = str(review.post.id)
-        if post_id in self._by_post:
-            return self._by_post[post_id]
-        if self._cap is not None:
-            self._cap.label = X_LOOKUP_CALL
-            self._cap.require_room(self._cost_per_read, X_LOOKUP_CALL)
+        cached = self._by_post.get(post_id)
+        if cached is not None:
+            if cached != "found":
+                return cached
+            try:
+                running = await self._review_is_running(review.workflow_id)
+            except Exception as e:
+                self.failures[_error_type(e)] += 1
+                self.outcomes["failed"] += 1
+                return "failed"
+            if running:
+                self.outcomes["live"] += 1
+                return "live"
+            return "found"
+        from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
+        from backend.target_refetch import refetch_stored_card_target
+
         try:
-            outcome = await self._refetch(review.workflow_id)
+            outcome = await refetch_stored_card_target(
+                self._x_client, review.workflow_id, self._run_key, review_is_running=self._running_or_cap_room,
+            )
+        except SpendCapReached:
+            raise
         except Exception as e:
-            # A type name only: an error message can quote the response
-            self.failures[_error_type(e)] += 1
-            outcome = "failed"
+            if post_id in self._x_said_gone or getattr(e, "type", None) == WAL_CHECKPOINT_PENDING_ERROR:
+                # X said gone (or the removal already committed): finish the removal
+                outcome = await self._finish_removal(review)
+            else:
+                # A type name only: an error message can quote the response
+                self.failures[_error_type(e)] += 1
+                outcome = "failed"
         self.outcomes[outcome] += 1
-        if outcome in ("found", "removed", "failed"):
+        if outcome in ("found", "removed", "failed", "removal_failed"):
             self._by_post[post_id] = outcome
         return outcome
 
-    async def _refetch(self, workflow_id: str) -> str:
+    async def _finish_removal(self, review: StoredReview) -> str:
+        """Record the removal through the app's removal path, as the re-fetch
+        does (same idempotency key), retrying; no further X lookup."""
         import asyncio
 
         from temporalio.exceptions import ApplicationError
 
-        from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
-        from backend.target_refetch import refetch_stored_card_target
+        from backend.activities.store_activities import (
+            WAL_CHECKPOINT_PENDING_ERROR,
+            DeletePostTextInput,
+            _delete_post_text_sync,
+        )
 
-        attempt = 0
-        while True:
-            attempt += 1
+        last: Optional[BaseException] = None
+        for attempt in range(self._removal_attempts):
+            if attempt:
+                await asyncio.sleep(self._removal_wait_seconds)
             try:
-                return await refetch_stored_card_target(
-                    self._x_client, workflow_id, self._run_key, review_is_running=self._review_is_running,
-                )
-            except ApplicationError as e:
-                if e.type != WAL_CHECKPOINT_PENDING_ERROR:
-                    raise
-                # The removal committed; only the checkpoint waits
-                if attempt >= self._checkpoint_attempts:
-                    self.checkpoint_pending += 1
-                    return "removed"
-                await asyncio.sleep(self._checkpoint_wait_seconds)
+                _delete_post_text_sync(DeletePostTextInput(
+                    workflow_id=review.workflow_id,
+                    idempotency_key=f"{review.workflow_id}:delete_text:eval:{self._run_key}",
+                    post_id=review.post.id,
+                ))
+                return "removed"
+            except Exception as e:
+                last = e
+        if isinstance(last, ApplicationError) and last.type == WAL_CHECKPOINT_PENDING_ERROR:
+            # The removal committed; the old pages may stay in the -wal file
+            self.checkpoint_pending += 1
+            return "removed"
+        self.removal_failed += 1
+        self.failures[_error_type(last)] += 1
+        return "removal_failed"
+
+    async def _running_or_cap_room(self, workflow_id: str) -> bool:
+        """The re-fetch's liveness check, the last step before it reserves
+        and makes a lookup: a card whose Review does not run is about to be
+        looked up, so the spend cap is checked here."""
+        running = await self._review_is_running(workflow_id)
+        if not running and self._cap is not None:
+            self._cap.label = X_LOOKUP_CALL
+            self._cap.require_room(self._cost_per_read, X_LOOKUP_CALL)
+        return running
 
     def summary(self) -> Dict[str, Any]:
         return {
             "refetch_outcomes": dict(sorted(self.outcomes.items())),
             "refetch_failure_types": dict(sorted(self.failures.items())),
             "refetch_wal_checkpoint_pending": self.checkpoint_pending,
+            "refetch_removal_failed": self.removal_failed,
         }
 
 

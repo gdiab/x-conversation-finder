@@ -1182,7 +1182,7 @@ async def test_a_pending_wal_checkpoint_is_retried_and_the_post_counts_as_remove
     x = LookupX({"3101": "gone"})
     results = iter([False, False, True])  # a reader holds an old snapshot twice
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: next(results))
-    refetch = _refetcher(x, checkpoint_wait_seconds=0)
+    refetch = _refetcher(x, removal_wait_seconds=0)
 
     records, excluded, _ = await run_harness(
         reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, refetch=refetch,
@@ -1193,9 +1193,10 @@ async def test_a_pending_wal_checkpoint_is_retried_and_the_post_counts_as_remove
     assert refetch.checkpoint_pending == 0
     assert _stored_card("review:t:3101")["text_removed"] is True
 
-    stuck = _refetcher(LookupX({}), checkpoint_attempts=2, checkpoint_wait_seconds=0)
+    stuck = _refetcher(LookupX({}), removal_attempts=2, removal_wait_seconds=0)
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: False)
     assert await stuck(reviews[0]) == "removed" and stuck.checkpoint_pending == 1
+    assert stuck.incomplete_removals == 1
 
 
 @pytest.mark.asyncio
@@ -1252,3 +1253,154 @@ async def test_the_script_refuses_a_refetch_it_cannot_do_as_the_app(tmp_path):
     copy = _make_db(tmp_path / "copy.db")
     with pytest.raises(SystemExit, match="not the app's database"):
         await redraft_harness._refetcher(args, real, None, copy)
+
+
+# ---------- issue #31 review round 1 ----------
+
+
+@pytest.mark.asyncio
+async def test_a_cached_lookup_still_asks_whether_each_cards_review_runs():
+    db = _app_db_with_cards([("review:t:3101", "3101"), ("review:u:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, {**TOPICS_31, "review:u:3101": TOPIC})
+    x = LookupX({"3101": "found"})
+
+    async def running(workflow_id):
+        return workflow_id == "review:u:3101"
+
+    records, excluded, _ = await run_harness(
+        reviews, {**SETTINGS, f"u:{TOPIC}": SETTINGS[f"t:{TOPIC}"]}, ScriptedAgent(), CountingChecker(),
+        plans={}, max_attempts=2, refetch=_refetcher(x, is_running=running),
+    )
+
+    assert x.lookups == ["3101"]
+    assert [r.workflow_id for r in records] == ["review:t:3101"]
+    assert dict(excluded) == {"review_running": 1}
+
+
+@pytest.mark.asyncio
+async def test_the_cap_is_checked_only_for_a_lookup_that_will_be_made():
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    cap = SpendCap(cap_usd=0.001, input_cost_usd=1e-6, output_cost_usd=1e-6)  # no room for a read
+
+    async def running(workflow_id):
+        return True
+
+    _, excluded, stopped = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        cap=cap, refetch=_refetcher(LookupX({}), cap, is_running=running),
+    )
+
+    assert not stopped and dict(excluded) == {"review_running": 1}
+
+
+class _DatabaseLocked(Exception):
+    """Stands in for sqlite3's 'database is locked' error."""
+
+
+@pytest.mark.asyncio
+async def test_a_removal_that_fails_after_x_says_gone_is_retried_without_another_lookup(monkeypatch):
+    import backend.target_refetch
+
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    x = LookupX({"3101": "gone"})
+
+    def locked(*args, **kwargs):
+        raise _DatabaseLocked()
+
+    # The re-fetch's own removal fails; the retry through delete_post_text succeeds
+    monkeypatch.setattr(backend.target_refetch, "_delete_post_text_sync", locked)
+    refetch = _refetcher(x, _cap(), removal_wait_seconds=0)
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, refetch=refetch,
+    )
+
+    assert records == [] and x.lookups == ["3101"]
+    assert dict(excluded) == {"removed_at_refetch": 1}
+    assert refetch.failures == {} and refetch.incomplete_removals == 0
+    assert _stored_card("review:t:3101")["text_removed"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_removal_that_keeps_failing_is_reported_as_unfinished_not_as_a_failed_lookup(monkeypatch):
+    import backend.activities.store_activities
+    import backend.target_refetch
+
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+
+    def locked(*args, **kwargs):
+        raise _DatabaseLocked()
+
+    monkeypatch.setattr(backend.target_refetch, "_delete_post_text_sync", locked)
+    monkeypatch.setattr(backend.activities.store_activities, "_delete_post_text_sync", locked)
+    refetch = _refetcher(LookupX({"3101": "gone"}), removal_attempts=3, removal_wait_seconds=0)
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, refetch=refetch,
+    )
+
+    assert records == [] and dict(excluded) == {"removal_failed": 1}
+    assert refetch.removal_failed == 1 and refetch.incomplete_removals == 1
+    assert summarize(records, excluded, None, refetch=refetch)["refetch_removal_failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_removal_at_refetch_deletes_the_posts_working_documents():
+    from backend.database import ReviewDocDB, get_db
+
+    db_path = _app_db_with_cards([("review:t:3101", "3101")])
+    db = get_db()
+    try:
+        db.add(ReviewDocDB(
+            workflow_id="review:t:3101", slot="evidence", post_id="3101",
+            data={"why_it_fits": f"Synthetic: the post says {POST_TEXT}"}, updated_at="2026-11-25",
+        ))
+        db.commit()
+    finally:
+        db.close()
+    reviews, _ = load_stored_reviews(db_path, TOPICS_31)
+
+    await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        refetch=_refetcher(LookupX({"3101": "gone"})),
+    )
+
+    db = get_db()
+    try:
+        assert db.query(ReviewDocDB).filter(ReviewDocDB.post_id == "3101").count() == 0
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("no_refetch", [True, False])
+def test_the_script_looks_posts_up_unless_told_not_to(tmp_path, monkeypatch, no_refetch):
+    """The script's wiring of --no-refetch: no Refetcher (no X client, no
+    Temporal) and "refetch": "off" in summary.md; without the flag it builds
+    one. No review is drafted (none is in the export): no model call."""
+    redraft_harness = _script()
+    built = []
+
+    async def fake_refetcher(args, settings, cap, db):
+        built.append(db)
+        return harness.Refetcher(LookupX({}), "t", _not_running, cap, 0.005)
+
+    monkeypatch.setattr(redraft_harness, "_refetcher", fake_refetcher)
+    monkeypatch.setattr(redraft_harness, "_settings", lambda: SimpleNamespace(
+        openai_api_key="synthetic", openai_base_url=None, openai_model="m", claim_gate_max_attempts=2,
+        inference_input_token_cost_usd=1e-6, inference_output_token_cost_usd=1e-6,
+    ))
+    exported = tmp_path / "settings.json"
+    exported.write_text(json.dumps({"watches": {}, "review_topics": {}}))
+    argv = ["redraft_harness.py", "run", "--db", str(_make_db(tmp_path / "cards.db")), "--settings", str(exported),
+            "--out-root", str(tmp_path / "out"), "--label", "t"] + (["--no-refetch"] if no_refetch else [])
+    monkeypatch.setattr(sys, "argv", argv)
+
+    redraft_harness.main()
+
+    summary = (tmp_path / "out" / "t" / "summary.md").read_text()
+    assert ("| refetch | `off` |" in summary) is no_refetch
+    assert ("| refetch | `on` |" in summary) is (not no_refetch)
+    assert len(built) == (0 if no_refetch else 1)
