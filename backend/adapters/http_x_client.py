@@ -172,8 +172,8 @@ class HttpXClient(XClientPort):
             )
             posts.append(post)
             
-            # Track newest ID (over converted posts only: a dropped post is
-            # fetched again by the next poll, and counted again, issue #17)
+            # Track newest ID (over converted posts only, unchanged by issue
+            # #17; see SearchResult for what that means for dropped posts)
             if newest_id is None or int(tweet["id"]) > int(newest_id):
                 newest_id = tweet["id"]
         

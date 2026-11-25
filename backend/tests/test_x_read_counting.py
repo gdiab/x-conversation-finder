@@ -136,8 +136,7 @@ async def test_http_search_counts_posts_dropped_for_a_missing_author(monkeypatch
 
     assert [p.id for p in result.posts] == ["9002"]
     assert result.billable_reads == 3
-    # Unchanged cursor: the newest converted post, so the next poll can still
-    # pick up the dropped 9003 (and counts it again)
+    # Unchanged cursor: the newest converted post; dropped posts do not move it
     assert result.newest_id == "9002"
 
 
