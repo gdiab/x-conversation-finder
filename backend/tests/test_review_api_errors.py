@@ -135,7 +135,9 @@ async def test_approve_after_failed_edit_is_409_post_anyway_required(make_review
             edited = await _post(http, workflow_id, "edit", new_text=FAILING_EDIT)
             assert edited.status_code == 200, edited.text
 
-            rejected = await _post(http, workflow_id, "approve", posted_url=APPROVE_URL, post_anyway=False)
+            rejected = await _post(
+                http, workflow_id, "approve", posted_url=APPROVE_URL, post_anyway=False, draft_text=FAILING_EDIT,
+            )
             assert rejected.status_code == 409
             body = rejected.json()
             assert body["code"] == "post_anyway_required"
@@ -144,9 +146,41 @@ async def test_approve_after_failed_edit_is_409_post_anyway_required(make_review
             assert body["failing_sentences"] == ["Thanks for the question.", "Works on Kubernetes."]
             assert "post_anyway=true" in body["detail"]
 
-            approved = await _post(http, workflow_id, "approve", posted_url=APPROVE_URL, post_anyway=True)
+            approved = await _post(
+                http, workflow_id, "approve", posted_url=APPROVE_URL, post_anyway=True, draft_text=FAILING_EDIT,
+            )
             assert approved.status_code == 200, approved.text
             assert approved.json() == {"message": "Approved"}
+
+
+@pytest.mark.asyncio
+async def test_approve_naming_a_draft_that_is_no_longer_current_is_409_draft_changed(
+    make_review_input, x_activities, api_client
+):
+    """The founder approves the draft they saw (ADR-0004); an edit from
+    elsewhere since then must not be approved, or overridden, unseen."""
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, x_activities), api_client(env.client) as http:
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_api_draft_changed"
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
+            )
+            shown = (await wait_for_card_ready(handle))["evidence"]["draft"]["text"]
+            # Another tab edits the draft to text that fails the re-gate
+            assert (await _post(http, workflow_id, "edit", new_text=FAILING_EDIT)).status_code == 200
+
+            for post_anyway in (False, True):
+                stale = await _post(
+                    http, workflow_id, "approve", posted_url=APPROVE_URL, post_anyway=post_anyway, draft_text=shown,
+                )
+                assert stale.status_code == 409, stale.text
+                assert stale.json()["code"] == "draft_changed"
+
+            current = await _post(
+                http, workflow_id, "approve", posted_url=APPROVE_URL, post_anyway=True, draft_text=FAILING_EDIT,
+            )
+            assert current.status_code == 200, current.text
 
 
 # ---------- issue #20: requests before the card is stored ----------
@@ -329,6 +363,7 @@ def test_not_checked_gate_is_post_anyway_required_with_its_state():
     ("NotReady", (409, "not_ready")),
     ("Busy", (409, "busy")),
     ("PostRemoved", (409, "post_removed")),
+    ("DraftChanged", (409, "draft_changed")),
     ("InvalidState", (409, "invalid_state")),
     ("InvalidRequest", (400, "invalid_request")),
     (None, (422, "rejected")),  # handler-body refusals (nudge gate, reply check)

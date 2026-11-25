@@ -33,7 +33,17 @@ describe('approveReview', () => {
       posted_url: 'https://x.example/me/status/9',
       client_request_id: 'req_1',
       post_anyway: false,
+      draft_text: null,
     });
+  });
+
+  it('posts the draft text the founder saw, for the server to check', async () => {
+    fetchMock.mockResolvedValue(new Response('{"message":"ok"}', { status: 200 }));
+
+    await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', false, 'Shown synthetic draft.');
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init?.body as string).draft_text).toBe('Shown synthetic draft.');
   });
 
   it('posts post_anyway=true when the founder overrides the edit gate', async () => {

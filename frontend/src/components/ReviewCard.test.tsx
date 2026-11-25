@@ -191,6 +191,7 @@ describe('ReviewCard: approve flow', () => {
       'https://x.example/me/status/9',
       expect.stringMatching(/^req_/),
       false,
+      card.evidence.draft?.text, // the draft the founder saw; the server checks it
     );
     expect(onUpdate).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
@@ -402,6 +403,22 @@ describe('ReviewCard: error codes (issues #15, #20)', () => {
     await user.click(screen.getByRole('button', { name: 'Save Edit' }));
 
     expect(editMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+  });
+
+  it('reloads and asks for another look when the server says the draft changed', async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    const detail = 'The draft changed since it was shown. Review the current draft and approve again.';
+    approveMock.mockRejectedValueOnce(new ReviewApiError(`Failed to approve review: ${detail}`, 409, 'draft_changed', detail));
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status')).toHaveTextContent(detail);
+    expect(screen.queryByText(/Failed to approve review/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
   });
 

@@ -199,7 +199,10 @@ export async function approveReview(
   workflowId: string, 
   postedUrl: string, 
   clientRequestId: string,
-  postAnyway: boolean = false
+  postAnyway: boolean = false,
+  // The draft text the founder saw: the server refuses (409 draft_changed)
+  // if the current draft differs, so an approve never applies to an unseen draft
+  draftText: string | null = null,
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/approve`, {
     method: 'POST',
@@ -208,6 +211,7 @@ export async function approveReview(
       posted_url: postedUrl,
       client_request_id: clientRequestId,
       post_anyway: postAnyway,
+      draft_text: draftText,
     }),
   });
   
@@ -225,6 +229,7 @@ export type ReviewErrorCode =
   | 'not_ready' // the card is not stored yet (issue #20); try again in a moment
   | 'busy' // another edit, nudge or approval is running; try again after it
   | 'post_removed' // the target post is gone (approve: the review is skipped); reload the card
+  | 'draft_changed' // approve named a draft that is no longer current; reload the card
   | 'invalid_state'
   | 'invalid_request'
   | 'rejected' // the workflow refused it (e.g. a nudged draft failed the gate)

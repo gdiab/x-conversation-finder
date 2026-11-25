@@ -34,6 +34,7 @@ from backend.workflows.review import (
     NOT_READY_ERROR,
     POST_ANYWAY_REQUIRED_ERROR,
     POST_REMOVED_ERROR,
+    DRAFT_CHANGED_ERROR,
 )
 from backend.activities.store_activities import apply_stored_removal, get_all_cards
 from backend.database import init_db
@@ -109,6 +110,7 @@ REJECTION_CODES = {
     BUSY_ERROR: (409, "busy"),  # another change is in flight: retry after it
     POST_ANYWAY_REQUIRED_ERROR: (409, "post_anyway_required"),  # + gate_state, failing_sentences
     POST_REMOVED_ERROR: (409, "post_removed"),  # review now skipped; reload it
+    DRAFT_CHANGED_ERROR: (409, "draft_changed"),  # the draft shown is not current; reload it
     INVALID_STATE_ERROR: (409, "invalid_state"),
     INVALID_REQUEST_ERROR: (400, "invalid_request"),
 }
@@ -188,6 +190,9 @@ class ApproveRequest(BaseModel):
     posted_url: str
     client_request_id: str
     post_anyway: bool = False  # Per ADR-0006 Amendment E
+    # The draft text the founder saw (issue #15 review); a mismatch is 409
+    # draft_changed. Optional so direct API callers without it still work.
+    draft_text: Optional[str] = None
 
 
 class SkipRequest(BaseModel):
@@ -301,7 +306,7 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         handle = temporal_client.get_workflow_handle(workflow_id)
         result = await handle.execute_update(
             "approve",
-            args=[request.posted_url, request.client_request_id, request.post_anyway]
+            args=[request.posted_url, request.client_request_id, request.post_anyway, request.draft_text]
         )
         
         return {"message": result}

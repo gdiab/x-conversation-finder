@@ -79,7 +79,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     const draftAtRequest = shownDraftRef.current;
     
     try {
-      await approveReview(card.workflow_id, postedUrl, approveRequestId.current, postAnyway);
+      await approveReview(
+        card.workflow_id, postedUrl, approveRequestId.current, postAnyway, card.evidence.draft?.text ?? null,
+      );
       approveRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
@@ -94,6 +96,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       const wait = retryNotice(err);
       if (wait) {
         setNotice(wait);
+        return;
+      }
+      // The server's draft is not the one shown: reload and let the founder look again
+      if (err instanceof ReviewApiError && err.code === 'draft_changed') {
+        setNotice('The draft changed since it was shown. Review the current draft and approve again.');
+        onUpdate();
         return;
       }
       // issue #15: the API says so with a code; the message text is for people

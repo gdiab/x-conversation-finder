@@ -55,6 +55,7 @@ POST_ANYWAY_REQUIRED_ERROR = "PostAnywayRequired"  # details: {"gate_state", "fa
 INVALID_STATE_ERROR = "InvalidState"  # not allowed in the Review's current status
 INVALID_REQUEST_ERROR = "InvalidRequest"  # bad input (empty text, malformed URL)
 POST_REMOVED_ERROR = "PostRemoved"  # approve's re-fetch found the target post gone
+DRAFT_CHANGED_ERROR = "DraftChanged"  # approve named a draft that is no longer current
 
 
 def _rejection(message: str, error_type: str, *details) -> ApplicationError:
@@ -697,7 +698,13 @@ class ReviewWorkflow:
         return "followup_due"
     
     @workflow.update
-    async def approve(self, posted_url: str, client_request_id: str, post_anyway: bool = False) -> str:
+    async def approve(
+        self,
+        posted_url: str,
+        client_request_id: str,
+        post_anyway: bool = False,
+        expected_draft_text: Optional[str] = None,
+    ) -> str:
         """
         Approve update - founder will post this.
         
@@ -706,6 +713,10 @@ class ReviewWorkflow:
         
         Per ADR-0006 Amendment E: If edited text failed re-gate, requires post_anyway=True.
         Validator rejects approve without post_anyway when edited text fails gate.
+
+        expected_draft_text (issue #15 review): the draft the founder saw; only
+        the validator reads it. Approvals recorded with three arguments replay
+        with the default.
         """
         # Deduplicate (B9: per-handler set)
         if client_request_id in self._approve_requests:
@@ -831,7 +842,13 @@ class ReviewWorkflow:
             self.evidence.skip_reason = POST_REMOVED_SKIP_REASON
 
     @approve.validator
-    def validate_approve(self, posted_url: str, client_request_id: str, post_anyway: bool = False) -> None:
+    def validate_approve(
+        self,
+        posted_url: str,
+        client_request_id: str,
+        post_anyway: bool = False,
+        expected_draft_text: Optional[str] = None,
+    ) -> None:
         """
         Validator for approve Update.
         
@@ -866,6 +883,18 @@ class ReviewWorkflow:
         if self._approve_in_flight_count > 0:
             raise _rejection(
                 "Cannot approve while another approval is in progress. Retry after it completes.", BUSY_ERROR
+            )
+
+        # issue #15 review: the founder approves the draft they saw (ADR-0004),
+        # and a post_anyway acknowledges that draft's failures. If the draft
+        # changed since (an edit or nudge from elsewhere, a reload that has
+        # not arrived), refuse rather than approve a draft nobody has seen.
+        # Callers that send no text (older clients) are not checked.
+        current_text = self.evidence.draft.text if self.evidence and self.evidence.draft else None
+        if expected_draft_text is not None and expected_draft_text != current_text:
+            raise _rejection(
+                "The draft changed since it was shown. Review the current draft and approve again.",
+                DRAFT_CHANGED_ERROR,
             )
 
         # QA R12: Hash check removed (dead code).
