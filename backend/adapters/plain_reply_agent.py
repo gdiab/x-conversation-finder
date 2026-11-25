@@ -29,9 +29,9 @@ from backend.planning import MAX_REASON_CHARS
 from backend.ports import ReplyAgentPort
 from backend.activities.claim_gate_activity import (
     split_into_sentences,
-    has_unresolved_referent,
-    ends_with_abbreviation,
+    claim_selectability_error,
 )
+from backend.gate.sentence_boundary import SPLITTER_VERSION
 from backend.gate.non_claim_set import NON_CLAIM_PHRASES
 
 
@@ -39,15 +39,17 @@ def format_materials_for_prompt(materials: list[FounderMaterial]) -> str:
     """List each passage's selectable sentences under the numbers the claim gate uses.
 
     Numbers are indices into split_into_sentences(passage), the same split the
-    claim gate checks against. Sentences the gate never accepts as claims (an
-    unresolved referent at the start, or an abbreviation at the end) are left
+    claim gate checks against. Sentences the gate never accepts as claims
+    (claim_selectability_error: an unresolved referent at the start, an
+    abbreviation at the end, or an unclear sentence boundary) are left
     out, but the remaining sentences keep their original numbers.
     """
     blocks = []
     for m in materials:
         lines = [f"[{m.passage_id}] Source: {m.source}"]
-        for i, sentence in enumerate(split_into_sentences(m.passage)):
-            if has_unresolved_referent(sentence) or ends_with_abbreviation(sentence):
+        sentences = split_into_sentences(m.passage)
+        for i, sentence in enumerate(sentences):
+            if claim_selectability_error(sentences, i):
                 continue
             lines.append(f"  {i}: {sentence}")
         if len(lines) == 1:
@@ -542,7 +544,9 @@ Max 280 chars total after text insertion."""
                 segments.append(Segment(
                     kind="claim",
                     source_passage_id=s.get("source_passage_id"),
-                    sentence_index=s.get("sentence_index")
+                    sentence_index=s.get("sentence_index"),
+                    # issue #10: the index counts in this split (set by code, not the model)
+                    splitter_version=SPLITTER_VERSION,
                 ))
             else:
                 # QA R13: Non-claims use phrase_id (no text)

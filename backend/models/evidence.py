@@ -38,13 +38,17 @@ class Segment:
     - source_passage_id: passage ID (for claims only)
     - sentence_index: 0-based index into passage sentences (for claims only)
     - phrase_id: fixed phrase ID (for non_claims only)
+    - splitter_version: the sentence split sentence_index counts in (claims
+      only; backend.gate.sentence_boundary.SPLITTER_VERSION). Set by code,
+      never by the model. None means drafted before versions existed.
     """
-    
+
     kind: Literal["claim", "non_claim"]
     text: Optional[str] = None
     source_passage_id: Optional[str] = None
     sentence_index: Optional[int] = None
     phrase_id: Optional[str] = None  # QA R13: Fixed phrase ID for non_claims
+    splitter_version: Optional[int] = None  # issue #10
 
 
 @dataclass

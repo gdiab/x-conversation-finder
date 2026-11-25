@@ -19,6 +19,7 @@ from backend.models import (
 )
 from backend.ports import ReplyAgentPort
 from backend.planning import question_spans
+from backend.gate.sentence_boundary import SPLITTER_VERSION
 
 # issue #5: the closer the fake draft uses for each planned reply type.
 _FAKE_CLOSER_BY_REPLY_TYPE = {
@@ -157,6 +158,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 Segment(
                     kind="claim",
                     source_passage_id="passage_0",
+                    splitter_version=SPLITTER_VERSION,
                     sentence_index=0  # "Our product helps developers build reliable systems."
                 ),
                 Segment(
@@ -169,6 +171,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 Segment(
                     kind="claim",
                     source_passage_id="passage_0",
+                    splitter_version=SPLITTER_VERSION,
                     sentence_index=2  # "Our product guarantees strong consistency."
                 ),
                 Segment(
@@ -186,6 +189,7 @@ class FakeReplyAgent(ReplyAgentPort):
                 Segment(
                     kind="claim",
                     source_passage_id="passage_0",
+                    splitter_version=SPLITTER_VERSION,
                     sentence_index=0  # "Our product helps developers build reliable systems."
                 ),
                 Segment(

@@ -74,6 +74,8 @@ cd backend
 python -m backend.worker
 ```
 
+To upgrade the worker, stop the running worker before starting the new one. Do not run two worker versions on the task queue at once: an older worker can gate a draft numbered by a newer sentence split (ADR-0006, 2026-11-21 amendment, item 2).
+
 ### Terminal 3: Backend API
 
 ```bash
@@ -108,6 +110,7 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `test_review_workflow.py`: Tests Review workflow signals, updates, queries, and timeout
 - `test_topic_watch_workflow.py`: Tests TopicWatch polling loop and Continue-As-New
 - `test_models.py`: Tests confidence computation (rule v2, `backend/config/confidence.py`)
+- `test_sentence_boundary.py`: Pins the claim gate's sentence splits after abbreviations, initials and numbers (issue #10). A changed expected split changes the sentence indices drafts reference: bump `SPLITTER_VERSION` in `backend/gate/sentence_boundary.py` and read ADR-0006 (2026-11-21 amendment, item 2) first
 - `test_reply_fit.py`: Tests the should-we-reply rules on synthetic posts (`fixtures/reply_fit_posts.json`): skip reasons, confidence spread, and no draft call for a skipped post
 
 ## Using the System
