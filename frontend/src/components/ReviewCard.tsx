@@ -70,6 +70,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       setIsNudging(false);
       setNudgeInstruction('');
       nudgeRequestId.current = null;
+      // A nudge rejection's message quotes the redraft (issue #23)
+      setError(null);
     }
     if (textRemoved || !isEditing) {
       setEditText(draftText ?? '');

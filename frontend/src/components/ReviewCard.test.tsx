@@ -450,6 +450,21 @@ describe('ReviewCard: error codes (issues #15, #20)', () => {
     expect(screen.getByText(`Failed to nudge review: ${detail}`)).toBeInTheDocument();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
+  it('drops a nudge rejection (it quotes the redraft) once the post is removed (issue #23)', async () => {
+    const user = userEvent.setup();
+    const detail = 'Nudged draft rejected; the current draft is unchanged: synthetic quoted sentence';
+    nudgeMock.mockRejectedValueOnce(new ReviewApiError(`Failed to nudge review: ${detail}`, 422, 'rejected', detail));
+    const card = makeCard();
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Apply Nudge' }));
+    expect(screen.getByText(`Failed to nudge review: ${detail}`)).toBeInTheDocument();
+
+    rerender(<ReviewCard card={{ ...card, post: { ...card.post, text: '[removed - post deleted]', text_removed: true } }} onUpdate={vi.fn()} />);
+    expect(screen.queryByText(/synthetic quoted sentence/)).not.toBeInTheDocument();
+  });
 });
 
 describe('ReviewCard: edit gate results', () => {
