@@ -480,3 +480,98 @@ def test_the_summary_refuses_a_label_that_is_not_a_short_name():
         summary_markdown("review:t:2001 text", {})
     assert harness._model_label("gpt-4o-mini-2024-07-18") == "gpt-4o-mini-2024-07-18"
     assert harness._model_label("some text with spaces") == "(unrecognized model name)"
+
+
+# ---------- review round 2 ----------
+
+
+@pytest.mark.asyncio
+async def test_a_removal_recorded_mid_run_stops_the_next_model_call(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    agent, checker = ScriptedAgent(), CountingChecker()
+    removed = {"now": False}
+
+    class RemovedWhileDrafting(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            evidence = await agent.draft_written(request, idempotency_key)
+            removed["now"] = True  # the app records the removal during the draft call
+            return evidence
+
+    records, excluded, _ = await run_harness(
+        reviews[1:], SETTINGS, RemovedWhileDrafting(), checker, plans={}, max_attempts=2, samples=2,
+        is_removed=lambda post_id: removed["now"],
+    )
+
+    assert checker.calls == 0  # the draft quoting the post is not sent to the checker
+    assert len(agent.requests) == 1  # nor drafted again for the second sample
+    assert [r.outcome for r in records] == [] and excluded["post_text_removed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_watchs_saved_attempt_limit_is_used(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    one_try = {f"t:{TOPIC}": dataclasses.replace(SETTINGS[f"t:{TOPIC}"], claim_gate_max_attempts=1)}
+
+    records, _, _ = await run_harness(
+        reviews[1:], one_try, ScriptedAgent(texts=[UNSUPPORTED]), CountingChecker(), plans={}, max_attempts=2,
+    )
+
+    (record,) = records
+    assert record.outcome == "skipped" and len(record.attempts) == 1
+
+
+def test_too_many_claims_is_counted_from_the_sentences_not_the_reason():
+    from backend.models.written import SentenceCheck, WrittenCheckResult
+
+    reason = (
+        "Checked as a product claim (the checker read it as a statement about the product). "
+        "The brief does not support it: synthetic. The reply must have at most 1 product claim, and 2 sentences "
+        "are checked as product claims."
+    )
+    result = WrittenCheckResult(
+        passed=False,
+        sentences=[SentenceCheck("A.", False, "claim", reason), SentenceCheck("B.", False, "claim", reason)],
+        failures=[["A.", reason], ["B.", reason]],
+    )
+
+    assert harness.failure_kinds(result) == ["too_many_claims", "unsupported"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_without_usable_usage_counts_at_its_worst_case():
+    client, _ = _stub_client(prompt_tokens=0, completion_tokens=0)
+    cap = SpendCap(cap_usd=1.0, input_cost_usd=1e-6, output_cost_usd=1e-5)
+
+    await cap.wrap(client).chat.completions.create(
+        model="m", messages=[{"role": "user", "content": "x" * 100}], max_completion_tokens=100,
+    )
+
+    (call,) = cap.calls
+    assert call.input_tokens > 100 and call.output_tokens == 100
+
+
+@pytest.mark.parametrize("cap_usd", [float("nan"), float("inf"), -0.01])
+def test_a_spend_cap_that_cannot_limit_is_refused(cap_usd):
+    with pytest.raises(ValueError):
+        SpendCap(cap_usd, 1e-6, 1e-6)
+
+
+def test_a_model_name_shaped_like_an_id_is_not_shown():
+    assert harness._model_label("review:account:123") == "(unrecognized model name)"
+    assert harness._model_label("2124917236280553696") == "(unrecognized model name)"
+
+
+def test_the_script_refuses_to_write_when_git_fails(tmp_path, monkeypatch):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "redraft_harness.py"
+    sys.path.insert(0, str(script.parent))
+    try:
+        import redraft_harness
+    finally:
+        sys.path.remove(str(script.parent))
+
+    def unsafe(*args, **kwargs):
+        return subprocess.CompletedProcess(args, 128, "", "fatal: detected dubious ownership in repository")
+
+    monkeypatch.setattr(redraft_harness.subprocess, "run", unsafe)
+    with pytest.raises(SystemExit):
+        redraft_harness.ensure_ignored(tmp_path / "report.json")

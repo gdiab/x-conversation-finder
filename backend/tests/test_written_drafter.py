@@ -307,6 +307,16 @@ def test_a_failure_of_the_whole_reply_is_listed_as_such(sample_post):
     assert '"[reply]"' not in prompt
 
 
+def test_a_failed_sentence_in_brackets_is_listed_as_a_sentence(sample_post):
+    evidence = _failed_written_evidence()
+    evidence.draft.claim_gate.failed_sentences = [["[Relay handles 8 tasks]", "a synthetic reason"]]
+    evidence.draft.plan_conformance_failures = []
+
+    prompt = build_written_draft_prompt(_request(sample_post, steer="x", evidence=evidence))
+
+    assert '- "[Relay handles 8 tasks]": a synthetic reason' in prompt
+
+
 def test_an_assembled_previous_draft_lists_no_written_failures(sample_post):
     evidence = _failed_written_evidence()
     evidence.draft.mode = "assembled"

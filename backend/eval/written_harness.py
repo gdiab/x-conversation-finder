@@ -23,6 +23,7 @@ git does not ignore). summarize() gives the aggregate numbers only.
 
 import copy
 import json
+import math
 import re
 import sqlite3
 from collections import Counter
@@ -34,7 +35,13 @@ from temporalio.converter import value_to_type
 
 from backend.budget import prompt_token_bound
 from backend.gate.brief import split_brief
-from backend.gate.written_check import clean_feature_terms, clean_names, judge, prepare_check
+from backend.gate.written_check import (
+    MAX_PRODUCT_CLAIMS,
+    clean_feature_terms,
+    clean_names,
+    judge,
+    prepare_check,
+)
 from backend.models import Evidence, Post, ReplyPlan
 from backend.models.written import DRAFT_MODE_WRITTEN, WrittenCheckResult
 from backend.planning import validate_reply_plan
@@ -57,6 +64,9 @@ class WatchSettings:
     product_name: str
     product_aliases: List[str] = field(default_factory=list)
     key_features: Optional[List[str]] = None
+    # The watch's saved ReviewConfig.claim_gate_max_attempts: a live Review
+    # keeps the limit its watch was started with. None: the caller's default.
+    claim_gate_max_attempts: Optional[int] = None
 
 
 def settings_key(account: str, topic: str) -> str:
@@ -172,6 +182,16 @@ class SpendCapReached(Exception):
     """The next call could cost more than the harness's spend cap allows."""
 
 
+class PostRemovedDuringRun(Exception):
+    """The post's removal was recorded while the harness worked on it."""
+
+
+def _stop_if_removed(is_removed: Optional[Callable[[str], bool]], post_id: str) -> None:
+    """Asked right before each model call, as the live activities do."""
+    if is_removed is not None and is_removed(post_id):
+        raise PostRemovedDuringRun(post_id)
+
+
 @dataclass
 class CallRecord:
     call: str
@@ -179,6 +199,10 @@ class CallRecord:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+
+
+def _usable_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 class SpendCap:
@@ -192,6 +216,11 @@ class SpendCap:
     """
 
     def __init__(self, cap_usd: float, input_cost_usd: float, output_cost_usd: float):
+        for name, value in (("cap", cap_usd), ("input token price", input_cost_usd),
+                            ("output token price", output_cost_usd)):
+            if not isinstance(value, (int, float)) or isinstance(value, bool) \
+                    or not math.isfinite(value) or value < 0:
+                raise ValueError(f"the spend {name} must be a finite number of 0 or more")
         self.cap_usd = cap_usd
         self.input_cost_usd = input_cost_usd
         self.output_cost_usd = output_cost_usd
@@ -228,8 +257,11 @@ class SpendCap:
                 usage = getattr(response, "usage", None)
                 tokens_in = getattr(usage, "prompt_tokens", None) if usage else None
                 tokens_out = getattr(usage, "completion_tokens", None) if usage else None
-                if not isinstance(tokens_in, int) or not isinstance(tokens_out, int):
-                    # No usable usage: keep the worst case counted
+                if not _usable_count(tokens_in) or not _usable_count(tokens_out) or (
+                    tokens_in == 0 and tokens_out == 0
+                ):
+                    # No usable usage (as the app's meter reads it): keep the
+                    # worst case counted
                     tokens_in, tokens_out = bound_in, bound_out
                 cap.calls.append(CallRecord(
                     cap.label, getattr(response, "model", None) or model,
@@ -289,7 +321,6 @@ class PostRecord:
 
 # Failure kinds, read from the check's reasons (backend/gate/written_check.py)
 FAILURE_KINDS = (
-    ("too_many_claims", ("product claim, and",)),
     ("unsupported", ("The brief does not support it",)),
     ("number_not_in_brief", ("number no brief sentence states", "number the cited brief sentences do not state")),
     ("question_claim", ("must be a statement, not a question",)),
@@ -319,6 +350,10 @@ def failure_kinds(result: WrittenCheckResult) -> List[str]:
     """The kinds of failure in a failed check, for the aggregate report."""
     reasons = [_code_written(reason) for _, reason in result.failures]
     kinds = []
+    # Counted from the sentence rows, not read from a reason: the checker's
+    # own words can come before the code's "at most 1 product claim" text
+    if sum(1 for c in result.sentences if c.kind == "claim") > MAX_PRODUCT_CLAIMS:
+        kinds.append("too_many_claims")
     for kind, needles in FAILURE_KINDS:
         if any(needle in reason for reason in reasons for needle in needles):
             kinds.append(kind)
@@ -364,6 +399,7 @@ async def plan_for(
     agent: ReplyAgentPort,
     plans: Dict[str, Any],
     cap: Optional[SpendCap] = None,
+    is_removed: Optional[Callable[[str], bool]] = None,
 ) -> Tuple[Optional[ReplyPlan], str]:
     """The reply plan to draft under, and where it came from.
 
@@ -387,6 +423,7 @@ async def plan_for(
     for attempt in range(1, REPLY_PLAN_MAX_ATTEMPTS + 1):
         if cap is not None:
             cap.label = "plan"
+        _stop_if_removed(is_removed, review.post.id)
         plan = await agent.plan(
             post=review.post,
             evidence=copy.deepcopy(evidence),
@@ -414,6 +451,7 @@ async def run_written_path(
     sample: int = 1,
     cap: Optional[SpendCap] = None,
     attempts: Optional[List[AttemptRecord]] = None,
+    is_removed: Optional[Callable[[str], bool]] = None,
 ) -> List[AttemptRecord]:
     """The written branch of ReviewWorkflow._draft_and_check, offline.
 
@@ -441,6 +479,7 @@ async def run_written_path(
         steer = redraft_steer(last_failures) if attempt > 1 else None
         if cap is not None:
             cap.label = "draft" if attempt == 1 else "redraft"
+        _stop_if_removed(is_removed, review.post.id)
         evidence = await agent.draft_written(
             WrittenDraftRequest(
                 post=review.post,
@@ -465,6 +504,7 @@ async def run_written_path(
         if not reused:
             if cap is not None:
                 cap.label = "check"
+            _stop_if_removed(is_removed, review.post.id)
             checks[text] = await check_text(
                 text, settings, plan.mention_product, checker,
                 f"harness:{review.workflow_id}:{sample}:check:{attempt}",
@@ -527,8 +567,10 @@ async def run_harness(
     the run early (the records then cover what finished).
 
     `settings_by_key` maps settings_key(account, topic) to the watch's
-    settings. `is_removed(post_id)` is asked before each post's model calls
-    (removal_recorded on the database read).
+    settings. `is_removed(post_id)` is asked right before each model call
+    (removal_recorded on the database read); a post removed during its run
+    is left out from then on, and its run is recorded as "removed".
+    `max_attempts` is the default for a watch without a saved limit.
     """
     excluded = Counter(excluded or {})
     records: List[PostRecord] = []
@@ -540,24 +582,32 @@ async def run_harness(
         if not clean_names(settings.product_name, settings.product_aliases)[0]:
             excluded[EXCLUDED_NO_PRODUCT_NAME] += 1
             continue
+        attempt_limit = settings.claim_gate_max_attempts or max_attempts
         for sample in range(1, samples + 1):
-            if is_removed is not None and is_removed(review.post.id):
-                excluded[EXCLUDED_REMOVED] += 1
-                break
             attempts: List[AttemptRecord] = []
             try:
-                plan, source = await plan_for(review, agent, plans, cap)
+                _stop_if_removed(is_removed, review.post.id)
+                plan, source = await plan_for(review, agent, plans, cap, is_removed)
                 if plan is None:
                     records.append(PostRecord(review.workflow_id, review.topic, sample, source, None, "plan_invalid"))
                     break  # a plan that fails twice fails for every sample
                 await run_written_path(
                     review, settings, plan, agent, checker,
-                    max_attempts=max_attempts, sample=sample, cap=cap, attempts=attempts,
+                    max_attempts=attempt_limit, sample=sample, cap=cap, attempts=attempts,
+                    is_removed=is_removed,
                 )
                 records.append(PostRecord(
                     review.workflow_id, review.topic, sample, source, plan.mention_product,
                     outcome_of(attempts), attempts,
                 ))
+            except PostRemovedDuringRun:
+                excluded[EXCLUDED_REMOVED] += 1
+                if attempts:
+                    # Finished attempts were paid for; the run is not a result
+                    records.append(PostRecord(
+                        review.workflow_id, review.topic, sample, "", None, "removed", attempts,
+                    ))
+                break
             except SpendCapReached as e:
                 # The attempts that finished are kept: their calls were paid
                 records.append(PostRecord(
@@ -637,7 +687,8 @@ def summarize(
 
 
 _SAFE_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
-_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$")
+# A letter first, no spaces or colons (workflow ids have colons), short
+_MODEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]{0,63}$")
 
 
 def safe_label(label: str) -> bool:

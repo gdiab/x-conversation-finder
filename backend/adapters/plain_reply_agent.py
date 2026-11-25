@@ -224,7 +224,7 @@ def written_check_failures_for_prompt(draft: Optional[Draft]) -> str:
         return ""
     lines = []
     for sentence, reason in draft.claim_gate.failed_sentences or []:
-        if sentence.startswith("[") and sentence.endswith("]"):
+        if sentence == "[reply]":
             lines.append(f"- The reply as a whole: {reason}")
         else:
             lines.append(f"- \"{sentence}\": {reason}")

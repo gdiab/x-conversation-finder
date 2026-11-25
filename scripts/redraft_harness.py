@@ -45,9 +45,19 @@ def ensure_ignored(path: Path) -> None:
         ["git", "-C", str(directory), "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True,
     )
-    if inside.returncode != 0 or inside.stdout.strip() != "true":
-        return  # not in a git work tree
-    ignored = subprocess.run(["git", "-C", str(directory), "check-ignore", "-q", str(probe)])
+    if inside.returncode != 0:
+        if "not a git repository" in inside.stderr:
+            return  # confirmed: not in a git work tree
+        # Any other git error (an unsafe repository, a broken install) leaves
+        # it unknown whether git would track the file: do not write it
+        sys.exit(f"Refusing to write {probe}: git could not say whether it is in a work tree")
+    if inside.stdout.strip() != "true":
+        return  # inside a .git directory or a bare repository: nothing tracks it
+    ignored = subprocess.run(
+        ["git", "-C", str(directory), "check-ignore", "-q", str(probe)], capture_output=True, text=True,
+    )
+    if ignored.returncode == 128:
+        sys.exit(f"Refusing to write {probe}: git check-ignore failed")
     if ignored.returncode != 0:
         sys.exit(
             f"Refusing to write {probe}: git does not ignore it, and the output holds real post text. "
@@ -92,6 +102,8 @@ async def export_settings(args) -> None:
             "product_name": watch.product_name,
             "product_aliases": list(watch.product_aliases or []),
             "key_features": list(watch.key_features) if watch.key_features is not None else None,
+            # The limit the watch's Reviews keep (ReviewConfig, saved at start)
+            "claim_gate_max_attempts": watch.review_config.claim_gate_max_attempts,
         }
         print(f"{workflow_id}: topic {watch.topic!r}, product name {'set' if watch.product_name else 'missing'}")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +145,12 @@ async def run(args) -> None:
         reviews = reviews[: args.limit]
     plans = json.loads(plans_path.read_text()) if plans_path.exists() else {}
 
-    cap = SpendCap(args.max_cost, settings.inference_input_token_cost_usd, settings.inference_output_token_cost_usd)
+    try:
+        cap = SpendCap(
+            args.max_cost, settings.inference_input_token_cost_usd, settings.inference_output_token_cost_usd,
+        )
+    except ValueError as e:
+        sys.exit(f"--max-cost or INFERENCE_*_TOKEN_COST_USD: {e}")
     client = cap.wrap(AsyncOpenAI(
         api_key=settings.openai_api_key, base_url=settings.openai_base_url, max_retries=0,
     ))
