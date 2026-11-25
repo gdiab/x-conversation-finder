@@ -109,8 +109,9 @@ GOLDEN_SPLITS = [
     # Codex thermo r4: a number before a lowercase word ends the sentence.
     ("We launched in 2021. customers pay monthly.", ["We launched in 2021.", "customers pay monthly."], []),
     # List markers stay with their item; a mid-sentence one is unclear.
-    ("1. The product supports SSO.", ["1. The product supports SSO."], []),
-    ("1. The product supports SSO. 2. The API is fast.", ["1. The product supports SSO.", "2. The API is fast."], []),
+    ("1. install the CLI first.", ["1. install the CLI first."], []),
+    ("1. The product supports SSO.", ["1. The product supports SSO."], [0]),
+    ("1. The product supports SSO. 2. The API is fast.", ["1. The product supports SSO.", "2. The API is fast."], [0, 1]),
     ("Steps: 1. Install the CLI.", ["Steps: 1. Install the CLI."], [0]),
     ("We have 12. The rest are pending.", ["We have 12. The rest are pending."], [0]),
     # Company suffixes (QA R14) split before a capitalized word; unclear.
@@ -247,9 +248,11 @@ def test_period_boundary(word, next_word, expected):
     assert period_boundary(word, next_word) == expected
 
 
-def test_list_marker_at_sentence_start_continues():
-    assert period_boundary("1.", "The", sentence_start=True) == CONTINUE
-    assert period_boundary("1.", "The", sentence_start=False) == LIKELY_CONTINUE
+def test_list_marker_at_sentence_start():
+    assert period_boundary("1.", "install", sentence_start=True) == CONTINUE
+    assert period_boundary("1.", "install", sentence_start=False) == LIKELY_CONTINUE
+    # Codex thermo r7: "99. Is that good?" may be a score before a question.
+    assert period_boundary("99.", "Is", sentence_start=True) == LIKELY_CONTINUE
 
 
 def test_every_fixed_phrase_starts_a_new_sentence():
@@ -276,7 +279,7 @@ def test_sentence_with_a_mid_sentence_abbreviation_is_selectable():
         "Is it live in the U.S.?",
         "We launched in 2021.",
         "Our team has 12.",
-        "1. The product supports SSO.",
+        "1. install the CLI first.",
         "Built by j. smith in 2021.",
         "Use a queue, e.g. Postgres or Redis.",
     ]:
@@ -327,8 +330,9 @@ def test_insert_rejects_a_sentence_with_an_unclear_boundary(passage):
 def test_list_marker_is_never_a_claim_by_itself():
     """Codex review r1: "1." must not split off and be quoted as the claim "1"."""
     materials = {"passage_0": material("1. The product supports SSO. 2. The API is fast.")}
-    ok, text, _ = insert_claim_sentence(claim(0), materials)
-    assert ok and text == "1. The product supports SSO"
+    assert split_into_sentences(materials["passage_0"].passage)[0] == "1. The product supports SSO."
+    ok, _, error = insert_claim_sentence(claim(0), materials)
+    assert not ok and error == UNCLEAR_BOUNDARY_REASON
 
 
 def test_prompt_lists_only_selectable_sentences_under_the_new_numbers():
@@ -590,6 +594,18 @@ def test_statement_before_a_question_is_outside_it(post, statement, question):
     assert validate_reply_plan(plan(statement), post) != []
 
 
+def test_score_before_a_question_is_outside_it():
+    """Codex thermo r7."""
+    post = "99. Is that good?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["Is that good?"]
+
+
+def test_url_at_the_end_of_a_quoted_question():
+    """Codex thermo r7 (nit): URL masking stops before closing guillemets."""
+    post = "\u00abHave you tried https://example.com?\u00bb Next."
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["\u00abHave you tried https://example.com?\u00bb"]
+
+
 def test_closing_guillemet_ends_a_statement_before_a_question():
     """Codex thermo r6."""
     post = "\u00abWe launched.\u00bb What do you think?"
@@ -613,7 +629,7 @@ def test_claim_splitter_stays_linear_on_many_initials():
 def test_question_spans_stay_linear_on_many_periods():
     """Codex thermo r1: the word lookup must not rescan the post from the start."""
     def elapsed(n: int) -> float:
-        text = "x. " * n + "J. " * n + "Any tips?"
+        text = "x. " * n + "J. " * n + " " * n + "Dr. " * n + "Smith?"
         started = time.perf_counter()
         question_spans(text)
         return time.perf_counter() - started

@@ -18,7 +18,7 @@ MAX_REASON_CHARS = 200
 # URLs can contain "?" in their query string; that is not a question. Trailing
 # sentence punctuation after a URL ("Have you tried https://example.com?") is
 # not part of the URL and stays visible.
-_URL_RE = re.compile(r"https?://\S+?(?=[.,;:!?？)\]\"'”’]*(?:\s|$))", re.IGNORECASE)
+_URL_RE = re.compile(r"https?://\S+?(?=[.,;:!?？)\]}»\"'”’]*(?:\s|$))", re.IGNORECASE)
 # A sentence ends at a run of terminators (optionally followed by closing
 # quotes or brackets) that is followed by whitespace or the end of the text, or
 # at a newline. "Node.js" and "3.5" do not end a sentence; '?" ' does. A "?"
@@ -38,11 +38,12 @@ _NEXT_WORD_RE = re.compile(r"\s*(\S+)")
 _NON_SPACE_RE = re.compile(r"\S")
 
 
-def _period_continues_sentence(text: str, m: "re.Match[str]", sentence_start: int) -> bool:
+def _period_continues_sentence(text: str, m: "re.Match[str]", first_word_start: int) -> bool:
     """True if boundary m is a single period that clearly does not end the sentence.
 
-    Work is bounded by the lengths of the word before m and the gap after it,
-    so a long post stays linear.
+    `first_word_start` is where the current sentence's first word begins. Work
+    is bounded by the lengths of the word before m and the gap after it, so a
+    long post stays linear.
     """
     if m.group().rstrip(_CLOSERS) != ".":
         return False
@@ -52,20 +53,24 @@ def _period_continues_sentence(text: str, m: "re.Match[str]", sentence_start: in
     word = text[word_start:m.end()]
     following = _NEXT_WORD_RE.match(text, m.end())
     next_word = following.group(1) if following else None
-    first_word = _NON_SPACE_RE.search(text, sentence_start, word_start) is None
-    return period_boundary(word, next_word, sentence_start=first_word) == CONTINUE
+    return period_boundary(word, next_word, sentence_start=word_start <= first_word_start) == CONTINUE
 
 
 def _sentence_spans(text: str) -> List[Tuple[int, int]]:
     spans = []
     start = 0
+    first_word_start = None  # found once per sentence
     for m in _BOUNDARY_RE.finditer(text):
-        if _period_continues_sentence(text, m, start):
+        if first_word_start is None:
+            first = _NON_SPACE_RE.search(text, start)
+            first_word_start = first.start() if first else len(text)
+        if _period_continues_sentence(text, m, first_word_start):
             continue
         end = m.start() if m.group() == "\n" else m.end()
         if text[start:end].strip():
             spans.append((start, end))
         start = m.end()
+        first_word_start = None
     if text[start:].strip():
         spans.append((start, len(text)))
     return spans

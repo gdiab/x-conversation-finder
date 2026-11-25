@@ -15,10 +15,11 @@ period_boundary classifies a word-final period by the word and the next word:
   abbreviation (titles and Latin abbreviations, which do not end sentences)
   before a digit or a capitalized word that is not a sentence starter
   ("Dr. Smith", "e.g. Postgres", "approx. 10"); after a list marker at the
-  start of a sentence ("1. The product ...").
+  start of a sentence before a lowercase word ("1. install the CLI").
 - LIKELY_END / LIKELY_CONTINUE: unclear. Every other abbreviation, initial or
   list marker before a capitalized word, digit or symbol ("Acme Inc. 2024
-  revenue doubled"), and a list marker inside a sentence. "U.S. We ship" is probably two
+  revenue doubled"), a list marker inside a sentence, and a list marker
+  before a capitalized word ("99. Is that good?" may be a score). "U.S. We ship" is probably two
   sentences, but "the U.S. The Netherlands, and France" is one; "J. Smith" is
   probably one, but "Plan B. Customers pay" is two; company suffixes (QA R14)
   are probably sentence ends. LIKELY_END after terminal abbreviations
@@ -188,7 +189,9 @@ def period_boundary(word: str, next_word: Optional[str], *, sentence_start: bool
         # No mid-sentence "2021." in English: ends before a word of either case.
         return END if first.isalpha() else LIKELY_CONTINUE
     if kind == "list_marker":
-        return CONTINUE if sentence_start else LIKELY_CONTINUE
+        # "1. install the CLI" opens a list item; "99. Is that good?" may be a
+        # score before a question, so a capitalized word is unclear.
+        return CONTINUE if sentence_start and first.islower() else LIKELY_CONTINUE
     if first.islower():
         return CONTINUE
     if not first.isalpha():
