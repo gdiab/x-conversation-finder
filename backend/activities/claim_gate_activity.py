@@ -21,7 +21,23 @@ import unicodedata
 from backend.models import FounderMaterial, Segment, ClaimGateResult
 from backend.gate.non_claim_set import is_closed_set_non_claim, normalize_for_closed_set
 # ends_with_abbreviation is re-exported: callers import it from this module.
-from backend.gate.sentence_boundary import ends_with_abbreviation, period_ends_sentence
+from backend.gate.sentence_boundary import (
+    END,
+    SPLITTER_VERSION,
+    ends_with_abbreviation,
+    has_ambiguous_boundary,
+    period_boundary,
+)
+from backend.gate.legacy_split_v1 import split_into_sentences_v1
+
+REFERENT_REASON = "Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above)"
+ABBREVIATION_REASON = "Sentence ends with an abbreviation (not selectable)"
+# No "abbreviation" in this text: the review card maps that word to the
+# ends-with-an-abbreviation explanation.
+AMBIGUOUS_BOUNDARY_REASON = (
+    "Sentence has an unclear sentence boundary inside (a period after U.S., etc., "
+    "an initial or a number, before a capitalized word), so it may be two sentences (not selectable)"
+)
 
 
 @dataclass
@@ -37,23 +53,23 @@ def split_into_sentences(text: str) -> List[str]:
     """
     Split text into sentences (ADR-0006 claim gate contract).
 
-    Deterministic rule: a word ending in '.', '!' or '?' ends a sentence when
-    another word follows, except where backend.gate.sentence_boundary says a
-    period does not end one:
-    - QA R14: company suffixes (Inc. Ltd. Co. Corp.) end a sentence only when
-      the next word is capitalized.
+    Deterministic rule: a word ending in '!' or '?' ends a sentence when
+    another word follows. A word ending in '.' ends one only where
+    backend.gate.sentence_boundary.period_boundary says END:
+    - QA R14: company suffixes (Inc. Ltd. Co. Corp.) end a sentence when the
+      next word is capitalized.
     - QA R13: prefix abbreviations (Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e.
-      approx.) never end a sentence.
-    - Issue #10: etc., St., Ph.D., dotted initialisms (U.S.A.), single-letter
-      initials (J.) and numbers (2021., 1.) end a sentence only when the next
-      word clearly starts a new one. Decimals (S-5: 99.99%) never split.
+      approx.) and initials (J.) never end a sentence here.
+    - Issue #10: etc., St., Ph.D., dotted initialisms (U.S.A.) and numbers
+      (2021.) end a sentence only when the next word clearly starts a new one.
+      Decimals (S-5: 99.99%) never split; a list marker ("1.") at the start of
+      a sentence stays with it.
+    An AMBIGUOUS period does not split; claim_selectability_error rejects the
+    resulting sentence, as it rejects one that ends in an abbreviation.
 
-    A sentence that ends in an abbreviation is NOT selectable as a claim
-    (ends_with_abbreviation).
-
-    Sentence indices are positions in this split. Changing a split point
-    changes the indices claim segments reference; see ADR-0006 (2026-11-21
-    amendment, item 2).
+    Sentence indices are positions in this split (SPLITTER_VERSION). Changing
+    a split point changes the indices claim segments reference; see ADR-0006
+    (2026-11-21 amendment, item 2).
 
     Returns non-empty sentences.
     """
@@ -71,8 +87,10 @@ def split_into_sentences(text: str) -> List[str]:
         if next_word is None:
             # End of text: the remainder is added below.
             continue
-        if token.endswith('.') and not period_ends_sentence(token, next_word):
-            continue
+        if token.endswith('.'):
+            sentence_start = ''.join(current[:-1]).strip() == ''
+            if period_boundary(token, next_word, sentence_start=sentence_start) != END:
+                continue
         sentence = ''.join(current).strip()
         if sentence:
             result.append(sentence)
@@ -195,6 +213,43 @@ def has_unresolved_referent(text: str) -> bool:
     return False
 
 
+def claim_selectability_error(sentence: str) -> str:
+    """Why a passage sentence can never be quoted as a claim; empty if it can.
+
+    The same checks on every path: model drafts (insert_claim_sentence), the
+    founder-edit re-gate's passage match, and the numbered list in the
+    drafting prompt.
+    """
+    if has_unresolved_referent(sentence):
+        return REFERENT_REASON
+    if ends_with_abbreviation(sentence):
+        return ABBREVIATION_REASON
+    if has_ambiguous_boundary(sentence):
+        return AMBIGUOUS_BOUNDARY_REASON
+    return ""
+
+
+def _splitter_version_error(segment: Segment, passage: str, sentence: str) -> str:
+    """Refuse an index numbered under a different sentence split (issue #10).
+
+    A segment drafted before splitter versions existed (None) is accepted only
+    if the frozen pre-#10 split gives its index the same text. Otherwise the
+    gate would quote a different founder sentence from the one drafted.
+    """
+    if segment.splitter_version == SPLITTER_VERSION:
+        return ""
+    if segment.splitter_version is None:
+        legacy = split_into_sentences_v1(passage)
+        idx = segment.sentence_index
+        if 0 <= idx < len(legacy) and normalize_text(legacy[idx]) == normalize_text(sentence):
+            return ""
+    return (
+        f"sentence_index was numbered under sentence splitter version "
+        f"{segment.splitter_version or 1}, and the current version {SPLITTER_VERSION} "
+        f"numbers this passage differently; redraft"
+    )
+
+
 def insert_claim_sentence(
     segment: Segment,
     materials_by_id: Dict[str, FounderMaterial]
@@ -207,6 +262,8 @@ def insert_claim_sentence(
     unresolved referents are not selectable.
     
     QA R13: Sentences ending in known abbreviations are not selectable.
+    Issue #10: nor are sentences with an unclear boundary inside, and the
+    index must count in the current split (_splitter_version_error).
     
     Returns (success, inserted_text, error_reason).
     """
@@ -227,13 +284,14 @@ def insert_claim_sentence(
     
     sentence = sentences[segment.sentence_index]
     
-    # (B) Check for unresolved referents - sentence must stand alone
-    if has_unresolved_referent(sentence):
-        return False, "", "Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above)"
+    version_error = _splitter_version_error(segment, passage, sentence)
+    if version_error:
+        return False, "", version_error
     
-    # QA R13: Check for abbreviation ending - not selectable
-    if ends_with_abbreviation(sentence):
-        return False, "", "Sentence ends with an abbreviation (not selectable)"
+    # (B) referent, QA R13 abbreviation ending, issue #10 unclear boundary
+    error = claim_selectability_error(sentence)
+    if error:
+        return False, "", error
     
     # S1 (QA R14): Trim trailing punctuation for flow, but preserve '?' for questions
     # A question "Is it fast?" should be inserted as "Is it fast?", not "Is it fast."
@@ -393,28 +451,18 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
                 activity.logger.warning(f"Sentence '{sentence[:50]}...' terminal punctuation mismatch")
                 continue
             
-            # S2: Apply referent rule
-            if has_unresolved_referent(sent_text):
+            # S2: Apply the model path's selectability rules (referent,
+            # abbreviation ending, issue #10 unclear boundary)
+            error = claim_selectability_error(sent_text)
+            if error:
                 results.append(SentenceGateResult(
                     sentence=sentence,
                     passed=False,
                     kind="claim",
-                    reason="Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above)",
+                    reason=error,
                     kept_segment=False
                 ))
-                activity.logger.warning(f"Sentence '{sentence[:50]}...' has unresolved referent")
-                continue
-            
-            # S2: Apply abbreviation-ending rule
-            if ends_with_abbreviation(sent_text):
-                results.append(SentenceGateResult(
-                    sentence=sentence,
-                    passed=False,
-                    kind="claim",
-                    reason="Sentence ends with an abbreviation (not selectable)",
-                    kept_segment=False
-                ))
-                activity.logger.warning(f"Sentence '{sentence[:50]}...' ends with abbreviation")
+                activity.logger.warning(f"Sentence '{sentence[:50]}...' not selectable: {error}")
                 continue
             
             # S2: Passed all checks
@@ -605,7 +653,9 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
                 kind="claim",
                 text=inserted_text,
                 source_passage_id=seg.source_passage_id,
-                sentence_index=seg.sentence_index
+                sentence_index=seg.sentence_index,
+                # The index was checked against the current split
+                splitter_version=SPLITTER_VERSION,
             )
             processed_segments.append(processed_seg)
             
