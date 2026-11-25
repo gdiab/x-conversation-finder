@@ -9,7 +9,9 @@ import json
 from typing import Any, List, Optional
 
 from openai import AsyncOpenAI
+from temporalio.exceptions import ApplicationError
 
+from backend.budget import current_inference_meter, prompt_token_bound, request_never_sent
 from backend.config import get_settings
 from backend.models import (
     Evidence,
@@ -167,13 +169,99 @@ def _parse_plan(result: object) -> dict:
 class PlainReplyAgent(ReplyAgentPort):
     """Plain LLM adapter - baseline implementation."""
     
-    def __init__(self, openai_client: Optional[AsyncOpenAI] = None):
+    def __init__(
+        self,
+        openai_client: Optional[AsyncOpenAI] = None,
+        require_budget_meter: Optional[bool] = None,
+    ):
+        """openai_client: inject a client (tests use stubs); None builds the real one.
+        An injected AsyncOpenAI client gets its SDK retries switched off too.
+
+        require_budget_meter: refuse a call made outside a metered activity
+        attempt (backend.budget.meter_inference), so a paid request can never
+        skip the daily cap and kill switch. True unless a caller opts out
+        explicitly (adapter unit tests with stub clients).
+        """
         settings = get_settings()
+        self._require_budget_meter = True if require_budget_meter is None else require_budget_meter
+        if isinstance(openai_client, AsyncOpenAI):
+            openai_client = openai_client.with_options(max_retries=0)
         self.client = openai_client or AsyncOpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            # Issue #8: no hidden SDK retries. Temporal retries the activity, and
+            # each attempt's request is reserved and counted on its own; an SDK
+            # retry after a timeout would be a second paid request nobody counted.
+            max_retries=0,
         )
         self.model = settings.openai_model
+        self._max_output_tokens = {
+            "research": settings.research_max_output_tokens,
+            "plan": settings.plan_max_output_tokens,
+            "draft": settings.draft_max_output_tokens,
+        }
+    
+    async def _complete(self, call: str, messages: list[dict], temperature: float):
+        """Send one JSON-mode chat completion, metered against the daily budget.
+
+        Issue #8: inside a metered activity attempt (backend.budget.meter_inference)
+        the call is reserved right before the request, sized from an upper bound
+        on the prompt's tokens and the max output tokens sent with it, then
+        reconciled to the reported usage. A failed request (any error status,
+        read timeout, cancellation) keeps its reservation counted:
+        openai_base_url may be a gateway, so a status does not prove that no
+        upstream work was billed. Only a connection that was never established
+        (backend.budget.request_never_sent) releases it.
+        """
+        max_output_tokens = self._max_output_tokens[call]
+        meter = current_inference_meter()
+        if meter is None and self._require_budget_meter:
+            raise ApplicationError(
+                f"Unmetered {call} inference call refused: paid calls must run "
+                "inside backend.budget.meter_inference()",
+                non_retryable=True,
+                type="UnmeteredInferenceCall",
+            )
+        reservation = (
+            meter.reserve(prompt_token_bound(messages), max_output_tokens) if meter else None
+        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_completion_tokens=max_output_tokens,
+                # Without JSON mode, models wrap long answers in ```json fences,
+                # which json.loads rejects.
+                response_format={"type": "json_object"},
+            )
+        except Exception as e:
+            if reservation and request_never_sent(e):
+                reservation.release()
+            raise
+        if reservation:
+            usage = getattr(response, "usage", None)
+            reservation.settle(
+                getattr(usage, "prompt_tokens", None) if usage else None,
+                getattr(usage, "completion_tokens", None) if usage else None,
+            )
+        return response
+    
+    def _raise_if_truncated(self, call: str, response) -> None:
+        """Fail without retry when the output hit max_completion_tokens.
+
+        The JSON is cut off, and a retry sends the same prompt with the same
+        limit, paying again for the same failure. The call is already counted.
+        Raise the call's limit (settings: <call>_max_output_tokens) instead.
+        """
+        choices = getattr(response, "choices", None) or []
+        if choices and getattr(choices[0], "finish_reason", None) == "length":
+            raise ApplicationError(
+                f"{call} output truncated at {self._max_output_tokens[call]} tokens; "
+                f"raise {call.upper()}_MAX_OUTPUT_TOKENS",
+                non_retryable=True,
+                type="InferenceOutputTruncated",
+            )
     
     async def research(
         self,
@@ -223,17 +311,15 @@ Return a JSON object with these keys:
 
 Most posts are not reply opportunities. Do not stretch a post to fit the brief."""
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        response = await self._complete(
+            "research",
+            [
                 {"role": "system", "content": "You are a research assistant. Return valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
-            # Without JSON mode, models wrap long answers in ```json fences,
-            # which json.loads rejects.
-            response_format={"type": "json_object"},
         )
+        self._raise_if_truncated("research", response)
         
         result = json.loads(response.choices[0].message.content)
         if not isinstance(result, dict):
@@ -311,16 +397,17 @@ Return a JSON object with exactly these keys:
   read as a pitch.
 - mention_product_reason: one line, at most {MAX_REASON_CHARS} characters, explaining that decision.{feedback_text}"""
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        response = await self._complete(
+            "plan",
+            [
                 {"role": "system", "content": "You plan replies to social posts. Return valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
-            # JSON mode returns a bare object; see research() above.
-            response_format={"type": "json_object"},
         )
+        # A truncated plan is a configuration error, not malformed model output:
+        # re-planning with the same limit would pay for the same truncation.
+        self._raise_if_truncated("plan", response)
 
         try:
             result = json.loads(response.choices[0].message.content)
@@ -433,16 +520,15 @@ Example (shape only; pick phrases and the sentence for this post):
 Be conversational and honest. Never invent features. Reference founder material by sentence number only.
 Max 280 chars total after text insertion."""
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        response = await self._complete(
+            "draft",
+            [
                 {"role": "system", "content": "You are a helpful assistant. Return valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            # JSON mode returns a bare object; see research() above.
-            response_format={"type": "json_object"},
         )
+        self._raise_if_truncated("draft", response)
         
         result = json.loads(response.choices[0].message.content)
         

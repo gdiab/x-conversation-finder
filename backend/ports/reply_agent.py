@@ -3,6 +3,12 @@ ReplyAgentPort - abstraction for reply generation.
 
 Per ADR-0003: the Agent Kit sits behind this port.
 The plain activity adapter is the baseline and default.
+
+Budget (issue #8): an adapter that makes paid inference calls reserves each one
+through backend.budget.current_inference_meter() right before the request,
+sized from an upper bound on the prompt's tokens and the max output tokens it
+sends, and settles it after (see PlainReplyAgent._complete). A failed request
+stays counted. The activities open the meter.
 """
 
 from abc import ABC, abstractmethod
@@ -51,7 +57,8 @@ class ReplyAgentPort(ABC):
         `feedback` carries the previous attempt's validation errors when the
         plan is re-requested. Adapters must not raise on malformed model output:
         return what was parsed (unknown or missing values as ""/None) so that
-        validation records the reasons.
+        validation records the reasons. Output cut off at the max output tokens
+        is a configuration error and may raise (issue #8).
         """
         pass
     

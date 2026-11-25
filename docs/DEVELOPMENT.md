@@ -155,6 +155,45 @@ This runs all replay tests with fake adapters. No API keys needed.
 - **ADR-0005:** Polling with spend limits
 - **ADR-0006:** Evidence trail and computed confidence
 
+### Budget accounting (issue #8)
+
+`backend/budget.py` keeps the ADR-0005 daily caps and kill switch. Each paid
+call is counted per Temporal activity attempt:
+
+- Reservations are keyed by workflow, run, activity and **attempt** (and a call
+  index for inference). A retry after a lost completion makes a new reservation,
+  so both paid calls are counted.
+- Inference calls reserve inside the adapter, right before the request, sized
+  from an upper bound on the prompt's tokens (`prompt_token_bound`: its UTF-8
+  bytes, since a byte-level BPE token covers at least one byte) plus the call's
+  max output tokens (`RESEARCH_MAX_OUTPUT_TOKENS`, `PLAN_MAX_OUTPUT_TOKENS`,
+  `DRAFT_MAX_OUTPUT_TOKENS`, sent as `max_completion_tokens`). The activity opens
+  the meter with `meter_inference()`; an adapter that makes a paid call reserves
+  through `current_inference_meter()`. Each call is then reconciled to the
+  reported usage; missing or partial usage keeps the full reservation.
+- `PlainReplyAgent` refuses a call made outside a metered activity attempt
+  (`UnmeteredInferenceCall`); adapter unit tests with stub clients opt out with
+  `require_budget_meter=False`. An injected `AsyncOpenAI` client gets
+  `max_retries=0` too.
+- A failed inference request stays counted at its reservation, whatever the
+  error: `OPENAI_BASE_URL` may be a gateway, so a status proves nothing about
+  upstream billing. An X request that X refused with a 4xx status (including
+  429, except 408) is released: X bills per post returned and the X base URL is
+  fixed in code. A request whose connection was never established
+  (`httpx.ConnectError`/`ConnectTimeout`, also as the cause of an OpenAI SDK
+  error) is released for both. 408, 5xx, read timeouts and crashes stay counted.
+- X search reserves `billable_max_results(max_results)`: the HTTP adapter clamps
+  the request to X's 10-100 range, and the reservation covers what is sent.
+- A reservation that is already closed refuses to authorize another request
+  (`ReservationClosed`). `lookup_post` counts 1 read per attempt even when it returns None:
+  the HTTP adapter returns None for a 404 and for post data it cannot convert.
+- Output that hits the max output tokens (`finish_reason == "length"`) fails
+  research, plan and draft without retry (`InferenceOutputTruncated`); the call
+  stays counted.
+- The OpenAI client runs with `max_retries=0`: Temporal's retry policy owns
+  retries, so each retried request is reserved and counted.
+- `FakeReplyAgent` makes no paid calls and reserves nothing.
+
 ## Fake Adapters
 
 For testing and CI, the system uses fake adapters:

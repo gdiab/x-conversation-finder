@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     inference_input_token_cost_usd: float = 0.00000015
     inference_output_token_cost_usd: float = 0.0000006
     
+    # Max output tokens per inference call (issue #8). Sent with each request as
+    # max_completion_tokens, so the provider enforces it, and used to size the
+    # budget reservation (prompt estimate + this). Each is several times the
+    # call's usual JSON output. A reasoning model counts its reasoning tokens
+    # against this limit too; raise these before switching to one.
+    research_max_output_tokens: int = 1500
+    plan_max_output_tokens: int = 400
+    draft_max_output_tokens: int = 400
+    
     # Database (B3: absolute path so worker and API resolve to same file)
     database_url: str = ""
     

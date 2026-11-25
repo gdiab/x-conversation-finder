@@ -94,7 +94,10 @@ async def research_and_assess(item: dict) -> tuple[Evidence, JsonModeCompletions
         **item["model"],
     }
     completions = JsonModeCompletions(payload)
-    agent = PlainReplyAgent(openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    agent = PlainReplyAgent(
+        openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        require_budget_meter=False,
+    )
     post = make_post(item)
     evidence = await agent.research(post, TOPIC, BRIEF, "key")
     return assess_reply_fit(evidence, post, BRIEF, now=NOW), completions
@@ -582,7 +585,10 @@ async def test_malformed_founder_materials_skip_instead_of_failing(payload):
         "post_kind": "question", "brief_problem_span": text,
         "in_others_thread": False, "is_vendor_post": False, **payload,
     })
-    agent = PlainReplyAgent(openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    agent = PlainReplyAgent(
+        openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        require_budget_meter=False,
+    )
     post = _post(text=text)
     evidence = assess_reply_fit(await agent.research(post, TOPIC, BRIEF, "k"), post, BRIEF, now=NOW)
     assert evidence.founder_materials == []
@@ -592,7 +598,10 @@ async def test_malformed_founder_materials_skip_instead_of_failing(payload):
 @pytest.mark.asyncio
 async def test_non_object_json_is_research_incomplete():
     completions = JsonModeCompletions(["not", "an", "object"])
-    agent = PlainReplyAgent(openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    agent = PlainReplyAgent(
+        openai_client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        require_budget_meter=False,
+    )
     post = _post(text="How do you keep a record of what each coding agent did?")
     evidence = assess_reply_fit(await agent.research(post, TOPIC, BRIEF, "k"), post, BRIEF, now=NOW)
     assert evidence.reply_fit.skip_rule == "research_incomplete"

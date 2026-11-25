@@ -2,13 +2,42 @@
 
 from dataclasses import dataclass
 from typing import Optional, List
+
+import httpx
 from temporalio import activity
 
 from backend.models import Post
 from backend.ports import XClientPort
-from backend.budget import reserve_x_budget, reconcile_x_reads, BudgetExceeded
+from backend.budget import (
+    reserve_x_budget,
+    reconcile_x_reads,
+    release_x_reservation,
+    request_never_sent,
+    BudgetExceeded,
+)
 from backend.config import get_settings
 from temporalio.exceptions import ApplicationError
+
+
+def x_billed_nothing(exc: BaseException) -> bool:
+    """True when X returned nothing billable for the request (issue #8): X
+    refused it with a 4xx status, or the connection was never established.
+
+    X bills per post returned, and a refused request returns none, so the
+    attempt's reservation is released. The HTTP adapter's base URL is fixed to
+    the X API, so a 4xx comes from X itself, not from a gateway. The HTTP adapter raises
+    httpx.HTTPStatusError, or a RateLimitError ApplicationError for 429.
+    408, 5xx, read timeouts and other errors return False: the request may
+    have been served, so the reservation stays counted.
+    """
+    if request_never_sent(exc):
+        return True
+    if isinstance(exc, ApplicationError):
+        return exc.type == "RateLimitError"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return 400 <= status < 500 and status != 408
+    return False
 
 
 @dataclass
@@ -67,7 +96,9 @@ class XActivities:
         Search recent posts on X.
         
         Idempotent: same query + since_id returns cached results within 24h UTC.
-        Cost tracking: updates the daily spend ledger.
+        Cost tracking: updates the daily spend ledger. Each attempt reserves and
+        reconciles on its own (issue #8); an attempt X answered with an error
+        status is released.
         Budget enforcement: checks daily cap before calling.
         Poll interval validation: HTTP adapter rejects sub-1h and negative intervals (item 3).
         """
@@ -99,9 +130,12 @@ class XActivities:
         
         # Reserve budget atomically (NB3: reserve-then-commit)
         # This raises BudgetExceeded if cap would be exceeded
+        # Issue #8: reserve what the request can be billed for, which the HTTP
+        # adapter clamps to X's 10-100 range, not the raw max_results.
+        reserved_reads = self._x_client.billable_max_results(input.max_results)
         try:
             reserved_cost, reservation_date = reserve_x_budget(
-                reads_needed=input.max_results,
+                reads_needed=reserved_reads,
                 cost_per_read=settings.x_post_read_cost,
                 workflow_id=activity.info().workflow_id,
                 workflow_run_id=activity.info().workflow_run_id,
@@ -111,16 +145,28 @@ class XActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        posts, newest_id = await self._x_client.search_recent(
-            query=input.query,
-            since_id=input.since_id,
-            max_results=input.max_results,
-        )
+        try:
+            posts, newest_id = await self._x_client.search_recent(
+                query=input.query,
+                since_id=input.since_id,
+                max_results=input.max_results,
+            )
+        except Exception as e:
+            if x_billed_nothing(e):
+                release_x_reservation(
+                    reserved_reads=reserved_reads,
+                    reservation_date=reservation_date,
+                    workflow_id=activity.info().workflow_id,
+                    workflow_run_id=activity.info().workflow_run_id,
+                    activity_id=activity.info().activity_id,
+                    cost_per_read=settings.x_post_read_cost,
+                )
+            raise
         
         # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
         actual_reads = len(posts)
         actual_cost = reconcile_x_reads(
-            reserved_reads=input.max_results,
+            reserved_reads=reserved_reads,
             actual_reads=actual_reads,
             reservation_date=reservation_date,
             workflow_id=activity.info().workflow_id,
@@ -129,9 +175,9 @@ class XActivities:
             cost_per_read=settings.x_post_read_cost,
         )
         
-        if actual_reads != input.max_results:
+        if actual_reads != reserved_reads:
             activity.logger.info(
-                f"Reserved {input.max_results} reads, got {actual_reads} posts, "
+                f"Reserved {reserved_reads} reads, got {actual_reads} posts, "
                 f"reconciled to ${actual_cost:.4f}"
             )
         
@@ -150,7 +196,9 @@ class XActivities:
         
         Idempotent: same post_id is cached.
         Returns None if post is deleted (404).
-        Budget: Records 1 post read.
+        Budget: 1 post read per attempt, also when None is returned (the adapter
+        cannot tell a 404 from unconvertible post data). An attempt X refused
+        with a 4xx status is released (issue #8).
         """
         activity.logger.info(f"Looking up post {input.post_id} (key: {input.idempotency_key})")
         
@@ -169,9 +217,33 @@ class XActivities:
             activity.logger.error(f"Budget exceeded: {e}")
             raise
         
-        post = await self._x_client.lookup_post(input.post_id)
+        try:
+            post = await self._x_client.lookup_post(input.post_id)
+        except Exception as e:
+            if x_billed_nothing(e):
+                release_x_reservation(
+                    reserved_reads=1,
+                    reservation_date=reservation_date,
+                    workflow_id=activity.info().workflow_id,
+                    workflow_run_id=activity.info().workflow_run_id,
+                    activity_id=activity.info().activity_id,
+                    cost_per_read=settings.x_post_read_cost,
+                )
+            raise
         
-        # Note: lookup_post always bills exactly 1 read, so no reconciliation needed
+        # Issue #8: close the reservation at 1 read. None is kept counted too:
+        # the HTTP adapter returns None both for a 404 and for a response whose
+        # post data it could not convert (e.g. no author expansion), which X
+        # billed. Only a refused request (4xx exception, above) is released.
+        reconcile_x_reads(
+            reserved_reads=1,
+            actual_reads=1,
+            reservation_date=reservation_date,
+            workflow_id=activity.info().workflow_id,
+            workflow_run_id=activity.info().workflow_run_id,
+            activity_id=activity.info().activity_id,
+            cost_per_read=settings.x_post_read_cost,
+        )
         if post:
             activity.logger.info(f"Found post {input.post_id} by @{post.author.username}, cost ${cost_usd:.4f}")
         else:
@@ -193,7 +265,7 @@ class XActivities:
         )
         
         settings = get_settings()
-        max_results = 10
+        max_results = self._x_client.billable_max_results(10)
         
         # Reserve budget atomically (S-2: check_followup must reserve)
         try:
@@ -210,10 +282,22 @@ class XActivities:
         
         # Search for posts in the conversation thread
         query = f"conversation_id:{input.reply_post_id}"
-        posts, _ = await self._x_client.search_recent(
-            query=query,
-            max_results=max_results,
-        )
+        try:
+            posts, _ = await self._x_client.search_recent(
+                query=query,
+                max_results=max_results,
+            )
+        except Exception as e:
+            if x_billed_nothing(e):
+                release_x_reservation(
+                    reserved_reads=max_results,
+                    reservation_date=reservation_date,
+                    workflow_id=activity.info().workflow_id,
+                    workflow_run_id=activity.info().workflow_run_id,
+                    activity_id=activity.info().activity_id,
+                    cost_per_read=settings.x_post_read_cost,
+                )
+            raise
         
         # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
         actual_reads = len(posts)
