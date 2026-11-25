@@ -171,7 +171,8 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
           <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
             Short names of features your brief describes, separated by commas (at most 6 words each).
             In written drafts, a reply sentence that uses one of them is checked against your brief.
-            Key features are read only from this field, not from the brief.
+            Key features are read only from this field, not from the brief. Enter a second spelling
+            of a feature as its own entry.
           </div>
         </div>
 

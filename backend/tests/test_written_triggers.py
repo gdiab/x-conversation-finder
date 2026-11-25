@@ -277,21 +277,66 @@ def test_a_key_feature_is_matched_as_normalized_whole_words():
     ("Safe house", "Safe houses are rare."),
     ("Bus topology", "Buses topology is odd wording."),
     ("Team address", "Team addresses change."),
+    # No word is too short to have a plural
+    ("Web UI", "Web UIs support approvals."),
+    ("Web UIs", "The web UI supports approvals."),
+    ("User ID", "User IDs are enough."),
+    ("User IDs", "A user ID is enough."),
+    ("PR check", "PRs checks is odd wording."),
+    ("Sign-up", "Sign-ups doubled."),
+    ("OS image", "OSes image is odd wording."),
+    ("UI", "The UI's layout helps."),  # a possessive: "ui", then "s"
 ])
 def test_a_key_feature_matches_its_plain_plural_and_singular(term, sentence):
     """Whichever form the founder entered: -s, -es (also after s, ss and us) and -ies."""
     assert _matches(sentence, TRIGGER_FEATURE_TERM, terms=[term]) == [term]
 
 
+def test_a_plural_of_a_key_feature_forces_the_check():
+    """The trigger is what makes code require a verdict from the checker."""
+    from backend.gate.brief import split_brief
+    from backend.gate.written_check import prepare_check
+
+    brief = split_brief("The web UI supports approvals.")
+    prepared = prepare_check("Web UIs support approvals.", brief, "Acme", [], ["Web UI"])
+
+    assert prepared.needs_checker
+    assert prepared.request().must_verify == [True]
+    assert prepare_check("Web UIs support approvals.", brief, "Acme", [], []).request().must_verify == [False]
+
+
 @pytest.mark.parametrize("term,sentence", [
     ("Delivery status", "The delivery state stays visible."),
     ("Audit log", "We audit login attempts by hand."),
-    ("It", "Its shape is odd."),  # a stem keeps at least three letters
-    ("Bus", "Bu is not a word."),
     ("Replay", "Replaying events by hand gets old fast."),
+    ("UI", "The build is quick."),  # "ui" inside "build" and "quick" is not the word
+    ("ID", "I did the same thing."),
 ])
 def test_plural_folding_does_not_match_other_words(term, sentence):
     assert TRIGGER_FEATURE_TERM not in _kinds(sentence, terms=[term])
+
+
+def test_another_spelling_of_a_key_feature_is_another_entry():
+    """Whole words in the order entered: a closed compound or "and" for "&"
+    is a different term, which the founder lists as its own key feature."""
+    assert TRIGGER_FEATURE_TERM not in _kinds("Realtime monitoring helps.", terms=["Real-time monitoring"])
+    assert TRIGGER_FEATURE_TERM not in _kinds("Drag and drop helps.", terms=["Drag & drop"])
+    assert _matches(
+        "Realtime monitoring helps.", TRIGGER_FEATURE_TERM, terms=["Real-time monitoring", "Realtime monitoring"]
+    ) == ["Realtime monitoring"]
+    # Punctuation between the words is not part of the term
+    assert _matches("Real time monitoring helps.", TRIGGER_FEATURE_TERM, terms=["Real-time monitoring"]) == [
+        "Real-time monitoring"
+    ]
+    assert _matches("Drag & drop helps.", TRIGGER_FEATURE_TERM, terms=["Drag and drop"]) == []
+
+
+def test_plural_folding_may_match_an_unrelated_word_and_that_only_adds_a_check():
+    """The price of having no word list: "it" and "its" share a form. The
+    feature-term trigger exempts nothing, so the sentence is only checked."""
+    hits = find_triggers("Its shape is odd.", NAME, ALIASES, ["It"])
+
+    assert [(h.trigger, h.match) for h in hits] == [(TRIGGER_FEATURE_TERM, "It")]
 
 
 def test_the_product_name_is_not_plural_folded():

@@ -152,24 +152,28 @@ def _word_spans(folded: str) -> List[Tuple[str, int, int]]:
 
 
 def _plural_forms(word: str) -> frozenset:
-    """The word, and every word it may be the plain plural of: without its
-    "s", without its "es", and with "ies" read as "y" (a stem keeps at least
-    three letters). Two words are the same term word when their forms share
-    one, so "delivery" matches "deliveries", "status" matches "statuses",
-    "process" matches "processes" and "house" matches "houses", whichever of
-    the two the founder entered.
+    """The word, and every word it may be the regular plural of: without its
+    "s", without its "es", and with "ies" read as "y". Two words are the same
+    term word when their forms share one, so "delivery" matches "deliveries",
+    "status" matches "statuses", "process" matches "processes", "house"
+    matches "houses" and "UI" matches "UIs", whichever of the two the founder
+    entered.
 
-    A tolerance, not a stemmer: no rule decides which reading of "-ses" is
-    right, so both are kept. It can match two unrelated words ("new" and
-    "news"); that only adds a sentence to the checked set.
+    A tolerance, not a stemmer. No rule decides which reading of a word is
+    right, and no word is too short to have a plural ("ID", "PR"), so every
+    reading is kept. That also matches unrelated words ("new" and "news",
+    "it" and "its"). Such a match only adds a sentence to the checked set: a
+    feature term exempts nothing and removes no check. A plural that changes
+    the stem ("analyses", "indices", "quizzes") is not covered.
     """
     forms = {word}
-    if len(word) > 4 and word.endswith("ies"):
+    if word.endswith("ies"):
         forms.add(word[:-3] + "y")
-    if len(word) > 4 and word.endswith("es"):
+    if word.endswith("es"):
         forms.add(word[:-2])
-    if len(word) > 3 and word.endswith("s"):
+    if word.endswith("s"):
         forms.add(word[:-1])
+    forms.discard("")  # "s" or "es" alone is not the plural of nothing
     return frozenset(forms)
 
 
