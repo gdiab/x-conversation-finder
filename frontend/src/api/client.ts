@@ -53,6 +53,8 @@ export interface ReviewCard {
     created_at: string;
     like_count: number;
     reply_count: number;
+    // issue #9: set when the post was deleted on X and its text was removed
+    text_removed?: boolean;
   };
   evidence: {
     matched_topic: string;
@@ -211,7 +213,19 @@ export async function approveReview(
   
   if (!response.ok) {
     const errorText = await response.text();
+    // issue #9: 409 means the target post was removed and the review skipped
+    if (response.status === 409) {
+      throw new PostRemovedError(errorText);
+    }
     throw new Error(`Failed to approve review: ${response.statusText}. ${errorText}`);
+  }
+}
+
+/** Approve found the target post deleted on X; the review is now skipped (issue #9). */
+export class PostRemovedError extends Error {
+  constructor(detail: string) {
+    super(`Post removed: the post was deleted on X, so this review was skipped. ${detail}`);
+    this.name = 'PostRemovedError';
   }
 }
 

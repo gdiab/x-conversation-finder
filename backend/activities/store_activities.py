@@ -13,6 +13,10 @@ from backend.models.reply_plan import reply_plan_card_fields
 # Review workflow's get_card query uses the same value.
 POST_TEXT_REMOVED = "[removed - post deleted]"
 
+# Issue #9: skip reason for a pending Review whose target post returned 404 on
+# the re-fetch at approve time. The frontend shows "Post removed" for it.
+POST_REMOVED_SKIP_REASON = "Post removed: the target post was deleted or is no longer visible on X"
+
 
 def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return a copy of a card's evidence dict with every copy of the post text removed.
@@ -493,6 +497,8 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
         # Delete post text on 404 per X API compliance, keep structure
         post_data = dict(card_db.post_data)
         post_data["text"] = POST_TEXT_REMOVED
+        # issue #9: record the removal on the card (the UI shows "Post removed")
+        post_data["text_removed"] = True
         card_db.post_data = post_data
         flag_modified(card_db, "post_data")
 

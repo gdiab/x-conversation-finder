@@ -220,9 +220,14 @@ class HttpXClient(XClientPort):
                 verified=user_data.get("verified", False),
             )
         else:
-            # R4-SF3: Real X API should always include author when expansions=author_id
-            # If missing, return None rather than using placeholder data
-            return None
+            # R4-SF3: Real X API should always include author when expansions=author_id.
+            # Never use placeholder data. Issue #9: and never return None here,
+            # since None means "not found" and makes the target re-fetch remove
+            # the post text; the post exists, so fail the lookup (retryable).
+            raise ApplicationError(
+                f"X API returned post {post_id} without its author (expansions=author_id)",
+                type="MalformedLookupResponse",
+            )
         
         metrics = tweet.get("public_metrics", {})
         

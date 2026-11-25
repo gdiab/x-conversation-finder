@@ -17,7 +17,8 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowUpdateFailedError
+from temporalio.exceptions import ApplicationError
 
 from backend.config import get_settings
 from backend.workflows import TopicWatchInput, ReviewInput
@@ -219,7 +220,13 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         )
         
         return {"message": result}
-    
+
+    except WorkflowUpdateFailedError as e:
+        # issue #9: return the update's own reason, not "Workflow update failed",
+        # so the UI can tell "post removed" (409) from other failures
+        cause = e.cause
+        code = 409 if isinstance(cause, ApplicationError) and cause.type == "PostRemoved" else 500
+        raise HTTPException(status_code=code, detail=str(cause))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

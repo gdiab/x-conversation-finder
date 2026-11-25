@@ -33,6 +33,9 @@ REPLY_PLAN_MAX_ATTEMPTS = 2
 # post's text (found in the issue #5 review).
 KEEP_TARGET_ON_REPLY_404_PATCH_ID = "keep-target-on-reply-404-v1"
 # --- end reply plan ---
+# Patch id (issue #9): approve re-fetches the target post first (removal duty,
+# ADR-0006/0086). Reviews approved before this replay without the re-fetch.
+TARGET_REFETCH_PATCH_ID = "target-refetch-on-approve-v1"
 
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
@@ -62,7 +65,10 @@ with workflow.unsafe.imports_passed_through():
     from backend.activities.store_activities import (
         store_card,
         update_card,
+        delete_post_text,
+        DeletePostTextInput,
         POST_TEXT_REMOVED,
+        POST_REMOVED_SKIP_REASON,
         redact_post_text_copies,
     )
     from backend.config.confidence import CONFIDENCE_THRESHOLD
@@ -165,6 +171,9 @@ class ReviewWorkflow:
         # issue #5: nudges and edits change the draft across activity awaits;
         # validators use this to serialize them (and to block approve)
         self._nudge_in_flight_count = 0
+        # issue #9: approve's target re-fetch (and any removal it triggers) is
+        # in flight; validators block edits, nudges and other approves meanwhile
+        self._approve_in_flight_count = 0
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -634,7 +643,19 @@ class ReviewWorkflow:
         
         workflow.logger.info(f"Received approve (post_anyway={post_anyway})")
         self._approve_requests.add(client_request_id)
-        
+
+        # issue #9: re-fetch the target post before the first approval (removal
+        # duty, ADR-0006/0086). Approvals recorded before this step replay
+        # without it (no patch marker in their history).
+        if self.status == "pending" and workflow.patched(TARGET_REFETCH_PATCH_ID):
+            try:
+                await self._refetch_target_before_approve(client_request_id)
+            except Exception:
+                # Not approved: a retry with the same request id must run again
+                # rather than report "Approved" through the dedupe path.
+                self._approve_requests.discard(client_request_id)
+                raise
+
         self.approved = True
         self.posted_url = posted_url
         self.status = "approved"
@@ -647,7 +668,89 @@ class ReviewWorkflow:
             workflow.logger.info(f"Approved with post_anyway: {len(failing)} failing sentences")
         
         return "Approved"
-    
+
+    async def _refetch_target_before_approve(self, client_request_id: str) -> None:
+        """Re-fetch the target post for approve (issue #9); raise if not approvable.
+
+        A 404 removes the post text and the model-written copies of it, ends the
+        Review as skipped ("post removed") and fails the update with type
+        PostRemoved. The in-flight count keeps edits, nudges and other approves
+        out until the re-fetch and any removal finish.
+        """
+        self._approve_in_flight_count += 1
+        try:
+            found = await self._refetch_target(f"approve:{client_request_id}")
+        finally:
+            self._approve_in_flight_count -= 1
+        if not found:
+            raise ApplicationError(POST_REMOVED_SKIP_REASON, type="PostRemoved", non_retryable=True)
+        if self.status != "pending":
+            # The founder skipped, or the review expired, during the re-fetch
+            raise ApplicationError(f"Cannot approve in status {self.status}", non_retryable=True)
+
+    async def _refetch_target(self, key: str) -> bool:
+        """Look up the target post again (issue #9). Returns False after a 404.
+
+        Uses the lookup_post activity, which reserves one X read through
+        backend.budget before the call; activity retries reuse that
+        reservation, and over budget it raises (never reports not-found).
+        On a 404 the removal duty runs before returning.
+        """
+        workflow_id = workflow.info().workflow_id
+        post = await workflow.execute_activity(
+            "lookup_post",
+            LookupPostInput(
+                post_id=self.input.post.id,
+                idempotency_key=f"{workflow_id}:refetch_target:{key}",
+            ),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+            retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
+            result_type=Optional[Post],
+        )
+        if post is not None:
+            return True
+        workflow.logger.warning(f"Target post {self.input.post.id} not found on re-fetch (404); removing its text")
+        await self._remove_target_post_text()
+        return False
+
+    async def _remove_target_post_text(self) -> None:
+        """Removal duty for a 404 on the target post (ADR-0006/0086, issue #9).
+
+        delete_post_text replaces the stored post text and every evidence copy
+        of it (redact_post_text_copies: why_it_fits, the problem span, the plan
+        target point, ...) and marks the card; get_card applies the same
+        redaction. A pending Review then ends as skipped "post removed". The
+        card is written before the state changes, so the main loop cannot
+        finish the workflow with the card still pending.
+        """
+        workflow_id = workflow.info().workflow_id
+        await workflow.execute_activity(
+            delete_post_text,
+            DeletePostTextInput(
+                workflow_id=workflow_id,
+                idempotency_key=f"{workflow_id}:delete_text:target",
+            ),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+        )
+        self._post_text_removed = True
+        if self.status != "pending":
+            return
+        await workflow.execute_activity(
+            update_card,
+            UpdateCardInput(
+                workflow_id=workflow_id,
+                idempotency_key=f"{workflow_id}:update:post_removed",
+                status="skipped",
+                skip_reason=POST_REMOVED_SKIP_REASON,
+            ),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+        )
+        self.status = "skipped"
+        self.skipped = True
+        self.skip_reason = POST_REMOVED_SKIP_REASON
+        if self.evidence:
+            self.evidence.skip_reason = POST_REMOVED_SKIP_REASON
+
     @approve.validator
     def validate_approve(self, posted_url: str, client_request_id: str, post_anyway: bool = False) -> None:
         """
@@ -669,7 +772,11 @@ class ReviewWorkflow:
         # issue #5: likewise, do not approve a draft a nudge is about to replace
         if self._nudge_in_flight_count > 0:
             raise ValueError("Cannot approve while a nudge is in progress. Retry after it completes.")
-        
+
+        # issue #9: one approve at a time (its target re-fetch awaits an activity)
+        if self._approve_in_flight_count > 0:
+            raise ValueError("Cannot approve while another approval is in progress. Retry after it completes.")
+
         # QA R12: Hash check removed (dead code).
         # The edit Update atomically sets both draft.text and edited_text_hash from the same
         # new_text. There is no path to tamper with draft.text after gating without calling
@@ -947,7 +1054,12 @@ class ReviewWorkflow:
         # overwritten by it) across its activity awaits
         if self._nudge_in_flight_count > 0:
             raise ValueError("Cannot edit while a nudge is in progress. Retry after it completes.")
-        
+
+        # issue #9: an edit during approve's re-fetch would change the draft
+        # after the validator checked its gate state
+        if self._approve_in_flight_count > 0:
+            raise ValueError("Cannot edit while an approval is in progress. Retry after it completes.")
+
         if not new_text or not new_text.strip():
             raise ValueError("New text cannot be empty")
     
@@ -1096,6 +1208,10 @@ class ReviewWorkflow:
         # another nudge could leave the card and the query on different drafts
         if self._edit_in_flight_count > 0 or self._nudge_in_flight_count > 0:
             raise ValueError("Cannot nudge while another draft change is in progress. Retry after it completes.")
+
+        # issue #9: likewise during approve's target re-fetch
+        if self._approve_in_flight_count > 0:
+            raise ValueError("Cannot nudge while an approval is in progress. Retry after it completes.")
         
         if not instruction or not instruction.strip():
             raise ValueError("Instruction cannot be empty")
@@ -1129,5 +1245,6 @@ class ReviewWorkflow:
             # issue #5: match the stored card after delete_post_text (X removal
             # duty): the post text and every evidence copy of it are gone
             card_dict["post"]["text"] = POST_TEXT_REMOVED
+            card_dict["post"]["text_removed"] = True  # issue #9, as on the stored card
             card_dict["evidence"] = redact_post_text_copies(card_dict["evidence"])
         return card_dict

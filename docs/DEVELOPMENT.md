@@ -144,11 +144,22 @@ This runs all replay tests with fake adapters. No API keys needed.
 ### Activities
 
 - `search_recent`: Search X for recent posts
-- `lookup_post`: Get full post details
+- `lookup_post`: Get full post details; also re-fetches the target post when the founder approves (see "Post removal" below)
 - `research_post`: Analyze post and gather evidence; code then checks the proposed reply features, computes confidence and applies the skip rules (`backend/gate/reply_fit.py`), so a skipped post is never drafted
 - `plan_reply`: Plan the reply before drafting (reply type, target point in the post, whether to mention the product); code validates the plan, re-requests it once, then skips the post. Runs only for posts that passed the research-stage skip rules
 - `draft_reply`: Generate draft with claim gate, steered by the plan
 - `store_card` / `update_card`: Persist review cards
+
+### Post removal (ADR-0006, issue #9)
+
+Post text is kept only while the post exists; a 404 on a re-fetch deletes it. The target post is re-fetched with `GET /2/tweets/:id`:
+
+1. **When the founder approves.** The `approve` update calls `lookup_post` before approving. If the post is gone, `delete_post_text` removes the stored text and every model-written copy of it (`redact_post_text_copies`: why it fits, the problem span, the plan's target point, ...), marks the card `post.text_removed`, and the Review ends as skipped with "Post removed". The update fails with type `PostRemoved` (HTTP 409 from the API), and the UI reloads the card. During the re-fetch, edits, nudges and other approvals are rejected.
+2. **Before the eval replays a card.** Call `backend.target_refetch.refetch_stored_card_target(x_client, workflow_id, run_key)` and skip the card unless it returns `"found"`.
+
+Each re-fetch reserves one X read through `backend/budget.py` (about $0.005, ADR-0005). Over budget it raises and removes nothing. A 404 on the founder's *reply* URL does not touch the target post's text.
+
+Pending cards are **not** re-checked on a schedule, so X cost stays proportional to approvals and eval runs. A deleted post's text can therefore stay on a card that is never approved (pending, skipped or expired) until the eval re-fetches it.
 
 ### Key Constraints (ADRs)
 

@@ -176,6 +176,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -258,6 +259,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -364,6 +366,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -417,6 +420,7 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -499,6 +503,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -583,6 +588,7 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -650,6 +656,7 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -764,6 +771,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -843,6 +851,7 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -957,6 +966,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -1101,6 +1111,7 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,
@@ -1224,6 +1235,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
             task_queue="test",
             workflows=[ReviewWorkflow],
             activities=[
+                x_activities.lookup_post,  # issue #9: approve re-fetches the target post
                 reply_activities.research_post,
                 reply_activities.plan_reply,
                 reply_activities.draft_reply,

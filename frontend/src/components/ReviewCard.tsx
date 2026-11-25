@@ -4,7 +4,7 @@
 
 import { useState, useRef } from 'react';
 import type { ReviewCard as ReviewCardType } from '../api/client';
-import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId } from '../api/client';
+import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId, PostRemovedError } from '../api/client';
 import { ReplyFitPanel } from './ReplyFitPanel';
 import { ReplyPlanPanel } from './ReplyPlanPanel';
 
@@ -52,6 +52,14 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       approveRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
+      // issue #9: approve re-fetched the post and found it deleted; the
+      // review is skipped now, so reload to show the "Post removed" card
+      if (err instanceof PostRemovedError) {
+        approveRequestId.current = null;
+        setError(null);
+        onUpdate();
+        return;
+      }
       const errorMsg = err instanceof Error ? err.message : 'Failed to approve';
       // If error mentions post_anyway, show the confirm dialog
       if (errorMsg.toLowerCase().includes('post_anyway') && !postAnyway) {
@@ -206,7 +214,13 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
             {card.post.author.name} (@{card.post.author.username})
           </div>
-          <div>{card.post.text}</div>
+          {card.post.text_removed ? (
+            <div style={{ fontStyle: 'italic', color: '#666' }}>
+              Post removed: it was deleted on X, so its text and the research quoting it were removed.
+            </div>
+          ) : (
+            <div>{card.post.text}</div>
+          )}
           <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
             {card.post.like_count} likes · {card.post.reply_count} replies · 
             {' '}{card.post.author.followers_count.toLocaleString()} followers

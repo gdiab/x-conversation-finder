@@ -338,3 +338,52 @@ async def test_search_recent_tracks_newest_id():
     # Should track the highest ID (2000), not the most recent by timestamp
     assert newest_id == "2000"
     assert len(posts) == 3
+
+
+def _mock_lookup_response(mock_client_class, body):
+    mock_client = AsyncMock()
+    mock_client_class.return_value.__aenter__.return_value = mock_client
+    mock_response_obj = Mock()
+    mock_response_obj.raise_for_status.return_value = None
+    mock_response_obj.json.return_value = body
+    mock_client.get.return_value = mock_response_obj
+
+
+@pytest.mark.asyncio
+async def test_lookup_post_200_with_only_errors_is_not_found():
+    """Issue #9: X answers a lookup of a deleted post with 200 and an errors
+    array (no data); that reads as not found, which triggers the removal duty."""
+    client = HttpXClient("test_bearer_token_123")
+    body = {
+        "errors": [
+            {
+                "value": "1234567890",
+                "detail": "Could not find tweet with id: [1234567890].",
+                "title": "Not Found Error",
+                "resource_type": "tweet",
+                "parameter": "id",
+                "resource_id": "1234567890",
+                "type": "https://api.twitter.com/2/problems/resource-not-found",
+            }
+        ]
+    }
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        assert await client.lookup_post("1234567890") is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_post_without_author_raises_instead_of_not_found():
+    """Issue #9: a post returned without its author still exists, so the
+    lookup fails (retryable) rather than returning None, which would make the
+    target re-fetch remove the post text."""
+    from temporalio.exceptions import ApplicationError
+
+    client = HttpXClient("test_bearer_token_123")
+    body = {"data": {"id": "1234567890", "text": "Synthetic post", "author_id": "author_123"}}
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        with pytest.raises(ApplicationError) as excinfo:
+            await client.lookup_post("1234567890")
+    assert excinfo.value.type == "MalformedLookupResponse"
+    assert not excinfo.value.non_retryable
