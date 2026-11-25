@@ -73,12 +73,28 @@ def _redact_segment(segment: Dict[str, Any], passages: Dict[str, str]) -> Dict[s
         )
         if not inserted_by_code:
             redacted["text"] = None
-    # An index is kept only alongside verified code-inserted text: on older
-    # rejected segments it is unchecked model output (it could be a number
-    # copied from the post).
-    if not redacted.get("text"):
+    # On older rejected segments the index is unchecked model output (it
+    # could be a number copied from the post): keep it only for a claim whose
+    # text is exactly that sentence of its passage.
+    if not _index_matches_text(redacted, passages):
         redacted["sentence_index"] = None
     return redacted
+
+
+def _index_matches_text(segment: Dict[str, Any], passages: Dict[str, str]) -> bool:
+    """Whether a claim segment's sentence_index names the sentence it holds."""
+    from backend.activities.claim_gate_activity import split_into_sentences
+
+    index, text = segment.get("sentence_index"), segment.get("text")
+    passage = passages.get(segment.get("source_passage_id") or "")
+    if segment.get("kind") != "claim" or not isinstance(index, int) or isinstance(index, bool):
+        return False
+    if not text or not passage:
+        return False
+    sentences = split_into_sentences(passage)
+    if not 0 <= index < len(sentences):
+        return False
+    return sentences[index].strip().rstrip(".!?") == text.strip().rstrip(".!?")
 
 
 def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:

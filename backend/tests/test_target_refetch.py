@@ -192,6 +192,9 @@ async def test_404_on_refetch_redacts_text_and_spans_and_skips(make_review_input
                     seg["text"] for seg in before["evidence"]["draft"]["segments"]
                 ]
                 assert all(seg["text"] for seg in card["evidence"]["draft"]["segments"])
+                assert [seg.get("sentence_index") for seg in card["evidence"]["draft"]["segments"]] == [
+                    seg.get("sentence_index") for seg in before["evidence"]["draft"]["segments"]
+                ]
             assert client.target_lookups == 1
 
             history = await handle.fetch_history()
@@ -745,7 +748,10 @@ def _insert_legacy_card(workflow_id, with_reply_fit):
                           "source_passage_id": None, "sentence_index": None},
                          # a number copied from the post as an unchecked index
                          {"kind": "claim", "text": None,
-                          "source_passage_id": "passage_0", "sentence_index": 424242}],
+                          "source_passage_id": "passage_0", "sentence_index": 424242},
+                         # ...also next to a valid phrase's text
+                         {"kind": "non_claim", "text": "Thanks for sharing.", "phrase_id": "thanks.for_sharing",
+                          "source_passage_id": None, "sentence_index": 434343}],
             "claim_gate": {
                 "passed": False,
                 "segments": [{"kind": "non_claim", "text": f"As you said, {QUESTION}",
@@ -801,6 +807,9 @@ async def test_removal_scrubs_a_card_stored_before_issue_9(with_reply_fit):
     for fragment in POST_FRAGMENTS:
         assert fragment not in dumped
     assert "424242" not in dumped
+    assert "434343" not in dumped
+    phrase_seg = stored["evidence"]["draft"]["segments"][-1]
+    assert phrase_seg["text"] == "Thanks for sharing." and phrase_seg["phrase_id"] == "thanks.for_sharing"
     draft = stored["evidence"]["draft"]
     assert "Make it shorter" in draft["steers_applied"]  # founder nudge kept
     assert stored["skip_reason"].startswith("Not enough evidence:")
