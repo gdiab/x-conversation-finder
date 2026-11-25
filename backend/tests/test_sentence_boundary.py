@@ -63,6 +63,9 @@ GOLDEN_SPLITS = [
     ("Our U.K. team ships on Fridays.", ["Our U.K. team ships on Fridays."], []),
     ("Standups start at 9 a.m. sharp.", ["Standups start at 9 a.m. sharp."], []),
     ("We operate in the U.S.A.", ["We operate in the U.S.A."], []),
+    # Known limit: a lowercase word after an initialism continues the
+    # sentence (the issue's rule), even when it starts a new one.
+    ("We ship in the U.S.A. customers pay monthly.", ["We ship in the U.S.A. customers pay monthly."], []),
     ("Is it live in the U.S.? Yes.", ["Is it live in the U.S.?", "Yes."], []),
     # An initialism before a capitalized word is unclear: split before a
     # sentence starter, joined otherwise; either way not selectable.
@@ -100,6 +103,8 @@ GOLDEN_SPLITS = [
     ("Uptime was 99.9. We fixed that.", ["Uptime was 99.9.", "We fixed that."], []),
     ("We launched in 2021. We now serve teams.", ["We launched in 2021.", "We now serve teams."], []),
     ("We launched in 2021. Customers followed.", ["We launched in 2021.", "Customers followed."], []),
+    # Codex thermo r4: a number before a lowercase word ends the sentence.
+    ("We launched in 2021. customers pay monthly.", ["We launched in 2021.", "customers pay monthly."], []),
     # List markers stay with their item; a mid-sentence one is unclear.
     ("1. The product supports SSO.", ["1. The product supports SSO."], []),
     ("1. The product supports SSO. 2. The API is fast.", ["1. The product supports SSO.", "2. The API is fast."], []),
@@ -108,6 +113,8 @@ GOLDEN_SPLITS = [
     # Company suffixes (QA R14) split before a capitalized word; unclear.
     ("We are Acme Inc. Our product supports SSO.", ["We are Acme Inc.", "Our product supports SSO."], [0, 1]),
     ("We are Acme Inc. and others.", ["We are Acme Inc. and others."], []),
+    # Codex thermo r4: a company suffix before a digit is unclear.
+    ("We partnered with Acme Inc. 2024 revenue doubled.", ["We partnered with Acme Inc. 2024 revenue doubled."], [0]),
     ("We are Acme Corp. Pricing is flat.", ["We are Acme Corp.", "Pricing is flat."], [0, 1]),
     # Terminators before closing quotes and brackets.
     ('We said "ship it." Customers agreed.', ['We said "ship it."', "Customers agreed."], []),
@@ -212,10 +219,12 @@ def test_abbreviation_kind(word, kind):
         ("U.S.", "The", LIKELY_END),
         ("U.S.", "Customers", LIKELY_CONTINUE),
         ("U.S.", "$5", LIKELY_CONTINUE),
+        ("J.", "2024", LIKELY_CONTINUE),
         ('U.S."', "Customers", LIKELY_CONTINUE),
         ("2021.", "We", END),
         ("2021.", "Customers", END),
-        ("2021.", "we", CONTINUE),
+        ("2021.", "we", END),
+        ("2021.", "$5", LIKELY_CONTINUE),
         ("Dr.", "Smith", CONTINUE),
         ("Dr.", "We", LIKELY_CONTINUE),
         ("approx.", "10", CONTINUE),
@@ -224,7 +233,8 @@ def test_abbreviation_kind(word, kind):
         ("j.", "smith", CONTINUE),
         ("Inc.", "Customers", LIKELY_END),
         ("Inc.", "and", CONTINUE),
-        ("Inc.", "3", CONTINUE),
+        ("Inc.", "2024", LIKELY_CONTINUE),
+        ("Fig.", "3", CONTINUE),
         ("12.", "The", LIKELY_CONTINUE),
     ],
 )
@@ -476,7 +486,11 @@ async def test_edit_regate_rejects_a_passage_sentence_ending_in_an_initialism():
 
 @pytest.mark.parametrize(
     "passage",
-    ["We ship in the U.S. Customers pay monthly.", "Built by J. The artist Smith in 2021."],
+    [
+        "We ship in the U.S. Customers pay monthly.",
+        "Built by J. The artist Smith in 2021.",
+        "We partnered with Acme Inc. 2024 revenue doubled.",
+    ],
 )
 async def test_edit_regate_rejects_a_passage_sentence_with_an_unclear_boundary(passage):
     """Two founder sentences cannot pass the edit path as one claim."""
@@ -537,6 +551,9 @@ def test_whole_question_with_an_abbreviation_is_a_valid_target(post, question):
         # Codex review r2: an initial before a capitalized word splits post text.
         ("Version A. Anyone interested?", "Version A.", "Anyone interested?"),
         ("We chose Plan B. Customers need help?", "We chose Plan B.", "Customers need help?"),
+        # Codex thermo r4
+        ("We launched in 2021. what changed?", "We launched in 2021.", "what changed?"),
+        ("We partnered with Acme Inc. 2024 was profitable?", "We partnered with Acme Inc.", "2024 was profitable?"),
     ],
 )
 def test_statement_before_a_question_is_outside_it(post, statement, question):

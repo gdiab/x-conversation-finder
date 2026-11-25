@@ -7,17 +7,18 @@ plan's question-span splitter for post text (``backend/planning``).
 period_boundary classifies a word-final period by the word and the next word:
 
 - END: certainly ends the sentence. After an ordinary word (one that is not
-  in the lists below) and after a number before a capitalized word ("in 2021.
-  We", "99.9. Latency"): English has no mid-sentence "2021." outside list
-  markers.
-- CONTINUE: certainly does not. After any abbreviation, initial or number
-  before a lowercase word ("the U.S.A. market", "j. smith"); after a prefix
+  in the lists below) and after a number before a word ("in 2021. We",
+  "in 2021. customers", "99.9. Latency"): English has no mid-sentence "2021."
+  outside list markers.
+- CONTINUE: certainly does not. After any abbreviation or initial before a
+  lowercase word ("the U.S.A. market", "j. smith"); after a prefix
   abbreviation (titles and Latin abbreviations, which do not end sentences)
-  before a capitalized word that is not a sentence starter ("Dr. Smith",
-  "e.g. Postgres"); after a list marker at the start of a sentence ("1. The
-  product ...").
+  before a digit or a capitalized word that is not a sentence starter
+  ("Dr. Smith", "e.g. Postgres", "approx. 10"); after a list marker at the
+  start of a sentence ("1. The product ...").
 - LIKELY_END / LIKELY_CONTINUE: unclear. Every other abbreviation, initial or
-  list marker before a capitalized word. "U.S. We ship" is probably two
+  list marker before a capitalized word, digit or symbol ("Acme Inc. 2024
+  revenue doubled"), and a list marker inside a sentence. "U.S. We ship" is probably two
   sentences, but "the U.S. The Netherlands, and France" is one; "J. Smith" is
   probably one, but "Plan B. Customers pay" is two; company suffixes (QA R14)
   are probably sentence ends. LIKELY_END after terminal abbreviations
@@ -40,8 +41,12 @@ sentence_terminator gives that character. A period run ("..."), "!" and "?"
 always end a sentence. Decimals (S-5: "99.99%") contain no word-final period
 and never split.
 
-Known limit: abbreviations missing from the lists below are ordinary words,
-so their period is END. The lists cover the common ones.
+Known limits: abbreviations missing from the lists below are ordinary words,
+so their period is END; the lists cover the common ones. A lowercase word
+after an abbreviation or initial continues the sentence, as issue #10
+requires for "Is the U.S.A. market ready?", so text that starts a sentence
+in lowercase right after one ("the U.S.A. customers pay monthly") is read
+as one sentence.
 
 Changing these rules changes split points, and so the sentence indices that
 claim segments reference. Bump SPLITTER_VERSION when a split changes; see
@@ -177,15 +182,17 @@ def period_boundary(word: str, next_word: Optional[str], *, sentence_start: bool
     if kind is None:
         return END
     first = next_word.lstrip(_OPENERS)[:1]
+    if kind == "number":
+        # No mid-sentence "2021." in English: ends before a word of either case.
+        return END if first.isalpha() else LIKELY_CONTINUE
+    if kind == "list_marker":
+        return CONTINUE if sentence_start else LIKELY_CONTINUE
     if first.islower():
         return CONTINUE
     if not first.isalpha():
-        # A digit or symbol: "approx. 10", "Inc. 3"; unclear after the others.
-        return CONTINUE if kind in ("company", "prefix", "initial") else LIKELY_CONTINUE
-    if kind == "number":
-        return END
-    if kind == "list_marker":
-        return CONTINUE if sentence_start else LIKELY_CONTINUE
+        # A digit or symbol: "approx. 10", "Fig. 3"; unclear after the others
+        # ("Acme Inc. 2024 revenue doubled").
+        return CONTINUE if kind == "prefix" else LIKELY_CONTINUE
     if kind == "prefix":
         return LIKELY_CONTINUE if starts_new_sentence(next_word) else CONTINUE
     if kind == "company":
