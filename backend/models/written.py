@@ -116,8 +116,10 @@ class ClaimVerdict:
 
 @dataclass
 class ClaimCheckRequest:
-    """Everything the checker sees: the sentences, the brief sentences and the
-    product name. No post, no plan, no drafting prompt (amendment item 3)."""
+    """Everything the checker sees: the sentences, the brief sentences, the
+    product name and aliases, and which sentences code requires a verdict
+    for. No post, no plan, no drafting prompt, no drafter citations and no
+    key features (amendment step 3 and decision (a))."""
 
     sentences: List[str]
     brief_sentences: List[BriefSentence]

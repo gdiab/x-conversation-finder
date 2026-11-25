@@ -245,7 +245,7 @@ async def test_the_drafter_sees_the_post_and_the_checker_does_not(make_review_in
     assert request.product_name == PRODUCT
     assert [b.id for b in request.brief_sentences][:2] == ["b1", "b2"]
 
-    # The checker gets sentences, brief and product name: nothing of the post
+    # The checker gets sentences, brief, product name and aliases, and the must-verify flags: nothing of the post
     [check] = checker.requests
     sent = json.dumps(dataclasses.asdict(check))
     for fragment in POST_FRAGMENTS + (QUESTION, sample_post.author.username):

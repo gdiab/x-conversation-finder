@@ -263,9 +263,17 @@ def test_the_adr_records_criterion_1_and_names_the_five_allowed_cases():
         paragraph for paragraph in amendment.split("\n\n")
         if paragraph.startswith("**Decided: switch criterion 1")
     ]
-    assert "(George, 2026-11-25)" in decision
-    assert "out of scope for the claim gate by design" in decision
-    assert "caught by founder review" in decision
+    # Whole sentences, so a "not" slipped into one of them fails here
+    assert decision.startswith(
+        "**Decided: switch criterion 1 covers the cases that make a product claim (George, 2026-11-25).** "
+        "Five cases of the 2026-11-21 edit-path must-REJECT list make no product claim: "
+    )
+    assert (
+        " They are out of scope for the claim gate by design: under step 4 a sentence that is not a "
+        "product claim is not gated against the brief, and the tone of such a sentence is caught by "
+        "founder review. "
+    ) in decision
+    assert " Those are the other twelve, and steps 2-4 reject each of them. " in decision
     # The quoted sentences of the decision are the five cases, no more and no fewer
     quoted = set(re.findall(r"'([^']*[.!?])'", decision))
     assert quoted == ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS

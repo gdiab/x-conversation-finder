@@ -61,7 +61,8 @@ class WrittenCheckActivities:
            sentence states, a product claim the plan ruled out). A text that
            fails here is not sent to the checker: no paid call is made for it.
         2. Otherwise the independent checker sees the sentences, the brief
-           sentences and the product name, and returns a verdict per sentence.
+           sentences, the product name and aliases, and which sentences
+           code requires a verdict for, and returns a verdict per sentence.
         3. Code decides (backend.gate.written_check.judge): the cited brief
            sentence ids must exist, every supported sentence must cite one,
            and a triggered sentence needs a supported verdict whatever the
