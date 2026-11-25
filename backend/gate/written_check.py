@@ -468,17 +468,29 @@ def _judge_sentence(
     product_name: str,
     product_aliases: Sequence[str],
 ) -> SentenceCheck:
-    """Decide one sentence from its triggers and the checker's verdict."""
-    # Only an explicit False takes a sentence out of the checked set, and only
-    # when no trigger fired. A missing or malformed answer counts as flagged.
-    flagged = verdict is None or verdict.about_product is not False or verdict.malformed
-    checked = bool(hits) or flagged
-    if not checked:
+    """Decide one sentence from its triggers and the checker's verdict.
+
+    Only two answers pass, and everything else fails:
+    - not a product claim: no trigger fired, and the checker said so cleanly
+      (about_product false, no verdict, no citation);
+    - a supported product claim: a statement, a clean "supported" verdict,
+      citations that all exist, and no number the cited sentences lack.
+    """
+    clean = verdict is not None and not verdict.malformed
+    says_not_product = (
+        clean and verdict.about_product is False and verdict.verdict is None and not verdict.brief_sentence_ids
+    )
+    if not hits and says_not_product:
         return SentenceCheck(
             sentence=sentence, passed=True, kind="non_claim", verdict=VERDICT_NOT_PRODUCT
         )
 
-    why = _trigger_summary(hits) if hits else "the checker read it as a statement about the product"
+    if hits:
+        why = _trigger_summary(hits)
+    elif verdict is not None and verdict.about_product is True:
+        why = "the checker read it as a statement about the product"
+    else:
+        why = "the checker did not clearly say that it is not about the product"
     check = SentenceCheck(
         sentence=sentence,
         passed=False,
@@ -506,6 +518,10 @@ def _judge_sentence(
         # Not repaired, and not read charitably: an answer without a clear
         # classification, or a citation list with one bad entry, is no answer
         return fail("The checker's answer for it was malformed.")
+    if not hits and verdict.about_product is False:
+        # "Not about the product", yet with a verdict or a citation: the
+        # answer contradicts itself, whichever verdict it carries
+        return fail("The checker's answer for it contradicts itself (not about the product, yet with a verdict).")
     if verdict.verdict != VERDICT_SUPPORTED:
         stated = _one_line(verdict.reason) or "The checker did not find it in the brief."
         return fail(f"The brief does not support it: {stated}")

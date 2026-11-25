@@ -345,7 +345,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
             )}
             {card.evidence.founder_materials.map((material, idx) => {
               // Check if any failed sentences mention unresolved referents in this passage
-              const hasUnresolvedReferents = card.evidence.draft?.claim_gate.failed_sentences.some(
+              // An assembled-gate reason; a written check's free-text reason is not read for it
+              const hasUnresolvedReferents = !written && card.evidence.draft?.claim_gate.failed_sentences.some(
                 (failure) => failure.reason.toLowerCase().includes('unresolved referent')
               );
               
@@ -403,10 +404,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 </div>
                 {card.evidence.draft.claim_gate.failed_sentences.map((failure, idx) => {
                   // S7 (QA R14): Dedicated copy for abbreviation-ending reason
+                  // These two rewrites explain assembled-gate reasons. A written check's
+                  // reason is the checker's own words and is shown as it is (issue #12).
                   let displayReason = failure.reason;
-                  if (failure.reason.toLowerCase().includes('abbreviation')) {
+                  if (!written && failure.reason.toLowerCase().includes('abbreviation')) {
                     displayReason = 'Sentence ends with an abbreviation and is not selectable. Abbreviations like Inc., Ltd., Dr., etc. at the end of a sentence cannot be used as claims.';
-                  } else if (failure.reason.toLowerCase().includes('unresolved referent')) {
+                  } else if (!written && failure.reason.toLowerCase().includes('unresolved referent')) {
                     displayReason = 'Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above) and cannot stand alone as a claim.';
                   }
                   
@@ -465,7 +468,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
             Feature terms read from your brief:{' '}
             {(card.evidence.draft.written?.feature_terms ?? []).length > 0
               ? card.evidence.draft.written?.feature_terms.join(', ')
-              : 'none (the brief has no list under a "features" heading)'}
+              : 'none (a feature term is an item of at most 6 words in a list named "features")'}
           </div>
           {edited ? (
             <div style={{ fontSize: '14px', color: '#666' }}>

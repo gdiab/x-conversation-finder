@@ -78,7 +78,9 @@ the object also has:
 - "brief_sentence_ids": for "supported", the ids of the brief sentences that together entail
   it (at least one). For "unsupported", an empty list.
 - "reason": for "unsupported", one short line naming what the brief does not state. Otherwise
-  an empty string."""
+  an empty string.
+For every other sentence (not marked, and "about_product": false), give no verdict: set
+"verdict" to null and "brief_sentence_ids" to []."""
 
 
 def _strict_bool(value: Any) -> Optional[bool]:

@@ -211,6 +211,49 @@ def test_an_answer_without_a_true_or_false_classification_fails_even_if_it_says_
     assert "The checker's answer for it was malformed." in result.sentences[1].reason
 
 
+@pytest.mark.parametrize("answer", [
+    dict(about_product=False, verdict="unsupported", reason="Not in the brief."),
+    dict(about_product=False, verdict="supported", brief_sentence_ids=["b1"]),
+    dict(about_product=False, brief_sentence_ids=["b1"]),
+])
+def test_an_answer_that_contradicts_itself_fails_an_untriggered_sentence(answer):
+    """ "Not about the product", yet with a verdict or a citation: only a clean
+    "not about the product" keeps a sentence out of the checked set."""
+    text = f"{REACTION} It retries failed deliveries for you."
+
+    result = _check(text, NOT_PRODUCT, answer)
+
+    assert not result.passed
+    check = result.sentences[1]
+    assert (check.kind, check.passed, check.verdict) == ("claim", False, "unsupported")
+    assert "did not clearly say that it is not about the product" in check.reason
+
+
+def test_only_two_answers_pass_a_sentence():
+    """A clean "not about the product" for an untriggered sentence, and a clean
+    "supported" with existing citations. Every other shape fails."""
+    untriggered = f"{REACTION} It retries failed deliveries for you."
+    shapes = [
+        None,
+        dict(),
+        dict(about_product=None),
+        dict(about_product=True),
+        dict(about_product=True, verdict="unsupported"),
+        dict(about_product=True, verdict="supported"),
+        dict(about_product=True, verdict="supported", brief_sentence_ids=["b9"]),
+        dict(about_product=True, verdict="supported", brief_sentence_ids=["b1"], malformed=True),
+        dict(about_product=False, verdict="unsupported"),
+        dict(about_product=False, verdict="supported", brief_sentence_ids=["b1"]),
+        dict(about_product=False, malformed=True),
+        dict(verdict="supported", brief_sentence_ids=["b1"]),
+    ]
+
+    for shape in shapes:
+        assert not _check(untriggered, NOT_PRODUCT, shape).passed, shape
+    assert _check(untriggered, NOT_PRODUCT, NOT_PRODUCT).passed
+    assert _check(untriggered, NOT_PRODUCT, SUPPORTED_B1).passed
+
+
 def test_a_repeated_answer_cannot_overrule_the_first():
     verdicts = [
         ClaimVerdict(index=2, about_product=True, verdict="unsupported", reason="No."),

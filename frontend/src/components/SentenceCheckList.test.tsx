@@ -151,7 +151,8 @@ describe('ReviewCard: written draft (issue #12)', () => {
     draft.written = { product_name: 'Acme Relay', product_aliases: [], feature_terms: [] };
     render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
 
-    expect(screen.getByText(/none \(the brief has no list under a "features" heading\)/)).toBeInTheDocument();
+    // States the rule, not a guessed cause: a features list of long items also gives none
+    expect(screen.getByText(/none \(a feature term is an item of at most 6 words in a list named "features"\)/)).toBeInTheDocument();
   });
 
   it('shows the edit check, not the stale draft check, once the draft was edited', () => {
@@ -218,6 +219,27 @@ describe('ReviewCard: written draft (issue #12)', () => {
     await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
 
     expect(screen.getByDisplayValue('A newer synthetic draft.')).toBeInTheDocument();
+  });
+
+  it('shows a written check reason as the checker wrote it', () => {
+    // An assembled-gate reason that mentions an abbreviation gets a fixed explanation;
+    // a written check's free-text reason must not be replaced by it
+    const reason = 'Checked as a product claim. The brief does not support it: the abbreviation SLA is not defined there.';
+    const draft = makeWrittenDraft({
+      claim_gate: {
+        passed: false,
+        segments: [],
+        failed_sentences: [{ sentence: 'Relay meets its SLA.', reason }],
+        reasoning: '1 failure(s)',
+        draft_text: '',
+        claims: [],
+        failed_claims: [],
+      },
+    });
+    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(screen.queryByText(/ends with an abbreviation and is not selectable/)).not.toBeInTheDocument();
   });
 
   it('keeps the segment display for an assembled draft', () => {
