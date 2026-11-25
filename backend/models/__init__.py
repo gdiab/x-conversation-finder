@@ -4,6 +4,17 @@ from .evidence import Evidence, FounderMaterial, Claim, Segment, ClaimGateResult
 from .post import Post, Author
 from .review import ReviewCard, SentenceGateResult
 from .reply_plan import ReplyPlan, REPLY_TYPES
+from .written import (
+    BriefSentence,
+    ClaimCheckRequest,
+    ClaimCheckResponse,
+    ClaimVerdict,
+    DrafterHint,
+    SentenceCheck,
+    TriggerHit,
+    WrittenCheckResult,
+    WrittenDraftInfo,
+)
 
 __all__ = [
     "Evidence",
@@ -19,4 +30,13 @@ __all__ = [
     "SentenceGateResult",
     "ReplyPlan",
     "REPLY_TYPES",
+    "BriefSentence",
+    "ClaimCheckRequest",
+    "ClaimCheckResponse",
+    "ClaimVerdict",
+    "DrafterHint",
+    "SentenceCheck",
+    "TriggerHit",
+    "WrittenCheckResult",
+    "WrittenDraftInfo",
 ]

@@ -112,13 +112,17 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `test_models.py`: Tests confidence computation (rule v2, `backend/config/confidence.py`)
 - `test_sentence_boundary.py`: Pins the claim gate's sentence splits after abbreviations, initials and numbers (issue #10). A changed expected split changes the sentence indices drafts reference: bump `SPLITTER_VERSION` in `backend/gate/sentence_boundary.py` and read ADR-0006 (2026-11-21 amendment, item 2) first
 - `test_reply_fit.py`: Tests the should-we-reply rules on synthetic posts (`fixtures/reply_fit_posts.json`): skip reasons, confidence spread, and no draft call for a skipped post
+- `test_written_switch_criteria.py`: The written-draft switch criteria (ADR-0006, 2026-11-24 amendment) on `fixtures/written_switch_criteria.json`: every must-REJECT case with the answer a correct checker must give. See "Draft modes" below for what these tests prove and what only a live model run can
+- `test_written_check.py`, `test_written_triggers.py`, `test_brief_sentences.py`: The code side of the written-draft check: verdict rules, triggers (with the watch's key features) and brief sentences
+- `test_written_workflow.py`: Written drafts through the Review workflow (redraft, skip, edit, nudge, removal) and replay of the histories recorded before written drafts
 
 ## Using the System
 
 1. **Start a Topic Watch:**
    - Open the UI at `http://localhost:3000`
-   - Fill in the "Start New Topic Watch" form
+   - Fill in the "Start New Topic Watch" form. "Product name" is required; "Also called" takes other names people use for the product, and "Key features" the short names of features, both optional and separated by commas (see "Draft modes")
    - The watch will poll every 3 hours (configurable)
+   - A running watch keeps the brief, product name, other names and key features it was started with. To change them, stop the watch (`temporal workflow signal --workflow-id "watch:<account>:<topic>" --name stop`) and start it again from the form
 
 2. **Review Cards Appear:**
    - As new posts are found, Review workflows start
@@ -147,8 +151,46 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `lookup_post`: Get full post details; also re-fetches the target post when the founder approves (see "Post removal" below)
 - `research_post`: Analyze post and gather evidence; code then checks the proposed reply features, computes confidence and applies the skip rules (`backend/gate/reply_fit.py`), so a skipped post is never drafted
 - `plan_reply`: Plan the reply before drafting (reply type, target point in the post, whether to mention the product); code validates the plan, re-requests it once, then skips the post. Runs only for posts that passed the research-stage skip rules
-- `draft_reply`: Generate draft with claim gate, steered by the plan
+- `draft_reply`: Generate the draft, steered by the plan: assembled from segments, or written as free text (see "Draft modes")
+- `claim_gate` / `verify_edited_text`: The claim gate of an assembled draft, and the re-gate of a founder edit of one
+- `check_written_draft`: The product-claim check of a written draft, a nudged redraft or a founder edit of one
 - `store_card` / `update_card`: Persist review cards
+
+`backend/worker.py` (`build_activities`) registers all of them; a test compares the list with the activities the workflows call. Before issue #12 `verify_edited_text` was missing from the worker, so on a real worker every founder edit ended as "not_checked".
+
+### Draft modes (ADR-0006 amendment 2026-11-24, issue #12)
+
+`DRAFT_MODE` in `.env` selects how replies are drafted. Restart the worker after changing it.
+
+| `DRAFT_MODE` | Draft | Check |
+|---|---|---|
+| `assembled` (default) | Fixed phrases plus at most one brief sentence, word for word (2026-11-21 amendment) | `claim_gate`: every sentence is a fixed phrase or a verbatim brief sentence |
+| `written` | The model writes the reply as free text: at most 3 sentences, 280 characters and 1 product claim | `check_written_draft`: product claims are checked against the brief |
+
+`assembled` stays the default until the amendment's switch criteria pass. Both paths stay in the code so the baseline eval can compare them.
+
+**Which mode a Review uses.** The `plan_reply` activity fixes the mode when the Review plans its reply, and the Review keeps it through redrafts, nudges and edits. The mode is `written` only if `DRAFT_MODE=written` and the watch has a product name. A watch started before the "Product name" field existed has none: its Reviews stay assembled, and each card says so. To get written drafts from such a watch, stop it and start it again with a product name (see "Using the System"). Reviews already running keep the mode they were planned under.
+
+**The written check** (steps 2 to 4 of the amendment; `backend/gate/written_check.py`):
+
+1. Code splits the reply into sentences and runs the triggers. A sentence is checked as a product claim if it names the product (the "Product name" or an "Also called" name, never read from the brief), uses we/our/us/ours, contains a number, makes a comparison, or uses one of the watch's key features (the "Key features" field, never read from the brief).
+2. If code can already reject the reply, it is not sent to the checker, and no call is paid for: no sentence, more than 3 sentences, more than 280 characters, more than one triggered sentence, a triggered question, a number that no brief sentence states, a sentence that may be two ("Acme ships.It retries."; a line break ends a sentence), a triggered sentence when the plan said not to mention the product, or a product claim that an empty brief could not support.
+3. Otherwise one checker call sees the reply's sentences, the brief sentences, the product name and its other names, and which sentences code requires a verdict for (the triggered ones). It does not see the watch's key features themselves, the post, the plan, the drafting prompt or the brief sentences the drafter pointed at (the drafter's list is kept on the draft and shown on the card as the drafter's own note). It says which sentences are about the product, and for each of those and each triggered sentence returns `supported` with brief sentence ids, or `unsupported` with a reason.
+4. Code decides. A checked sentence passes only with `supported`, at least one cited id, every cited id existing in the brief, and no number that the cited sentences lack. A checked sentence that is a question fails. A sentence that no trigger fired on passes in two cases: the checker cleanly says it is not about the product (no verdict, no citation), or the checker reads it as a product claim and it meets the conditions above. A missing, malformed, repeated or self-contradicting answer counts as not supported and is never repaired.
+
+"Any number" is any digit and a closed list of number words read broadly (cardinals, ordinals, fractions and multipliers: "one", "first", "half", "twice", "single"), also where a reply uses them as plain words ("which one", "First, ..."): code cannot tell the uses apart, so the drafter is told to avoid them outside the claim. "At most 1 product claim" is counted per sentence. A sentence that may be two ("works.it retries", "Hmm... that depends") fails; names such as "Node.js" and "docs.example.com" are recognized by their ending (`SAFE_DOT_ENDINGS`).
+
+A failed draft is redrafted with the reasons, then the post is skipped as "not enough evidence", as in assembled mode: one redraft by default (`CLAIM_GATE_MAX_ATTEMPTS=2` draft attempts, the value ADR-0006 specifies; the setting applies to both modes). A founder edit of a written draft goes through the same check; a failing edit needs "Post anyway". A Review keeps one check result per text, for model drafts and for edits: an identical redraft, a nudge that returns the same text, or the same edit saved again shows the same result and makes no second checker call (change the text to get a new check), so the draft and gate state approve names still identify one result. The `needs_written_drafts` skip rule (issue #5) is off in written mode.
+
+**Writing the brief for written drafts.** The checker cites brief sentences by id (`b1`, `b2`, ... in document order). A list item is one sentence, together with its continuation lines. A heading is context: each sentence is shown to the drafter and the checker with the headings, lead-in lines ("Not offered yet:"; for a list, also the sentence right before it without a colon) and parent list items it stands under, so "Slack" under "Not supported yet > Integrations" is read as not supported. A one- or two-word sentence stays with the sentence before it ("We do not offer these yet. Slack. Teams." is one brief sentence). Context between full sentences of a paragraph is not carried, so write each sentence to stand on its own. Short factual sentences check most reliably. A number in a reply must appear in the brief.
+
+**Key features.** To make a feature's name a trigger, enter it in the "Key features" field of the Start Watch form, for example `Signed deliveries, Delivery replay`. A reply sentence that uses one of these terms is checked as a product claim, so it needs a brief sentence that supports it: list only features the brief describes. A term is matched as whole words in the order entered, without regard to case or to punctuation between the words ("dead letter queue" for "Dead-letter queue"), and a regular plural matches its singular in both directions ("a signed delivery", "UIs" for "UI"). Any other spelling is a different term: enter it as its own key feature ("Realtime monitoring" next to "Real-time monitoring"). An entry is the short name of a feature: the API refuses an entry of more than 6 words or 80 characters, an entry with no letter or digit, and more than 20 entries. The brief is never read for key features, not even a list it names "Key features". A watch started without key features has none, and the card shows "Key features from your watch settings: none"; the other triggers and the checker still apply. To give a running watch key features, stop it and start it again (see "Using the System").
+
+**Budget.** The checker call is one more inference call per draft, per nudge and per edit, metered like the others (`CHECK_MAX_OUTPUT_TOKENS`; see "Budget accounting").
+
+**What the tests prove, and what they cannot.** `test_written_switch_criteria.py` runs every must-REJECT case with a fake checker that returns the answer a correct checker must give. That proves the code side: which sentences the triggers force into the check, that a forced sentence is rejected unless the checker cites brief sentences that exist, and which cases code rejects with no checker call. It does not prove that the real model returns the correct answer. Of the 24 must-REJECT cases, code alone rejects 6 before the checker is asked (questions that make a product claim, and numbers no brief sentence states); the other 18 are rejected only if the checker judges entailment correctly, and a wrong `supported` with a real citation would pass them. Measuring that needs a live run on the real model: the blind comparison of `assembled` against `written` on stored evidence (switch criterion 3), which is not built or run yet. The `FakeClaimChecker` used with fake adapters accepts only a brief sentence word for word that does not stand under a negating heading; it is a stand-in, not a paraphrase checker.
+
+Switch criterion 1 covers the 2026-11-21 cases that make a product claim. The five that make none (for example 'I like the idea.') are allowed by design: they are outside the claim gate, and founder review catches their tone (George's decision of 2026-11-25, at the end of the ADR amendment). The test file pins both groups.
 
 ### Post removal (ADR-0006, issue #9)
 
@@ -163,7 +205,9 @@ A removal applies to every stored card of the post (the same post can have a car
 
 Card writes (`store_card`, `update_card`, `delete_post_text`) take SQLite's write lock, so a removal cannot interleave with a write, and any write to a card of a removed post is stored redacted.
 
-Limit: Reviews of the same post under *other* accounts are covered only partly. Their stored cards are redacted, their nudges are refused, and their card writes are stored redacted. However, a Review that is still researching, planning or drafting the post sends it to the model, and one that approves later is not stopped by the recorded removal; it finds out at its own approve re-fetch. Today one account runs watches (ADR-0005), so this path needs a second account reviewing the same post.
+A written draft (issue #12) is text a model wrote after reading the post, so a removal also redacts the draft text, the sentence and reason of each sentence check, the drafter's hints, the founder's nudges on it (they are written while looking at that text), and the edited-text results and "Post anyway" sentences of the card (`redact_removed_card` lists every field). The supporting brief sentences stay: they are the founder's own text. An assembled draft is code-inserted text and is kept, as before. `check_written_draft`, like `draft_reply`, refuses to send a text to the model once the card records a removal.
+
+Limit: Reviews of the same post under *other* accounts are covered only partly. Their stored cards are redacted, their nudges are refused, and their card writes are stored redacted. However, a Review that is still researching, planning or drafting the post sends it to the model, and one that approves later is not stopped by the recorded removal; it finds out at its own approve re-fetch. Today one account runs watches (ADR-0005), so this path needs a second account reviewing the same post. In written mode (issue #12) the limit is narrower: before the written drafter is sent the post, and before a written draft is sent to the checker, the activity asks whether any card of the post records a removal, and the Review then ends as skipped "Post removed". Research and planning are not covered in either mode.
 
 Each re-fetch reserves one X read through `backend/budget.py` (about $0.005, ADR-0005). Over budget it raises and removes nothing. A re-fetch that finds the post gone is reconciled to 0 reads: X returned no post object (issue #17). A 404 on the founder's *reply* URL does not touch the target post's text.
 
@@ -211,7 +255,8 @@ call is counted per Temporal activity attempt:
   from an upper bound on the prompt's tokens (`prompt_token_bound`: its UTF-8
   bytes, since a byte-level BPE token covers at least one byte) plus the call's
   max output tokens (`RESEARCH_MAX_OUTPUT_TOKENS`, `PLAN_MAX_OUTPUT_TOKENS`,
-  `DRAFT_MAX_OUTPUT_TOKENS`, sent as `max_completion_tokens`). The activity opens
+  `DRAFT_MAX_OUTPUT_TOKENS`, and `CHECK_MAX_OUTPUT_TOKENS` for the written-draft
+  claim checker, issue #12; sent as `max_completion_tokens`). The activity opens
   the meter with `meter_inference()`; an adapter that makes a paid call reserves
   through `current_inference_meter()`. Each call is then reconciled to the
   reported usage; missing or partial usage keeps the full reservation.
@@ -244,8 +289,13 @@ call is counted per Temporal activity attempt:
   released; a 404 that does not name the post is raised as the HTTP error and
   released. The eval re-fetch (`refetch_stored_card_target`) counts the same way.
 - Output that hits the max output tokens (`finish_reason == "length"`) fails
-  research, plan and draft without retry (`InferenceOutputTruncated`); the call
-  stays counted.
+  research, plan, draft and check without retry (`InferenceOutputTruncated`);
+  the call stays counted.
+- The claim checker (`PlainClaimChecker`, issue #12) reserves and settles its
+  call through the same helper as the reply agent
+  (`backend/adapters/metered_completion.py`), inside the meter the
+  `check_written_draft` activity opens. A text that code rejects before the
+  checker call costs nothing.
 - The OpenAI client runs with `max_retries=0`: Temporal's retry policy owns
   retries, so each retried request is reserved and counted.
 - `FakeReplyAgent` makes no paid calls and reserves nothing.
@@ -255,7 +305,8 @@ call is counted per Temporal activity attempt:
 For testing and CI, the system uses fake adapters:
 
 - **FakeXClient:** Returns synthetic posts, no API calls
-- **FakeReplyAgent:** Deterministic research and drafting
+- **FakeReplyAgent:** Deterministic research and drafting (assembled and written)
+- **FakeClaimChecker:** Deterministic written-draft checker: supports only a brief sentence word for word, and nothing under a heading that may negate it ("Not supported yet", "Roadmap")
 
 These allow the full system to run without API keys.
 
@@ -265,7 +316,7 @@ To use real X and LLM APIs:
 
 1. Set API keys in `.env`
 2. Replace `FakeXClient` with a real X client in activities
-3. Replace `FakeReplyAgent` with `PlainReplyAgent` (or Agent Kit adapter)
+3. Replace `FakeReplyAgent` with `PlainReplyAgent` (or Agent Kit adapter); `REPLY_AGENT_ADAPTER=plain` also selects `PlainClaimChecker`
 4. Monitor spend limits in the config
 
 ## Troubleshooting

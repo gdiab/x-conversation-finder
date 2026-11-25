@@ -7,6 +7,7 @@ import type { ReviewCard as ReviewCardType } from '../api/client';
 import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId, PostRemovedError, ReviewApiError } from '../api/client';
 import { ReplyFitPanel } from './ReplyFitPanel';
 import { ReplyPlanPanel } from './ReplyPlanPanel';
+import { SentenceCheckList } from './SentenceCheckList';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -55,6 +56,32 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   };
   const draftText = card.evidence.draft?.text;
   useEffect(closePostAnyway, [draftText, card.edited_text_gate_state]);
+  // The edit box follows the card while it is closed, so it never opens on a
+  // draft the card no longer has. When the post was removed (issue #9), the
+  // edit box and the nudge field are emptied and closed even while open: a
+  // written draft is model text that can quote the post, and neither it nor
+  // a quote of it may stay on screen (issue #12).
+  const textRemoved = card.post.text_removed === true;
+  useEffect(() => {
+    if (textRemoved) {
+      setIsEditing(false);
+      editRequestId.current = null;
+      // A nudge being typed may quote the draft: it goes with it
+      setIsNudging(false);
+      setNudgeInstruction('');
+      nudgeRequestId.current = null;
+    }
+    if (textRemoved || !isEditing) {
+      setEditText(draftText ?? '');
+    }
+    // isEditing is left out on purpose: closing the box by hand must not
+    // discard what Cancel and Save already handle
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftText, textRemoved]);
+  // issue #12: a written draft is the model's free text, checked per sentence
+  // against the brief. An assembled draft is shown by its segments.
+  const written = card.evidence.draft?.mode === 'written';
+  const edited = card.edited_text_gate_state != null;
   // The draft as currently shown, so a rejection that arrives after the card
   // changed is not taken as a rejection of the new draft
   const shownDraft = `${draftText ?? ''}\u0000${card.edited_text_gate_state ?? ''}`;
@@ -316,12 +343,15 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         {card.evidence.founder_materials.length > 0 && (
           <div style={{ marginBottom: '12px' }}>
             <strong>Supporting Material:</strong>
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px', marginBottom: '8px' }}>
-              Sentences starting with unresolved referents (it/this/that/etc.) cannot be selected as claims.
-            </div>
+            {!written && (
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px', marginBottom: '8px' }}>
+                Sentences starting with unresolved referents (it/this/that/etc.) cannot be selected as claims.
+              </div>
+            )}
             {card.evidence.founder_materials.map((material, idx) => {
               // Check if any failed sentences mention unresolved referents in this passage
-              const hasUnresolvedReferents = card.evidence.draft?.claim_gate.failed_sentences.some(
+              // An assembled-gate reason; a written check's free-text reason is not read for it
+              const hasUnresolvedReferents = !written && card.evidence.draft?.claim_gate.failed_sentences.some(
                 (failure) => failure.reason.toLowerCase().includes('unresolved referent')
               );
               
@@ -360,7 +390,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
 
         {card.evidence.draft && (
           <div style={{ marginTop: '12px' }}>
-            <strong>Claim Gate:</strong>{' '}
+            {/* Once a written draft was edited, this result is the model's draft's, not the current text's */}
+            <strong>
+              {written
+                ? (edited ? "Product claim check of the model's draft (before your edit):" : 'Product claim check:')
+                : 'Claim Gate:'}
+            </strong>{' '}
             <span style={{ color: card.evidence.draft.claim_gate.passed ? 'green' : 'red' }}>
               {card.evidence.draft.claim_gate.passed ? 'PASSED' : 'FAILED'}
             </span>
@@ -374,10 +409,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 </div>
                 {card.evidence.draft.claim_gate.failed_sentences.map((failure, idx) => {
                   // S7 (QA R14): Dedicated copy for abbreviation-ending reason
+                  // These two rewrites explain assembled-gate reasons. A written check's
+                  // reason is the checker's own words and is shown as it is (issue #12).
                   let displayReason = failure.reason;
-                  if (failure.reason.toLowerCase().includes('abbreviation')) {
+                  if (!written && failure.reason.toLowerCase().includes('abbreviation')) {
                     displayReason = 'Sentence ends with an abbreviation and is not selectable. Abbreviations like Inc., Ltd., Dr., etc. at the end of a sentence cannot be used as claims.';
-                  } else if (failure.reason.toLowerCase().includes('unresolved referent')) {
+                  } else if (!written && failure.reason.toLowerCase().includes('unresolved referent')) {
                     displayReason = 'Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above) and cannot stand alone as a claim.';
                   }
                   
@@ -403,7 +440,71 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       </div>
 
       {/* Reply Plan (issue #5): shown above the draft */}
-      <ReplyPlanPanel evidence={card.evidence} edited={card.edited_text_gate_state != null} />
+      <ReplyPlanPanel evidence={card.evidence} edited={edited} />
+
+      {/* issue #12: written mode was asked for, but this watch has no product name */}
+      {card.evidence.draft_mode_note && (
+        <div role="note" style={{
+          backgroundColor: '#fff8e1',
+          border: '1px solid #ffe082',
+          padding: '12px',
+          borderRadius: '4px',
+          marginBottom: '20px',
+          fontSize: '14px',
+        }}>
+          {card.evidence.draft_mode_note}
+        </div>
+      )}
+
+      {/* Written draft (issue #12): the check of each sentence replaces the segment display */}
+      {written && card.evidence.draft && (
+        <div style={{ marginBottom: '20px' }}>
+          <h4>Product Claim Check</h4>
+          <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
+            The reply was written by the model. A sentence is checked as a product claim when it names
+            the product
+            {card.evidence.draft.written?.product_name && <> ("{card.evidence.draft.written.product_name}"
+              {(card.evidence.draft.written.product_aliases ?? []).map((alias) => `, "${alias}"`)})</>}
+            , uses we/our/us/ours, contains a number, makes a comparison or uses one of the watch's
+            key features, or when a separate checker reads it as about the product. A product claim
+            must be supported by sentences of your brief.
+          </div>
+          <div style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
+            Key features from your watch settings:{' '}
+            {(card.evidence.draft.written?.feature_terms ?? []).length > 0
+              ? card.evidence.draft.written?.feature_terms.join(', ')
+              : 'none (the watch was started without key features, so no sentence is checked for using one)'}
+          </div>
+          {edited ? (
+            <div style={{ fontSize: '14px', color: '#666' }}>
+              {card.edited_text_gate_state === 'not_checked'
+                ? 'The draft was edited after this check, and the check of the edited text could not run. Approving it needs "Post anyway".'
+                : 'The draft was edited after this check. The check of the edited text is shown below the draft.'}
+            </div>
+          ) : (
+            <SentenceCheckList checks={card.evidence.draft.sentence_checks ?? []} />
+          )}
+          {/* ADR-0006 amendment 2026-11-24, step 1: the drafter's own list is provenance.
+              It stays on the card after an edit, labelled as the model's draft's. */}
+          {(card.evidence.draft.written?.drafter_hints ?? []).length > 0 && (
+            <div data-testid="drafter-citations" style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
+              <div style={{ marginBottom: '4px' }}>
+                <strong>
+                  {edited ? "The drafter's own citations, for the model's draft (before your edit)." : "The drafter's own citations."}
+                </strong>{' '}
+                The model that wrote the draft named these brief sentences as its support. This is a
+                record only: the checker was not shown it, and it is not a verdict.
+                {edited && ' It says nothing about the edited text.'}
+              </div>
+              {(card.evidence.draft.written?.drafter_hints ?? []).map((hint, idx) => (
+                <div key={idx}>
+                  "{hint.sentence}": {(hint.brief_sentence_ids ?? []).length > 0 ? hint.brief_sentence_ids.join(', ') : 'no brief sentence named'}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Segments with Tags */}
       {card.evidence.draft && card.evidence.draft.segments.length > 0 && (
@@ -603,6 +704,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 padding: '12px',
                 borderRadius: '4px',
                 marginBottom: '8px',
+                // A written draft or an edit can have line breaks; show them as they will be posted
+                whiteSpace: 'pre-wrap',
               }}>
                 {card.evidence.draft.text}
               </div>
@@ -625,7 +728,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       {/* Edited Text Gate Results (ADR-0006 Amendment E + QA R11 B2/C) */}
       {card.edited_text_gate_results && card.edited_text_gate_results.length > 0 && (
         <div style={{ marginBottom: '20px', borderTop: '1px solid #eee', paddingTop: '20px' }}>
-          <h4>Edited Text Gate Results</h4>
+          <h4>{written ? 'Check of the Edited Text' : 'Edited Text Gate Results'}</h4>
           
           {/* Gate State Badge */}
           {card.edited_text_gate_state && (
@@ -660,9 +763,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           )}
           
           <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
-            Each sentence from the edited text is re-verified against the strict claim gate.
+            {written
+              ? 'Each sentence of the edited text went through the same product-claim check as the draft.'
+              : 'Each sentence from the edited text is re-verified against the strict claim gate.'}
           </div>
-          {card.edited_text_gate_results.map((result, idx) => {
+          {written && <SentenceCheckList checks={card.edited_text_gate_results} />}
+          {!written && card.edited_text_gate_results.map((result, idx) => {
             const isPassed = result.passed;
             const isKept = result.kept_segment;
             

@@ -49,6 +49,16 @@ class TopicWatchInput:
     seen_post_ids: Optional[list[str]] = None
     config: TopicWatchConfig = None
     review_config: ReviewConfig = None
+    # issue #12: the Start Watch form's "Product name" and "Also called"
+    # fields, passed to each Review for the written-draft name trigger. The
+    # defaults are what a watch started before the fields existed decodes to;
+    # its Reviews stay in assembled mode until it is restarted with a name.
+    product_name: str = ""
+    product_aliases: Optional[list[str]] = None
+    # issue #12 (George's decision, 2026-11-25): the form's optional "Key
+    # features" list, passed to each Review like the aliases. It is the only
+    # source of feature terms. None for a watch started without the field.
+    key_features: Optional[list[str]] = None
     
     def __post_init__(self):
         """Default configs if not provided."""
@@ -156,6 +166,9 @@ class TopicWatchWorkflow:
                                 account=input.account,
                                 confidence_threshold=input.confidence_threshold,
                                 config=input.review_config,
+                                product_name=input.product_name,
+                                product_aliases=input.product_aliases,
+                                key_features=input.key_features,
                             ),
                             id=review_id,
                             parent_close_policy=ParentClosePolicy.ABANDON,
@@ -213,6 +226,9 @@ class TopicWatchWorkflow:
                 seen_post_ids=seen_post_ids,
                 config=input.config,
                 review_config=input.review_config,
+                product_name=input.product_name,
+                product_aliases=input.product_aliases,
+                key_features=input.key_features,
             )
         )
     

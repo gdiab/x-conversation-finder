@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Literal
 
 from .reply_plan import ReplyPlan
+from .written import DRAFT_MODE_ASSEMBLED, SentenceCheck, WrittenDraftInfo
 
 
 @dataclass
@@ -90,6 +91,15 @@ class Draft:
     # issue #5: reasons the draft does not follow the reply plan (empty = conforms
     # or no plan). Computed by the draft_reply activity, so the verdict is in history.
     plan_conformance_failures: List[str] = field(default_factory=list)
+    # --- Written drafts (issue #12; ADR-0006 amendment 2026-11-24) ---
+    # "assembled": segments by reference, text inserted by code (the default,
+    # and every draft recorded before the setting existed). "written": the
+    # model wrote `text`; `segments` is empty and `sentence_checks` holds the
+    # per-sentence product-claim check.
+    mode: str = DRAFT_MODE_ASSEMBLED
+    sentence_checks: List[SentenceCheck] = field(default_factory=list)
+    written: Optional[WrittenDraftInfo] = None
+    # --- end written drafts ---
 
 
 # --- Issue #4: "should we reply?" features (self-contained block) ---
@@ -143,6 +153,14 @@ class Evidence:
     # A plan-stage skip rule that fired on a valid plan (e.g. needs_written_drafts)
     reply_plan_skip_rule: Optional[str] = None
     # --- end reply plan ---
+    # --- Written drafts (issue #12) ---
+    # The draft mode the plan_reply activity fixed for this Review: "assembled"
+    # or "written". None on Reviews planned before the setting existed; they
+    # stay assembled. The note says why written mode was asked for but not
+    # used (the watch has no product name).
+    draft_mode: Optional[str] = None
+    draft_mode_note: Optional[str] = None
+    # --- end written drafts ---
     
     def compute_confidence(self) -> float:
         """

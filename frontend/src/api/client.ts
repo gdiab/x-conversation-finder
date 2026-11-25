@@ -39,6 +39,53 @@ export interface ReplyPlan {
   model_used: string;
 }
 
+// Written drafts (issue #12; ADR-0006 amendment 2026-11-24): the model writes
+// the reply, and code checks each sentence's product claims against the brief.
+export type DraftMode = "assembled" | "written";
+
+/** One sentence of the product brief, under the id the checker cites. */
+export interface BriefSentence {
+  id: string;
+  text: string;
+  // The heading or list lead-in the sentence stands under ("Not supported yet")
+  context?: string;
+}
+
+/** A deterministic trigger that made code check a sentence as a product claim. */
+export interface TriggerHit {
+  trigger: "product_name" | "first_person_plural" | "number" | "comparison" | "feature_term" | string;
+  // The matched text: the product name or alias, "our", a number, a key feature...
+  match: string;
+}
+
+/** The check of one sentence of a written draft or of a founder edit of one. */
+export interface SentenceCheck {
+  sentence: string;
+  passed: boolean;
+  // "claim": checked as a product claim. "non_claim": not gated against the brief.
+  kind: "claim" | "non_claim";
+  reason: string;
+  kept_segment: boolean;
+  triggers: TriggerHit[];
+  // The independent checker classified the sentence as about the product
+  checker_flagged: boolean;
+  verdict: "supported" | "unsupported" | "not_a_product_claim" | "not_checked" | string;
+  // The brief sentences the checker cited and code confirmed exist
+  supporting: BriefSentence[];
+}
+
+/** A per-sentence result of an edit: the assembled re-gate's, or (written mode) a SentenceCheck. */
+export type EditGateResult = {
+  sentence: string;
+  passed: boolean;
+  kind: "claim" | "non_claim";
+  reason: string;
+  kept_segment: boolean;
+  phrase_id?: string | null;
+  source_passage_id?: string | null;
+  sentence_index?: number | null;
+} & Partial<Pick<SentenceCheck, "triggers" | "checker_flagged" | "verdict" | "supporting">>;
+
 export interface ReviewCard {
   workflow_id: string;
   post: {
@@ -113,6 +160,21 @@ export interface ReviewCard {
       output_tokens: number;
       // issue #5: reasons the draft does not follow the reply plan (empty = conforms)
       plan_conformance_failures?: string[];
+      // issue #12. Absent on cards stored before draft modes existed (assembled).
+      mode?: DraftMode;
+      // Written mode: the check of each sentence of the model's draft
+      sentence_checks?: SentenceCheck[];
+      written?: {
+        product_name: string;
+        product_aliases: string[];
+        // The watch's "Key features" (a trigger). Never read from the brief.
+        feature_terms: string[];
+        // The brief sentences the drafter said support its own sentences:
+        // provenance only, never sent to the checker. Emptied on removal.
+        drafter_hints?: Array<{ sentence: string; brief_sentence_ids: string[] }>;
+        checker_called?: boolean;
+        checker_model?: string;
+      } | null;
     } | null;
     skip_reason: string | null;
     // Issue #4: should-we-reply features (proposed by research, checked by code).
@@ -124,6 +186,10 @@ export interface ReviewCard {
     reply_plan_attempts?: number;
     // A plan-stage skip rule that fired on a valid plan (e.g. "needs_written_drafts")
     reply_plan_skip_rule?: string | null;
+    // issue #12: the draft mode this Review was planned under, and why written
+    // mode was asked for but not used (the watch has no product name)
+    draft_mode?: DraftMode | null;
+    draft_mode_note?: string | null;
   };
   status: ReviewStatus;
   created_at: string;
@@ -139,16 +205,7 @@ export interface ReviewCard {
     url: string;
   }> | null;
   // Edit re-gate fields (ADR-0006 Amendment E + QA R11 B2/C)
-  edited_text_gate_results: Array<{
-    sentence: string;
-    passed: boolean;
-    kind: "claim" | "non_claim";
-    reason: string;
-    kept_segment: boolean;
-    phrase_id: string | null;
-    source_passage_id: string | null;
-    sentence_index: number | null;
-  }> | null;
+  edited_text_gate_results: EditGateResult[] | null;
   edited_text_gate_state: "passed" | "failed" | "not_checked" | null;
   post_anyway: boolean | null;
   post_anyway_failing_sentences: string[] | null;
@@ -159,6 +216,12 @@ export interface StartWatchRequest {
   topic: string;
   query: string;
   product_brief: string;
+  // issue #12: the form's "Product name" (required), "Also called" and
+  // "Key features" (both optional). Written drafts check any reply sentence
+  // that uses one of these names or features against the brief.
+  product_name: string;
+  product_aliases: string[];
+  key_features: string[];
 }
 
 const API_BASE = '/api';
@@ -179,7 +242,26 @@ export async function startWatch(request: StartWatchRequest): Promise<{ workflow
   });
   
   if (!response.ok) {
-    throw new Error(`Failed to start watch: ${response.statusText}`);
+    // The API explains a refused request in "detail", and for a field it
+    // refused (a missing product name, too many aliases) in "errors"
+    let detail = response.statusText;
+    try {
+      const body = await response.json();
+      if (typeof body?.detail === 'string' && body.detail) detail = body.detail;
+      // Each entry: {loc: ["body", "product_aliases"], msg: "Value error, At most 10 aliases", ...}
+      const reasons = (Array.isArray(body?.errors) ? body.errors : [])
+        .map((e: { loc?: unknown; msg?: unknown }) => {
+          if (typeof e?.msg !== 'string') return '';
+          const field = Array.isArray(e.loc) ? e.loc.filter((part) => typeof part === 'string' && part !== 'body').pop() : null;
+          const msg = e.msg.replace(/^Value error, /, '');
+          return field ? `${field}: ${msg}` : msg;
+        })
+        .filter(Boolean);
+      if (reasons.length > 0) detail = reasons.join('; ');
+    } catch {
+      // Not JSON: keep the status text
+    }
+    throw new Error(`Failed to start watch: ${detail}`);
   }
   
   return response.json();

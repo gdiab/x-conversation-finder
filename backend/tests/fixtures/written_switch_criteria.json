@@ -1,0 +1,701 @@
+{
+  "note": "Switch-criteria cases for written drafts (issue #12; ADR-0006 amendment 2026-11-24). Synthetic products, briefs and sentences. 'correct_checker' is the answer a correct checker must give for each sentence of the text, in order (null: code rejects the text before any checker call). 'triggers' lists, per sentence, the deterministic triggers that must fire. 'decided_by' says what the outcome rests on: 'code' (rejected in code, no checker call: a question that makes a product claim, or a number no brief sentence states), 'trigger' (a trigger forces the check, so the text is rejected unless the checker returns 'supported' with existing brief sentence ids), 'checker' (no trigger; rests on the checker's classification or verdict), 'step-4' (not a product claim; not gated against the brief).",
+  "briefs": {
+    "classic": {
+      "product_name": "Acme",
+      "product_aliases": [],
+      "key_features": [],
+      "text": "Our product helps developers build reliable systems. Our product provides automatic failover. Our product guarantees strong consistency."
+    },
+    "relay": {
+      "product_name": "Acme Relay",
+      "product_aliases": [
+        "Relay"
+      ],
+      "key_features": [
+        "Signed deliveries",
+        "Delivery replay"
+      ],
+      "text": "# Acme Relay\n\nAcme Relay delivers webhooks to your services. Relay can retry a failed delivery up to five times. Signed deliveries are available on the Team plan. Relay is faster than polling for changes. The replay tool lets you resend any delivery from the last 30 days. Our dashboard shows delivery latency per endpoint.\n\nKey features:\n- Signed deliveries\n- Delivery replay"
+    }
+  },
+  "cases": [
+    {
+      "id": "e21-it-supports-retries",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "It supports retries.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief does not mention retries."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "checker",
+      "why": "A capability stated of a pronoun subject. No trigger fires; a correct checker reads it as about the product and finds no support."
+    },
+    {
+      "id": "e21-we-are-acme-inc",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "We are Acme Inc.",
+      "triggers": [
+        [
+          "first_person_plural",
+          "product_name"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief does not say who makes the product."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "why": "Uses \"we\" and the product name, so it must be supported, and this brief does not state it. (In 2026-11-21 it was rejected as a quote ending in an abbreviation; written drafts insert no quotes.)"
+    },
+    {
+      "id": "e21-passage-sentence-as-question",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Our product helps developers build reliable systems?",
+      "triggers": [
+        [
+          "first_person_plural"
+        ]
+      ],
+      "correct_checker": null,
+      "expect": "reject",
+      "decided_by": "code",
+      "why": "A product claim must be a statement. The brief states this sentence word for word, and the question form is still rejected in code, before any checker call."
+    },
+    {
+      "id": "e21-phrase-with-period",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "What stack are you on.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "step-4",
+      "why": "Not a product claim: a question to the poster with the wrong punctuation. In 2026-11-21 it failed only because it was not a fixed phrase."
+    },
+    {
+      "id": "e21-phrase-with-exclamation",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "What stack are you on!",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "step-4",
+      "why": "Not a product claim; see e21-phrase-with-period."
+    },
+    {
+      "id": "e21-i-think-its-way-cheaper",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "I think it's way cheaper.",
+      "triggers": [
+        [
+          "comparison"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief states no price comparison."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "why": "A comparison, so it must be supported, and the brief compares no prices."
+    },
+    {
+      "id": "e21-thanks-its-way-cheaper",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Thanks! It's way cheaper.",
+      "triggers": [
+        [],
+        [
+          "comparison"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        },
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief states no price comparison."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "why": "The second sentence is a comparison."
+    },
+    {
+      "id": "e21-ours-is-10x-quicker",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Hi! Ours is 10x quicker.",
+      "triggers": [
+        [],
+        [
+          "comparison",
+          "first_person_plural",
+          "number"
+        ]
+      ],
+      "correct_checker": null,
+      "expect": "reject",
+      "decided_by": "code",
+      "why": "\"Ours\", a number and a comparison. No brief sentence states \"10\", so code rejects it before any checker call."
+    },
+    {
+      "id": "e21-teams-switched-to-us",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Hello, many teams switched from Temporal to us.",
+      "triggers": [
+        [
+          "first_person_plural"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief names no customers or migrations."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "why": "\"Us\": a statement about our side that the brief does not make."
+    },
+    {
+      "id": "e21-twenty-integrations",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Thanks. The product has twenty integrations.",
+      "triggers": [
+        [],
+        [
+          "number"
+        ]
+      ],
+      "correct_checker": null,
+      "expect": "reject",
+      "decided_by": "code",
+      "why": "A number that no brief sentence states: code rejects it before any checker call."
+    },
+    {
+      "id": "e21-is-ours-10x-faster-than-kafka",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Is ours 10x faster than Kafka?",
+      "triggers": [
+        [
+          "comparison",
+          "first_person_plural",
+          "number"
+        ]
+      ],
+      "correct_checker": null,
+      "expect": "reject",
+      "decided_by": "code",
+      "why": "A product claim in a question: rejected in code before any checker call."
+    },
+    {
+      "id": "e21-i-think-this-works-well",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "I think this works well.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "A quality claim about an unnamed subject; the brief does not state it."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "checker",
+      "why": "A quality stated of a pronoun subject. No trigger fires; a correct checker reads it as about the product."
+    },
+    {
+      "id": "e21-i-think-they-are-the-same",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "I think they are the same.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "A comparison of unnamed subjects; the brief does not state it."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "checker",
+      "why": "A comparison stated of a pronoun subject. No trigger fires; a correct checker reads it as about the product."
+    },
+    {
+      "id": "e21-i-like-the-idea",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "I like the idea.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "step-4",
+      "why": "Not a product claim: agreement with the poster. Step 4 of the 2026-11-24 amendment leaves it to founder review."
+    },
+    {
+      "id": "e21-i-think-you-are-the-problem",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "I think you are the problem.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "step-4",
+      "why": "Not a product claim: a (rude) remark about the poster. The check covers product claims, not tone; founder review is the backstop."
+    },
+    {
+      "id": "e21-why-is-the-issue-the-same",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Why is the issue the same?",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "step-4",
+      "why": "Not a product claim: a question about the poster's issue."
+    },
+    {
+      "id": "e21-opener-after-claim",
+      "source": "2026-11-21 edit-path must-REJECT",
+      "brief": "classic",
+      "text": "Thanks for sharing. Our product supports SSO. Hi!",
+      "triggers": [
+        [],
+        [
+          "first_person_plural"
+        ],
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        },
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief does not mention SSO."
+        },
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "why": "\"Our product supports SSO\" must be supported and this brief does not mention SSO. (In 2026-11-21 it failed on segment order, a rule written drafts do not have: with a brief that states SSO support it would pass.)"
+    },
+    {
+      "id": "a24-added-qualifier-time-limit",
+      "source": "2026-11-24 adversarial set",
+      "kind": "adds a qualifier",
+      "brief": "relay",
+      "text": "Relay can retry a failed delivery up to five times within a minute.",
+      "triggers": [
+        [
+          "number",
+          "product_name"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief states no time limit for retries."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "paraphrases": "b2",
+      "why": "Adds \"within a minute\" to brief sentence b2."
+    },
+    {
+      "id": "a24-added-qualifier-every-plan",
+      "source": "2026-11-24 adversarial set",
+      "kind": "adds a qualifier",
+      "brief": "relay",
+      "text": "Signed deliveries are available on every plan.",
+      "triggers": [
+        [
+          "feature_term"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief says the Team plan, not every plan."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "paraphrases": "b3",
+      "why": "Widens b3 from the Team plan to every plan."
+    },
+    {
+      "id": "a24-dropped-qualifier-plan",
+      "source": "2026-11-24 adversarial set",
+      "kind": "drops a qualifier",
+      "brief": "relay",
+      "text": "Signed deliveries are available.",
+      "triggers": [
+        [
+          "feature_term"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief limits signed deliveries to the Team plan."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "paraphrases": "b3",
+      "why": "Drops \"on the Team plan\" from b3."
+    },
+    {
+      "id": "a24-dropped-qualifier-window",
+      "source": "2026-11-24 adversarial set",
+      "kind": "drops a qualifier",
+      "brief": "relay",
+      "text": "The replay tool lets you resend any delivery.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief limits replay to the last 30 days."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "checker",
+      "paraphrases": "b5",
+      "why": "Drops \"from the last 30 days\" from b5. No trigger fires."
+    },
+    {
+      "id": "a24-modal-can-to-will",
+      "source": "2026-11-24 adversarial set",
+      "kind": "changes a modal",
+      "brief": "relay",
+      "text": "Relay will retry a failed delivery up to five times.",
+      "triggers": [
+        [
+          "number",
+          "product_name"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief says can, not will."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "paraphrases": "b2",
+      "why": "Changes \"can\" to \"will\" in b2."
+    },
+    {
+      "id": "a24-modal-can-to-always",
+      "source": "2026-11-24 adversarial set",
+      "kind": "changes a modal",
+      "brief": "relay",
+      "text": "Relay always retries a failed delivery.",
+      "triggers": [
+        [
+          "product_name"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief says it can retry, up to five times; not that it always does."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "paraphrases": "b2",
+      "why": "Changes \"can\" to \"always\" in b2."
+    },
+    {
+      "id": "a24-swapped-comparison",
+      "source": "2026-11-24 adversarial set",
+      "kind": "swaps a comparison",
+      "brief": "relay",
+      "text": "Polling for changes is faster than Relay.",
+      "triggers": [
+        [
+          "comparison",
+          "product_name"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief says the opposite."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "paraphrases": "b4",
+      "why": "Reverses b4."
+    },
+    {
+      "id": "a24-wrong-feature-dashboard",
+      "source": "2026-11-24 adversarial set",
+      "kind": "attributes a claim to a different feature",
+      "brief": "relay",
+      "text": "Our dashboard lets you resend any delivery from the last 30 days.",
+      "triggers": [
+        [
+          "first_person_plural",
+          "number"
+        ]
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief says the replay tool does that, not the dashboard."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "trigger",
+      "paraphrases": "b5",
+      "why": "Moves what b5 says of the replay tool to the dashboard of b6."
+    },
+    {
+      "id": "a24-wrong-feature-replay-plan",
+      "source": "2026-11-24 adversarial set",
+      "kind": "attributes a claim to a different feature",
+      "brief": "relay",
+      "text": "The replay tool is available on the Team plan.",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "unsupported",
+          "reason": "The brief says that of signed deliveries, not of the replay tool."
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "checker",
+      "paraphrases": "b3",
+      "why": "Moves what b3 says of signed deliveries to the replay tool. No trigger fires."
+    },
+    {
+      "id": "a24-claim-in-question-ours",
+      "source": "2026-11-24 adversarial set",
+      "kind": "hides a claim in a question",
+      "brief": "relay",
+      "text": "Did you know ours can retry a failed delivery up to five times?",
+      "triggers": [
+        [
+          "first_person_plural",
+          "number"
+        ]
+      ],
+      "correct_checker": null,
+      "expect": "reject",
+      "decided_by": "code",
+      "paraphrases": "b2",
+      "why": "b2 as a question. Rejected in code before any checker call, although the brief supports the claim."
+    },
+    {
+      "id": "a24-claim-in-question-it",
+      "source": "2026-11-24 adversarial set",
+      "kind": "hides a claim in a question",
+      "brief": "relay",
+      "text": "Did you know it shows delivery latency per endpoint?",
+      "triggers": [
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": true,
+          "verdict": "supported",
+          "brief_sentence_ids": [
+            "b6"
+          ]
+        }
+      ],
+      "expect": "reject",
+      "decided_by": "checker",
+      "paraphrases": "b6",
+      "why": "b6 as a question, with no trigger word. A correct checker reads it as about the product, and code then rejects the question form even though the checker calls it supported."
+    },
+    {
+      "id": "a24-changed-number",
+      "source": "2026-11-24 adversarial set",
+      "kind": "adds a specific (number)",
+      "brief": "relay",
+      "text": "Relay can retry a failed delivery up to ten times.",
+      "triggers": [
+        [
+          "number",
+          "product_name"
+        ]
+      ],
+      "correct_checker": null,
+      "expect": "reject",
+      "decided_by": "code",
+      "paraphrases": "b2",
+      "why": "Changes the number in b2. No brief sentence states \"ten\", so code rejects it before any checker call."
+    },
+    {
+      "id": "pass-verbatim-claim",
+      "source": "must-PASS",
+      "brief": "relay",
+      "text": "The retry policy is the interesting part. Relay can retry a failed delivery up to five times. What does your queue do when the endpoint stays down?",
+      "triggers": [
+        [],
+        [
+          "number",
+          "product_name"
+        ],
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        },
+        {
+          "about_product": true,
+          "verdict": "supported",
+          "brief_sentence_ids": [
+            "b2"
+          ]
+        },
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "checker",
+      "why": "A reaction, one claim the brief states, and a question about the poster's setup."
+    },
+    {
+      "id": "pass-paraphrased-claim",
+      "source": "must-PASS",
+      "brief": "relay",
+      "text": "A dropped webhook is a quiet way to lose data. If a delivery fails, Relay can retry it up to five times. How do you notice a missed delivery today?",
+      "triggers": [
+        [],
+        [
+          "number",
+          "product_name"
+        ],
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        },
+        {
+          "about_product": true,
+          "verdict": "supported",
+          "brief_sentence_ids": [
+            "b2"
+          ]
+        },
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "checker",
+      "why": "The claim rephrases b2 without changing its meaning."
+    },
+    {
+      "id": "pass-no-product",
+      "source": "must-PASS",
+      "brief": "relay",
+      "text": "That matches what I have seen with webhook consumers. What does your queue do when the endpoint stays down?",
+      "triggers": [
+        [],
+        []
+      ],
+      "correct_checker": [
+        {
+          "about_product": false
+        },
+        {
+          "about_product": false
+        }
+      ],
+      "expect": "pass",
+      "decided_by": "step-4",
+      "why": "No product sentence at all."
+    }
+  ]
+}

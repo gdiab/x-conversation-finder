@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
@@ -36,8 +36,14 @@ from backend.workflows.review import (
     POST_REMOVED_ERROR,
     DRAFT_CHANGED_ERROR,
 )
-from backend.activities.store_activities import apply_stored_removal, get_all_cards
+from backend.activities.store_activities import (
+    POST_TEXT_REMOVED,
+    apply_stored_removal,
+    card_post_text_removed,
+    get_all_cards,
+)
 from backend.database import init_db
+from backend.gate.written_check import MAX_FEATURE_TERM_WORDS, clean_feature_terms, feature_term_words
 from backend.budget import get_today_budget
 
 # Configure logging
@@ -134,13 +140,23 @@ def temporal_not_connected() -> JSONResponse:
     return error_response(500, "server_error", "Temporal client not connected")
 
 
-def review_error_response(exc: Exception, action: str) -> JSONResponse:
+# A refusal can quote the draft: a rejected nudge names the failing sentence
+# and the checker's reason, and post_anyway_required lists failing sentences.
+REFUSAL_DETAILS_REMOVED = "The request was refused. Its details were removed with the post."
+
+
+def review_error_response(exc: Exception, action: str, workflow_id: Optional[str] = None) -> JSONResponse:
     """Map an exception from a Review update, signal or query to a response.
 
     A rejected update (validator or handler) is a WorkflowUpdateFailedError
     whose str() is only "Workflow update failed"; the reason is its cause.
     Only failures that are not the Review's own decision (an activity that
     failed, Temporal unreachable) are 500s.
+
+    With `workflow_id`, a refusal that can quote the draft ("rejected",
+    "post_anyway_required") is returned without those quotes once the stored
+    card records that the post was removed (issue #12; the same rule as the
+    edit and nudge success responses).
     """
     cause = exc.cause if isinstance(exc, WorkflowUpdateFailedError) else None
     # An activity can refuse on purpose too: draft_reply refuses to redraft
@@ -162,7 +178,13 @@ def review_error_response(exc: Exception, action: str) -> JSONResponse:
                 "gate_state": details.get("gate_state"),
                 "failing_sentences": list(details.get("failing_sentences") or []),
             }
-        return error_response(status_code, code, cause.message, **extra)
+        detail = cause.message
+        if code in ("rejected", "post_anyway_required") and workflow_id and card_post_text_removed(workflow_id):
+            if code == "rejected":
+                detail = REFUSAL_DETAILS_REMOVED
+            if "failing_sentences" in extra:
+                extra["failing_sentences"] = [POST_TEXT_REMOVED for _ in extra["failing_sentences"]]
+        return error_response(status_code, code, detail, **extra)
     if isinstance(exc, RPCError) and exc.status == RPCStatusCode.NOT_FOUND:
         # No such workflow, or (for updates and signals) it has already ended
         return error_response(404, "not_found", f"Review not found or no longer running: {exc.message}")
@@ -171,12 +193,75 @@ def review_error_response(exc: Exception, action: str) -> JSONResponse:
     return error_response(500, "server_error", f"{action} failed: {reason}")
 
 
+MAX_PRODUCT_NAME_CHARS = 80
+MAX_PRODUCT_ALIASES = 10
+MAX_KEY_FEATURES = 20
+
+
 class StartWatchRequest(BaseModel):
     """Request to start a topic watch."""
     account: str
     topic: str
     query: str
     product_brief: str
+    # issue #12 (George's decision, 2026-11-24): the Start Watch form's
+    # "Product name" (required) and "Also called" (optional) fields. The
+    # written-draft name trigger reads only these, never the brief text.
+    product_name: str
+    product_aliases: List[str] = Field(default_factory=list)
+    # issue #12 (George's decision, 2026-11-25): the form's optional "Key
+    # features" list. The written-draft feature-term trigger reads only this
+    # field, never the brief text.
+    key_features: List[str] = Field(default_factory=list)
+
+    @field_validator("product_name")
+    @classmethod
+    def product_name_is_set(cls, value: str) -> str:
+        name = " ".join(value.split())
+        if not name:
+            raise ValueError("Product name is required")
+        if len(name) > MAX_PRODUCT_NAME_CHARS:
+            raise ValueError(f"Product name must be at most {MAX_PRODUCT_NAME_CHARS} characters")
+        return name
+
+    @field_validator("product_aliases")
+    @classmethod
+    def product_aliases_are_names(cls, value: List[str]) -> List[str]:
+        aliases: List[str] = []
+        for alias in value:
+            alias = " ".join(alias.split())
+            if not alias or alias.casefold() in (a.casefold() for a in aliases):
+                continue  # blanks and repeats from the comma-separated field
+            if len(alias) > MAX_PRODUCT_NAME_CHARS:
+                raise ValueError(f"Each alias must be at most {MAX_PRODUCT_NAME_CHARS} characters")
+            aliases.append(alias)
+        if len(aliases) > MAX_PRODUCT_ALIASES:
+            raise ValueError(f"At most {MAX_PRODUCT_ALIASES} aliases")
+        return aliases
+
+    @field_validator("key_features")
+    @classmethod
+    def key_features_are_short_terms(cls, value: List[str]) -> List[str]:
+        """A key feature is the short name of a feature, not a sentence about
+        it. An entry the trigger could not use is refused, so the founder is
+        told, instead of being dropped."""
+        for feature in value:
+            feature = " ".join(feature.split())
+            if not feature:
+                continue  # a blank from the comma-separated field
+            if not feature_term_words(feature):
+                raise ValueError(f'Key feature "{feature}" has no letter or digit')
+            if len(feature.split()) > MAX_FEATURE_TERM_WORDS:
+                raise ValueError(
+                    f"Each key feature must be at most {MAX_FEATURE_TERM_WORDS} words "
+                    f'(got {len(feature.split())}: "{feature}")'
+                )
+            if len(feature) > MAX_PRODUCT_NAME_CHARS:
+                raise ValueError(f"Each key feature must be at most {MAX_PRODUCT_NAME_CHARS} characters")
+        features = clean_feature_terms(value)  # trimmed, without blanks and repeats
+        if len(features) > MAX_KEY_FEATURES:
+            raise ValueError(f"At most {MAX_KEY_FEATURES} key features")
+        return features
 
 
 class StartWatchResponse(BaseModel):
@@ -261,6 +346,9 @@ async def start_watch(request: StartWatchRequest):
                 confidence_threshold=settings.confidence_threshold,
                 config=topic_watch_config,
                 review_config=review_config,
+                product_name=request.product_name,
+                product_aliases=request.product_aliases,
+                key_features=request.key_features,
             ),
             id=workflow_id,
             task_queue="x-conversation-finder",
@@ -273,9 +361,15 @@ async def start_watch(request: StartWatchRequest):
     
     except Exception as e:
         if "already exists" in str(e).lower():
+            # A running watch keeps the brief, product name, other names and
+            # key features it was started with (issue #12: stop it first to
+            # change them)
             return StartWatchResponse(
                 workflow_id=workflow_id,
-                message=f"Watch already running for topic '{request.topic}'",
+                message=(
+                    f"Watch already running for topic '{request.topic}'. Its product name, other "
+                    "names, key features and brief were not changed; stop the watch first to change them."
+                ),
             )
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -322,7 +416,7 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         return {"message": result}
 
     except Exception as e:
-        return review_error_response(e, "Approve")
+        return review_error_response(e, "Approve", workflow_id)
 
 
 @app.post("/api/reviews/{workflow_id}/skip")
@@ -357,10 +451,16 @@ async def edit_review(workflow_id: str, request: EditRequest):
             args=[request.new_text, request.client_request_id]
         )
         
+        # As for a nudge below: if the post's removal was recorded while the
+        # edit was checked, the stored card is redacted and the text is not
+        # echoed back either
+        if card_post_text_removed(workflow_id):
+            result = POST_TEXT_REMOVED
+        
         return {"message": "Edited", "new_text": result}
     
     except Exception as e:
-        return review_error_response(e, "Edit")
+        return review_error_response(e, "Edit", workflow_id)
 
 
 @app.post("/api/reviews/{workflow_id}/nudge")
@@ -377,10 +477,17 @@ async def nudge_review(workflow_id: str, request: NudgeRequest):
             args=[request.instruction, request.client_request_id]
         )
         
+        # issue #9 / #12: another Review of the post can record its removal
+        # while this redraft runs. The card write is stored redacted; the
+        # redraft returned here is model text that can quote the post, so it
+        # is withheld too (as GET /api/reviews/{id} applies a stored removal).
+        if card_post_text_removed(workflow_id):
+            result = POST_TEXT_REMOVED
+        
         return {"message": "Nudged", "new_draft": result}
     
     except Exception as e:
-        return review_error_response(e, "Nudge")
+        return review_error_response(e, "Nudge", workflow_id)
 
 
 @app.get("/api/reviews/{workflow_id}")
@@ -423,7 +530,7 @@ async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest)
         return {"message": "Confirmed", "result": result}
     
     except Exception as e:
-        return review_error_response(e, "Confirm posted")
+        return review_error_response(e, "Confirm posted", workflow_id)
 
 
 @app.get("/api/budget")

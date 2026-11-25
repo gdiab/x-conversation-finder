@@ -57,6 +57,27 @@ class Settings(BaseSettings):
     research_max_output_tokens: int = 1500
     plan_max_output_tokens: int = 400
     draft_max_output_tokens: int = 400
+    # The written-draft claim checker's answer (issue #12): one small object
+    # per reply sentence, at most three sentences.
+    check_max_output_tokens: int = 600
+    
+    # Draft mode (ADR-0006 amendment 2026-11-24, item 7; issue #12).
+    # "assembled": fixed phrases plus one verbatim brief sentence (2026-11-21
+    # amendment). "written": the model writes the reply and its product
+    # claims are checked against the brief. Stays "assembled" until the
+    # amendment's switch criteria pass. Read by the worker when a Review plans
+    # its reply; a Review keeps the mode it was planned under. Written mode
+    # needs the watch's product name: a watch started without one stays
+    # assembled (docs/DEVELOPMENT.md, "Draft modes").
+    draft_mode: str = "assembled"
+    
+    @field_validator("draft_mode")
+    @classmethod
+    def validate_draft_mode(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in ("assembled", "written"):
+            raise ValueError(f"draft_mode must be 'assembled' or 'written', got {value!r}")
+        return mode
     
     # Database (B3: absolute path so worker and API resolve to same file)
     database_url: str = ""
@@ -141,7 +162,10 @@ class Settings(BaseSettings):
     # Retry policy
     activity_max_attempts: int = 3
     
-    # Claim gate settings
+    # Claim gate settings. Draft attempts per post in both draft modes: 2 means
+    # one redraft with the reasons, then skip, which is what ADR-0006 specifies
+    # (2026-11-21 amendment, item 6; unchanged by the 2026-11-24 amendment).
+    # Keep it at 2 outside experiments.
     claim_gate_max_attempts: int = 2
     
     # Continue-As-New threshold

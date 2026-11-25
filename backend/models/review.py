@@ -6,6 +6,7 @@ from typing import Optional, Literal
 
 from .evidence import Evidence
 from .reply_plan import reply_plan_card_fields
+from .written import draft_mode_card_fields, sentence_check_card_fields, written_draft_card_fields
 from .post import Post
 
 # R4-B1: Status as Literal for boundary crossing (temporalio enum serialization issue)
@@ -137,11 +138,13 @@ class ReviewCard:
                     "input_tokens": self.evidence.draft.input_tokens,
                     "output_tokens": self.evidence.draft.output_tokens,
                     "plan_conformance_failures": list(self.evidence.draft.plan_conformance_failures),  # issue #5
+                    **written_draft_card_fields(self.evidence.draft),  # issue #12
                 } if self.evidence.draft else None,
                 "skip_reason": self.evidence.skip_reason,
                 # Issue #4: should-we-reply features and checks
                 "reply_fit": asdict(self.evidence.reply_fit) if self.evidence.reply_fit else None,
                 **reply_plan_card_fields(self.evidence),  # issue #5
+                **draft_mode_card_fields(self.evidence),  # issue #12
             },
             "status": self.status,  # R4-NN5: status is already a str (ReviewStatusStr), not enum
             "created_at": self.created_at,
@@ -151,18 +154,9 @@ class ReviewCard:
             "reply_post_id": self.reply_post_id,
             "skip_reason": self.skip_reason,
             "followup_replies": self.followup_replies,
+            # An assembled re-gate result or, in written mode, a SentenceCheck (issue #12)
             "edited_text_gate_results": [
-                {
-                    "sentence": r.sentence,
-                    "passed": r.passed,
-                    "kind": r.kind,
-                    "reason": r.reason,
-                    "kept_segment": r.kept_segment,
-                    "source_passage_id": r.source_passage_id,
-                    "sentence_index": r.sentence_index,
-                    "phrase_id": r.phrase_id,
-                }
-                for r in self.edited_text_gate_results
+                sentence_check_card_fields(r) for r in self.edited_text_gate_results
             ] if self.edited_text_gate_results else None,
             "edited_text_gate_state": self.edited_text_gate_state,
             "post_anyway": self.post_anyway,

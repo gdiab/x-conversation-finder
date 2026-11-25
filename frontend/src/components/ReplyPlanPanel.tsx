@@ -63,7 +63,17 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
             The drafted reply had no product claim; the text below has since been edited (see the edit gate results).
           </div>
         )}
-        {plan.mention_product === false && !rejected && !edited && evidence.draft && !evidence.reply_plan_skip_rule && (
+        {/* Only when the check classified every sentence as not about the product: a rejected draft may have
+            made a claim against the plan, or may never have reached the checker */}
+        {plan.mention_product === false && !rejected && !edited && evidence.draft?.mode === 'written'
+          && draftFailures.length === 0
+          && (evidence.draft.sentence_checks ?? []).length > 0
+          && (evidence.draft.sentence_checks ?? []).every((check) => check.verdict === 'not_a_product_claim') && (
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
+            No product claim: the written reply below does not mention the product.
+          </div>
+        )}
+        {plan.mention_product === false && !rejected && !edited && evidence.draft && evidence.draft.mode !== 'written' && !evidence.reply_plan_skip_rule && (
           <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
             No product claim: the draft below uses fixed phrases only.
             {(plan.reply_type === 'answer_question' || plan.reply_type === 'share_experience') && (
