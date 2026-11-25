@@ -128,6 +128,9 @@ GOLDEN_SPLITS = [
     # Codex thermo r8: a missing space joins two sentences; unclear.
     ("Our product is fast.It saves money.", ["Our product is fast.It saves money."], [0]),
     ("We build on Node.js and ASP.NET today.", ["We build on Node.js and ASP.NET today."], []),
+    # Codex thermo r9: emoji after a terminator do not hide it.
+    ("Our product saves time!\U0001F680 Customers pay monthly.", ["Our product saves time!\U0001F680", "Customers pay monthly."], []),
+    ("We ship in the U.S.\U0001F1FA\U0001F1F8 Customers pay monthly.", ["We ship in the U.S.\U0001F1FA\U0001F1F8 Customers pay monthly."], [0]),
     ("Fast setup (really!) Clear pricing.", ["Fast setup (really!)", "Clear pricing."], []),
     # Ordinary sentence ends.
     ("Fast setup. Clear pricing! Any questions?", ["Fast setup.", "Clear pricing!", "Any questions?"], []),
@@ -600,6 +603,24 @@ def test_statement_before_a_question_is_outside_it(post, statement, question):
     assert validate_reply_plan(plan(statement), post) != []
 
 
+def test_emoji_after_a_statement_stays_outside_the_question():
+    """Codex thermo r9."""
+    post = "We launched!\U0001F680 Any tips?"
+    # The emoji lands in the question span; it is not a statement.
+    assert [post[a:b].strip(" \U0001F680") for a, b in question_spans(post)] == ["Any tips?"]
+    assert validate_reply_plan(plan("We launched!"), post) != []
+
+
+async def test_claim_with_trailing_emoji_assembles_without_extra_punctuation():
+    result = await claim_gate(ClaimGateInput(
+        segments=[claim(0), Segment(kind="non_claim", phrase_id="q.current_tool")],
+        founder_materials=[material("Our product saves time!\U0001F680 Customers pay monthly.")],
+        idempotency_key="issue10_emoji",
+    ))
+    assert result.passed, result.failed_sentences
+    assert result.draft_text == "Our product saves time!\U0001F680 What are you using today?"
+
+
 def test_missing_space_before_a_question_splits_post_text():
     """Codex thermo r8."""
     post = "We grew.Is that good?"
@@ -644,7 +665,7 @@ def test_claim_splitter_stays_linear_on_many_initials():
 def test_question_spans_stay_linear_on_many_periods():
     """Codex thermo r1: the word lookup must not rescan the post from the start."""
     def elapsed(n: int) -> float:
-        text = "x. " * n + "J. " * n + " " * n + "Dr. " * n + "Smith?"
+        text = "x. " * n + "J. " * n + " " * n + "Dr. " * n + "aa.Aa" * n + "Smith?"
         started = time.perf_counter()
         question_spans(text)
         return time.perf_counter() - started

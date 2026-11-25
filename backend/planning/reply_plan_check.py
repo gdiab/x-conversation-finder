@@ -9,7 +9,7 @@ these rules cannot make an in-flight Review workflow replay differently.
 import re
 from typing import List, Optional, Tuple
 
-from backend.gate.sentence_boundary import CONTINUE, period_boundary
+from backend.gate.sentence_boundary import CONTINUE, is_decoration, period_boundary
 from backend.models.evidence import Segment
 from backend.models.reply_plan import REPLY_TYPES, ReplyPlan
 
@@ -49,6 +49,10 @@ def _period_continues_sentence(text: str, m: "re.Match[str]", first_word_start: 
     """
     if m.group().rstrip(_CLOSERS) != ".":
         return False
+    if m.end() < len(text) and not text[m.end()].isspace():
+        # The no-space alternative ("We grew.Is that good?") is always a
+        # boundary; skipping the word scan keeps long unbroken tokens linear.
+        return False
     word_start = m.start()
     while word_start > 0 and not text[word_start - 1].isspace():
         word_start -= 1
@@ -85,6 +89,9 @@ def question_spans(post_text: str) -> List[Tuple[int, int]]:
     URLs are masked first, so "https://example.com/a?b=1" is not a question.
     """
     masked = _URL_RE.sub(lambda m: " " * len(m.group()), post_text)
+    # Emoji after a terminator ("We launched!\U0001F680 Any tips?") must not hide the
+    # boundary; one space per code point keeps the indices of post_text.
+    masked = "".join(" " if is_decoration(ch) else ch for ch in masked)
     return [
         (start, end)
         for start, end in _sentence_spans(masked)

@@ -38,7 +38,8 @@ Callers resolve the unclear cases in the safe direction for their use:
 
 A word ends in a period when its last character before any closing quotes or
 brackets is one ('U.S." Customers' is checked like 'U.S. Customers');
-sentence_terminator gives that character. A period run ("..."), "!" and "?"
+sentence_terminator gives that character. Emoji and other symbols after the
+terminator are skipped the same way ("time!\U0001F680 Customers"). A period run ("..."), "!" and "?"
 end a sentence, except that any terminator inside closing quotes before a
 lowercase word is unclear ('"Is it fast?" asked a customer'; word_boundary).
 A terminator with no space before a capitalized word ("fast.It saves") is
@@ -59,6 +60,7 @@ ADR-0006 (2026-11-21 amendment, item 2).
 """
 
 import re
+import unicodedata
 from typing import List, Literal, Optional
 
 # Version of the claim gate's sentence split. Drafting adapters stamp it on
@@ -125,15 +127,30 @@ _NUMBER_RE = re.compile(r".*\d\.")
 _LEADING_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
 
 
+def is_decoration(ch: str) -> bool:
+    """Emoji and other symbols that can follow a terminator ("time!\U0001F680"):
+    symbol categories, format characters (zero-width joiner), enclosing marks
+    (keycaps) and variation selectors."""
+    return unicodedata.category(ch) in ("So", "Sk", "Cf", "Me") or ch in "\ufe0e\ufe0f"
+
+
+def _strip_trailing(word: str) -> str:
+    """The word without trailing closing quotes, brackets and decoration."""
+    end = len(word)
+    while end and (word[end - 1] in _CLOSERS or is_decoration(word[end - 1])):
+        end -= 1
+    return word[:end]
+
+
 def _core(word: str) -> str:
-    """The word without leading opening or trailing closing quotes and brackets."""
-    return word.lstrip(_OPENERS).rstrip(_CLOSERS)
+    """The word without leading openers or trailing closers and decoration."""
+    return _strip_trailing(word.lstrip(_OPENERS))
 
 
 def sentence_terminator(word: str) -> str:
-    """The word's last character before closing quotes and brackets if it is
-    '.', '!' or '?'; otherwise the empty string."""
-    last = word.rstrip(_CLOSERS)[-1:]
+    """The word's last character before closing quotes, brackets and
+    decoration if it is '.', '!' or '?'; otherwise the empty string."""
+    last = _strip_trailing(word)[-1:]
     return last if last in (".", "!", "?") else ""
 
 
@@ -221,7 +238,8 @@ def word_boundary(word: str, next_word: Optional[str], *, sentence_start: bool =
     """
     if next_word is None:
         return END
-    if word != word.rstrip(_CLOSERS) and next_word.lstrip(_OPENERS)[:1].islower():
+    trailing = word[len(_strip_trailing(word)):]
+    if any(c in _CLOSERS for c in trailing) and next_word.lstrip(_OPENERS)[:1].islower():
         return LIKELY_CONTINUE
     if sentence_terminator(word) == ".":
         return period_boundary(word, next_word, sentence_start=sentence_start)
