@@ -245,11 +245,10 @@ async def test_200_on_refetch_leaves_card_unchanged_and_approves(make_review_inp
 
 
 @pytest.mark.asyncio
-async def test_refetch_retry_reuses_the_budget_reservation(make_review_input):
-    """A lookup attempt that fails is retried by Temporal with the same
-    activity id, so reserve_x_budget reuses the reservation: one read on the
-    ledger. (Issue #8 may change how a failed attempt that reached X is
-    counted; update this expectation with it.)"""
+async def test_refetch_retry_counts_each_paid_attempt_once(make_review_input):
+    """A lookup attempt that fails after reaching X is retried by Temporal.
+    The re-fetch is still scheduled once and its outcome applied once; issue
+    #8 counts each attempt that may have been billed, so two reads."""
     client = TargetClient(["error", "found"])
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, client):
@@ -259,7 +258,7 @@ async def test_refetch_retry_reuses_the_budget_reservation(make_review_input):
                 "approve", args=[APPROVE_URL, str(uuid.uuid4()), False]
             ) == "Approved"
             assert client.target_lookups == 2
-            assert _x_reads() - reads_before == 1
+            assert _x_reads() - reads_before == 2
             history = await handle.fetch_history()
             assert _scheduled_names(history).count("lookup_post") == 1
 
@@ -646,7 +645,7 @@ async def test_eval_refetch_found_keeps_card(make_review_input):
 
 
 @pytest.mark.asyncio
-async def test_eval_refetch_404_removes_text_once_and_is_idempotent(make_review_input):
+async def test_eval_refetch_404_removes_text_once(make_review_input):
     from backend.target_refetch import refetch_stored_card_target
 
     workflow_id = await _stored_card(make_review_input, "eval_gone")
@@ -654,9 +653,9 @@ async def test_eval_refetch_404_removes_text_once_and_is_idempotent(make_review_
     reads_before = _x_reads()
     with pytest.raises(RuntimeError):
         await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished)
-    # A retry of the same eval run reuses its budget reservation
+    # Both calls may have been billed, so both count (issue #8)
     assert await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished) == "removed"
-    assert _x_reads() - reads_before == 1
+    assert _x_reads() - reads_before == 2
     stored = _db_card(workflow_id)
     assert stored["post"]["text_removed"] is True
     assert stored["status"] == "expired"  # status is left as it was
@@ -679,8 +678,32 @@ async def test_eval_refetch_404_removes_text_once_and_is_idempotent(make_review_
     # Already removed: no further X read
     assert await refetch_stored_card_target(client, workflow_id, "run2", review_is_running=_finished) == "removed"
     assert client.target_lookups == 2
-    assert _x_reads() - reads_before == 1
+    assert _x_reads() - reads_before == 2
 
+
+
+@pytest.mark.asyncio
+async def test_eval_refetch_refused_request_is_released(make_review_input):
+    """A lookup X refused (a 4xx without a post-gone body) billed nothing:
+    the read is released (issue #8) and nothing is removed."""
+    import httpx
+    from backend.target_refetch import refetch_stored_card_target
+
+    workflow_id = await _stored_card(make_review_input, "eval_refused")
+
+    class RefusingClient(TargetClient):
+        async def lookup_post(self, post_id):
+            self.target_lookups += 1
+            response = httpx.Response(403, request=httpx.Request("GET", "https://api.x.com/2/tweets/1"))
+            raise httpx.HTTPStatusError("Forbidden", request=response.request, response=response)
+
+    client = RefusingClient(["found"])
+    reads_before = _x_reads()
+    with pytest.raises(httpx.HTTPStatusError):
+        await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished)
+    assert client.target_lookups == 1
+    assert _x_reads() == reads_before
+    assert QUESTION in _db_card(workflow_id)["post"]["text"]
 
 @pytest.mark.asyncio
 async def test_eval_refetch_over_budget_raises_and_keeps_text(make_review_input):

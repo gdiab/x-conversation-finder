@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { approveReview, generateRequestId, listReviews } from './client';
+import { approveReview, generateRequestId, listReviews, PostRemovedError } from './client';
 
 // src/test/setup.ts replaces global fetch with a stub that throws; each test
 // here gives it a canned Response. Nothing reaches the network.
@@ -47,6 +47,16 @@ describe('approveReview', () => {
 
     await expect(approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1')).rejects.toThrow(
       /Failed to approve review: Internal Server Error\..*post_anyway=true/,
+    );
+  });
+
+  it('throws PostRemovedError on 409 (issue #9: the post was removed and the review skipped)', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('{"detail":"Post removed"}', { status: 409, statusText: 'Conflict' }),
+    );
+
+    await expect(approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1')).rejects.toBeInstanceOf(
+      PostRemovedError,
     );
   });
 });

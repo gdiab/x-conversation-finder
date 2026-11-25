@@ -677,12 +677,16 @@ async def test_lookup_rejected_request_releases_the_read_and_retry_counts_one():
 
 @pytest.mark.asyncio
 async def test_lookup_returning_none_stays_counted(monkeypatch):
-    """The real HTTP adapter turns a 404 into None, and also post data it cannot
-    convert (no author expansion), which X billed. None therefore keeps 1 read."""
+    """The real HTTP adapter turns a 404 naming the post as not found into
+    None (issue #9), and None keeps 1 read. Post data without its author, which
+    X billed, now raises MalformedLookupResponse and also stays counted."""
     from backend.adapters.http_x_client import HttpXClient
 
     def handler(request):
-        return httpx.Response(404, json={"title": "Not Found"}, request=request)
+        return httpx.Response(404, json={"errors": [{
+            "resource_id": "9001", "title": "Not Found Error",
+            "type": "https://api.twitter.com/2/problems/resource-not-found",
+        }]}, request=request)
 
     real_async_client = httpx.AsyncClient
     monkeypatch.setattr(

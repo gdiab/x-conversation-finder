@@ -246,8 +246,8 @@ async def test_lookup_post_not_found():
 @pytest.mark.parametrize("body", [ValueError("not JSON"), {"title": "Not Found", "status": 404}, {}])
 async def test_lookup_post_bare_404_raises(body):
     """Issue #9: a 404 that does not name the post (a wrong route, a proxy)
-    must not read as "post deleted", which would remove its text."""
-    from temporalio.exceptions import ApplicationError
+    must not read as "post deleted", which would remove its text. It is
+    raised as the HTTP error, so issue #8 releases the refused read."""
 
     client = HttpXClient("test_bearer_token_123")
     with patch("httpx.AsyncClient") as mock_client_class:
@@ -262,9 +262,8 @@ async def test_lookup_post_bare_404_raises(body):
         error = httpx.HTTPStatusError("Not Found", request=Mock(), response=mock_response_obj)
         mock_response_obj.raise_for_status.side_effect = error
         mock_client.get.return_value = mock_response_obj
-        with pytest.raises(ApplicationError) as excinfo:
+        with pytest.raises(httpx.HTTPStatusError):
             await client.lookup_post("1234567890")
-    assert excinfo.value.type == "MalformedLookupResponse"
 
 
 @pytest.mark.asyncio

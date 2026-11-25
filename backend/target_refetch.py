@@ -18,6 +18,7 @@ is asked of Temporal (temporal_review_is_running), not read from the stored
 status: Reviews skipped before issue #9 ended with their card still "pending".
 """
 
+import uuid
 from typing import Awaitable, Callable, Literal
 
 from temporalio.client import Client, WorkflowExecutionStatus
@@ -29,7 +30,8 @@ from backend.activities.store_activities import (
     _delete_post_text_sync,
     _get_card_sync,
 )
-from backend.budget import reserve_x_budget
+from backend.activities.x_activities import x_billed_nothing
+from backend.budget import release_x_reservation, reserve_x_budget
 from backend.config import get_settings
 from backend.ports import XClientPort
 
@@ -58,8 +60,8 @@ def temporal_review_is_running(client: Client) -> ReviewIsRunning:
 
     return is_running
 
-# Budget reservation scope for eval re-fetches; with the card's workflow id and
-# the caller's run key it makes the reservation idempotent per eval run.
+# Budget reservation scope for eval re-fetches (with the card's workflow id,
+# the caller's run key and a per-call id)
 EVAL_REFETCH_RUN_ID = "eval_refetch"
 
 
@@ -82,15 +84,12 @@ async def refetch_stored_card_target(
       the post at approve.
     - "no_card": no stored card has this workflow id.
 
-    Reserves one X read through backend.budget first (raises BudgetExceeded
-    over the cap, never reports "removed"). Calling again with the same
-    run_key on the same UTC day reuses the reservation, so a retried eval run
-    is not charged twice by our ledger. A card already marked removed costs
-    no read. The stored card's status is left as it is.
-
-    X itself bills a repeated read of the same post once per UTC day
-    (ADR-0005), so a retried lookup under a reused reservation costs nothing
-    extra.
+    Reserves one X read through backend.budget before each lookup (raises
+    BudgetExceeded over the cap, never reports "removed"). As for the
+    lookup_post activity (issue #8), every call that may have been billed is
+    counted, including a retry; a request X refused is released. A card
+    already marked removed costs no read. The stored card's status is left
+    as it is.
     """
     card = _get_card_sync(GetCardInput(workflow_id=workflow_id))
     if card is None:
@@ -101,14 +100,27 @@ async def refetch_stored_card_target(
         return "live"
 
     settings = get_settings()
-    reserve_x_budget(
+    call_id = f"{run_key}:{uuid.uuid4().hex}"
+    _, reservation_date = reserve_x_budget(
         reads_needed=1,
         cost_per_read=settings.x_post_read_cost,
         workflow_id=workflow_id,
         workflow_run_id=EVAL_REFETCH_RUN_ID,
-        activity_id=run_key,
+        activity_id=call_id,
     )
-    post = await x_client.lookup_post(card["post"]["id"])
+    try:
+        post = await x_client.lookup_post(card["post"]["id"])
+    except Exception as e:
+        if x_billed_nothing(e):
+            release_x_reservation(
+                reserved_reads=1,
+                reservation_date=reservation_date,
+                workflow_id=workflow_id,
+                workflow_run_id=EVAL_REFETCH_RUN_ID,
+                activity_id=call_id,
+                cost_per_read=settings.x_post_read_cost,
+            )
+        raise
     if post is not None:
         return "found"
 
