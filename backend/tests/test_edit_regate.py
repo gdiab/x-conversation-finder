@@ -7,25 +7,103 @@ Tests with new quoted-claim architecture:
 3. Edit keeping gated sentence verbatim keeps verdict (B4: exact match)
 4. Replay deterministic
 5. S-6: Tests assert on stored card, not just workflow memory
+
+Issue #14: no test here waits on elapsed time. On the time-skipping test
+server, env.sleep(1) returns early only while nothing is running; while
+activities run, virtual time follows real time, so env.sleep(1) was a 1 s
+real-time race against research -> plan -> draft -> claim_gate -> store_card.
+Tests now wait on the card write they need (CardWrites) or on an
+asyncio.Event set inside a blocking activity.
 """
 
+import asyncio
 import pytest
 import uuid
 
+from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from backend.workflows.review import ReviewWorkflow, ReviewInput
 from backend.activities.x_activities import XActivities
 from backend.activities.reply_activities import ReplyActivities
-from backend.activities.store_activities import store_card, update_card, get_all_cards
+from backend.activities.store_activities import (
+    StoreCardInput,
+    UpdateCardInput,
+    store_card,
+    update_card,
+    get_all_cards,
+)
 from backend.activities.claim_gate_activity import claim_gate, verify_edited_text
 from backend.adapters import FakeXClient, FakeReplyAgent
 from backend.database import get_db, ReviewCardDB
 
+# Hang guard only: every wait below ends on an event, and this bound is hit
+# only if the awaited event never happens (a real failure, not load).
+WAIT_TIMEOUT_SEC = 30
+
+
+class CardWrites:
+    """Records each store_card/update_card call the worker has finished, by
+    idempotency key, so a test can wait for a specific write.
+
+    The key is recorded after the real activity returns, so the row is
+    committed when wait_for() returns. The pending card is stored after the
+    workflow sets self.evidence, so once ":store:pending" is recorded the
+    edit/approve validators see the draft.
+    """
+
+    def __init__(self) -> None:
+        self._done: set[str] = set()
+        self._changed = asyncio.Condition()
+
+    async def _record(self, idempotency_key: str) -> None:
+        async with self._changed:
+            self._done.add(idempotency_key)
+            self._changed.notify_all()
+
+    async def wait_for(self, idempotency_key: str) -> None:
+        async def _wait() -> None:
+            async with self._changed:
+                await self._changed.wait_for(lambda: idempotency_key in self._done)
+
+        await asyncio.wait_for(_wait(), WAIT_TIMEOUT_SEC)
+
+    async def wait_for_pending(self, workflow_id: str) -> None:
+        """Wait until the pending card is stored (the draft is ready to edit)."""
+        await self.wait_for(f"{workflow_id}:store:pending")
+
+    async def wait_for_approved(self, workflow_id: str) -> None:
+        """Wait until the workflow wrote status=approved to the stored card.
+
+        The approve Update returns before run() writes that status, so a
+        stored-card check right after approve needs this wait.
+        """
+        await self.wait_for(f"{workflow_id}:update:approve")
+
+    def activities(self) -> list:
+        @activity.defn(name="store_card")
+        async def store_card_recorded(input: StoreCardInput) -> bool:
+            result = await store_card(input)
+            await self._record(input.idempotency_key)
+            return result
+
+        @activity.defn(name="update_card")
+        async def update_card_recorded(input: UpdateCardInput) -> bool:
+            result = await update_card(input)
+            await self._record(input.idempotency_key)
+            return result
+
+        return [store_card_recorded, update_card_recorded]
+
+
+@pytest.fixture
+def card_writes() -> CardWrites:
+    return CardWrites()
+
 
 @pytest.mark.asyncio
-async def test_edit_passing_text_approve_works(make_review_input, x_activities, reply_activities):
+async def test_edit_passing_text_approve_works(make_review_input, x_activities, reply_activities, card_writes):
     """Edit with passing text -> approve works without post_anyway. S-6: Assert stored card."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -38,8 +116,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -52,7 +129,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Get original draft
             card = await handle.query("get_card")
@@ -67,8 +144,6 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
                 args=[edited_text, client_request_id]
             )
             assert result_text == edited_text
-            
-            await env.sleep(1)
             
             # Check card has edit gate results (all passing)
             card = await handle.query("get_card")
@@ -95,7 +170,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             )
             assert "Approved" in approve_result
             
-            await env.sleep(1)
+            await card_writes.wait_for_approved(workflow_id)
             
             # S-6: Verify stored card shows approved
             db = get_db()
@@ -110,7 +185,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
 
 
 @pytest.mark.asyncio
-async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_input, x_activities, reply_activities):
+async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_input, x_activities, reply_activities, card_writes):
     """Edit adding uncovered claim -> failing sentence, approve requires post_anyway. S-6: Assert stored card."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -123,8 +198,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -137,7 +211,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Edit to add uncovered claim (not a passage sentence, not a non_claim)
             edited_text = "Thanks for the question. Works on Kubernetes. Happy to help."
@@ -146,8 +220,6 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
                 "edit",
                 args=[edited_text, client_request_id]
             )
-            
-            await env.sleep(1)
             
             # Check card has edit gate results with failures
             card = await handle.query("get_card")
@@ -195,7 +267,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
             )
             assert "Approved" in approve_result
             
-            await env.sleep(1)
+            await card_writes.wait_for_approved(workflow_id)
             
             # Check card recorded post_anyway
             card = await handle.query("get_card")
@@ -219,7 +291,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
 
 
 @pytest.mark.asyncio
-async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities, reply_activities):
+async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities, reply_activities, card_writes):
     """B4: Edit keeping exact sentence (after normalization) reuses verdict."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -232,8 +304,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -246,7 +317,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Get original draft text
             card = await handle.query("get_card")
@@ -259,8 +330,6 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
                 "edit",
                 args=[original_text, client_request_id]
             )
-            
-            await env.sleep(1)
             
             # Check card has edit gate results
             card = await handle.query("get_card")
@@ -275,7 +344,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
 
 
 @pytest.mark.asyncio
-async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, reply_activities):
+async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, reply_activities, card_writes):
     """S-1: Edit after approve must be rejected."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -288,8 +357,7 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -302,7 +370,7 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Approve first
             client_request_id = str(uuid.uuid4())
@@ -310,8 +378,6 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
                 "approve",
                 args=["https://x.com/test/status/999", client_request_id, False]
             )
-            
-            await env.sleep(1)
             
             # Try to edit after approval - should be rejected
             client_request_id = str(uuid.uuid4())
@@ -330,7 +396,7 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
 
 
 @pytest.mark.asyncio
-async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, x_activities, reply_activities):
+async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, x_activities, reply_activities, card_writes):
     """
     S-3: Test that _edit_in_flight flag prevents concurrent approve (REAL concurrency test).
     
@@ -373,8 +439,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text_blocking,  # Use blocking version
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -387,20 +452,29 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Start edit Update, wait only for ACCEPTED (not completed)
             client_request_id = str(uuid.uuid4())
+            edit_text = "Thanks! Our product helps developers build reliable distributed systems. Happy to help."
             edit_handle = await handle.start_update(
                 "edit",
-                args=["Thanks! Our product helps developers build reliable distributed systems. Happy to help.", client_request_id],
+                args=[edit_text, client_request_id],
                 wait_for_stage=WorkflowUpdateStage.ACCEPTED,
             )
             
-            # Wait for gate activity to actually start
-            await gate_called_event.wait()
-            await asyncio.sleep(0.1)  # Small delay to ensure activity is truly blocked
-            
+            # Wait for the gate activity to start. The edit handler raises
+            # _edit_in_flight_count before it schedules this activity and
+            # lowers it only after the activity returns, so from here until
+            # gate_block_event is set the edit is in flight: no sleep needed.
+            await asyncio.wait_for(gate_called_event.wait(), timeout=WAIT_TIMEOUT_SEC)
+
+            # The workflow query shows the edit has not been committed yet
+            # (B2: text and gate state change only after the gate returns)
+            card = await handle.query("get_card")
+            assert card["edited_text_gate_state"] is None
+            assert card["evidence"]["draft"]["text"] != edit_text
+
             # NOW try to approve while edit gate is in flight
             # S-3: This should raise WorkflowUpdateFailedError because _edit_in_flight_count > 0
             # The validator checks and raises ValueError with specific message
@@ -424,8 +498,6 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
             # Wait for edit to complete
             await edit_handle.result()
             
-            await env.sleep(1)
-            
             # Now approve should work (no failures in the edit)
             client_request_id3 = str(uuid.uuid4())
             approve_result = await handle.execute_update(
@@ -436,7 +508,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
 
 
 @pytest.mark.asyncio
-async def test_edit_regate_replay_deterministic(make_review_input, x_activities, reply_activities):
+async def test_edit_regate_replay_deterministic(make_review_input, x_activities, reply_activities, card_writes):
     """Test that edit re-gate replay is deterministic."""
     from temporalio.worker import Replayer
     
@@ -451,8 +523,7 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -465,7 +536,7 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Edit
             edited_text = "Thanks! Our product helps developers build reliable distributed systems. Happy to help."
@@ -474,8 +545,6 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
                 "edit",
                 args=[edited_text, client_request_id]
             )
-            
-            await env.sleep(1)
             
             # Approve with post_anyway=False (should work since edit passes)
             client_request_id = str(uuid.uuid4())
@@ -493,7 +562,7 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
 
 
 @pytest.mark.asyncio
-async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, reply_activities):
+async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, reply_activities, card_writes):
     """
     QA R11 B2: Edit must not mutate draft.text until gate completes.
     
@@ -512,8 +581,7 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -526,7 +594,7 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Edit to text that will fail gate (numbers + compliance terms)
             edited_text = "Our product is SOC2 certified and 10x faster."
@@ -537,8 +605,6 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
                 args=[edited_text, client_request_id]
             )
             assert result_text == edited_text
-            
-            await env.sleep(1)
             
             # Check stored card has gate_state = "failed"
             db = get_db()
@@ -579,7 +645,7 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
 
 
 @pytest.mark.asyncio
-async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities, reply_activities):
+async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities, reply_activities, card_writes):
     """
     QA R11 B3: _edit_in_flight must be a counter, not bool.
     
@@ -619,8 +685,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text_blocking,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -633,7 +698,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Start first edit (will block in gate activity)
             gate_called_event.clear()
@@ -647,7 +712,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
             )
             
             # Wait for gate activity to be called
-            await asyncio.wait_for(gate_called_event.wait(), timeout=5)
+            await asyncio.wait_for(gate_called_event.wait(), timeout=WAIT_TIMEOUT_SEC)
             
             # Now try to approve while edit is in flight - should fail
             from temporalio.client import WorkflowUpdateFailedError
@@ -670,7 +735,6 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
             await edit1_task
             
             # Now approve should work (counter is 0)
-            await env.sleep(1)
             approve_result = await handle.execute_update(
                 "approve",
                 args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
@@ -679,7 +743,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
 
 
 @pytest.mark.asyncio
-async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_activities, reply_activities):
+async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_activities, reply_activities, card_writes):
     """
     QA R11 C: If edit re-gate activity ERRORS (retries exhausted), record state as "not_checked".
     
@@ -713,8 +777,7 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text_failing,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -727,7 +790,7 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Edit will fail in gate activity
             gate_call_count = 0
@@ -740,8 +803,6 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
                 args=[edited_text, client_request_id]
             )
             assert result_text == edited_text
-            
-            await env.sleep(1)
             
             # Verify gate was retried
             assert gate_call_count == max_attempts
@@ -782,7 +843,7 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
 
 
 @pytest.mark.asyncio
-async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_activities, reply_activities):
+async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_activities, reply_activities, card_writes):
     """
     QA R12: Concurrent edits resolve as last-writer-wins by finish order.
     
@@ -830,8 +891,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text_controlled,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -844,7 +904,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Start FIRST edit (will block in gate)
             edit1_task = asyncio.create_task(
@@ -855,7 +915,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
             )
             
             # Wait for first gate to be called
-            await asyncio.wait_for(edit1_gate_event.wait(), timeout=5)
+            await asyncio.wait_for(edit1_gate_event.wait(), timeout=WAIT_TIMEOUT_SEC)
             
             # Start SECOND edit (will block in gate)
             edit2_task = asyncio.create_task(
@@ -866,7 +926,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
             )
             
             # Wait for second gate to be called
-            await asyncio.wait_for(edit2_gate_event.wait(), timeout=5)
+            await asyncio.wait_for(edit2_gate_event.wait(), timeout=WAIT_TIMEOUT_SEC)
             
             # Now both edits are blocked in their gates
             # Release SECOND first (so FIRST finishes last and wins)
@@ -876,8 +936,6 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
             # Then release FIRST (finishes last)
             edit1_release_event.set()
             await edit1_task
-            
-            await env.sleep(1)
             
             # Check the card - last to finish (FIRST) should be the final text
             db = get_db()
@@ -959,7 +1017,7 @@ async def test_r14_s5_store_ignores_lower_edit_seq():
 
 
 @pytest.mark.asyncio
-async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activities, reply_activities):
+async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activities, reply_activities, card_writes):
     """
     QA R15: Edit path must reject 4+ segments (same 1-3 cap as model path).
     
@@ -977,8 +1035,7 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -991,7 +1048,7 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Edit to exactly the example text with 4 sentences
             edited_text = "Hi! Our product helps developers build reliable systems. Happy to help. What stack are you on?"
@@ -1002,8 +1059,6 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
                 args=[edited_text, client_request_id]
             )
             assert result_text == edited_text
-            
-            await env.sleep(1)
             
             # QA R15: Verify gate results show all 4 sentences failed with specific reason
             card = await handle.query("get_card")
@@ -1050,7 +1105,7 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
 
 
 @pytest.mark.asyncio
-async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, reply_activities):
+async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, reply_activities, card_writes):
     """
     S5 (QA R14): Workflow-level race with edit_seq.
     
@@ -1103,8 +1158,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
                 reply_activities.draft_reply,
                 claim_gate,
                 verify_edited_text_controlled,
-                store_card,
-                update_card,
+                *card_writes.activities(),
             ],
         ):
             review_input = make_review_input()
@@ -1117,7 +1171,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await card_writes.wait_for_pending(workflow_id)
             
             # Start EDIT_A (will block in gate)
             edit_a_task = asyncio.create_task(
@@ -1128,7 +1182,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
             )
             
             # Wait for edit A gate to be called
-            await asyncio.wait_for(edit_a_gate_event.wait(), timeout=5)
+            await asyncio.wait_for(edit_a_gate_event.wait(), timeout=WAIT_TIMEOUT_SEC)
             
             # Start EDIT_B (will block in gate)
             edit_b_task = asyncio.create_task(
@@ -1139,25 +1193,20 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
             )
             
             # Wait for edit B gate to be called
-            await asyncio.wait_for(edit_b_gate_event.wait(), timeout=5)
+            await asyncio.wait_for(edit_b_gate_event.wait(), timeout=WAIT_TIMEOUT_SEC)
             
             # Release EDIT_A first (finishes first, gets seq 1)
             edit_a_release_event.set()
             await edit_a_task
             
-            await env.sleep(0.5)
-            
             # Release EDIT_B second (finishes second, gets seq 2)
             edit_b_release_event.set()
             await edit_b_task
-            
-            await env.sleep(1)
             
             # Simulate a late retried write carrying seq 1 (from EDIT_A)
             # This would happen if the update_card activity was retried after EDIT_B already completed
             # Note: We can't easily simulate this via UpdateCardInput which requires full Evidence objects
             # The actual edit_seq prevention logic is tested in test_r14_s5_store_ignores_lower_edit_seq
-            await env.sleep(0.5)
             
             # Check the card - should still have EDIT_B's text and seq 2
             db = get_db()
