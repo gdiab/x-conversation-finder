@@ -238,11 +238,22 @@ export async function startWatch(request: StartWatchRequest): Promise<{ workflow
   });
   
   if (!response.ok) {
-    // The API explains a refused request (e.g. a missing product name) in "detail"
+    // The API explains a refused request in "detail", and for a field it
+    // refused (a missing product name, too many aliases) in "errors"
     let detail = response.statusText;
     try {
       const body = await response.json();
       if (typeof body?.detail === 'string' && body.detail) detail = body.detail;
+      // Each entry: {loc: ["body", "product_aliases"], msg: "Value error, At most 10 aliases", ...}
+      const reasons = (Array.isArray(body?.errors) ? body.errors : [])
+        .map((e: { loc?: unknown; msg?: unknown }) => {
+          if (typeof e?.msg !== 'string') return '';
+          const field = Array.isArray(e.loc) ? e.loc.filter((part) => typeof part === 'string' && part !== 'body').pop() : null;
+          const msg = e.msg.replace(/^Value error, /, '');
+          return field ? `${field}: ${msg}` : msg;
+        })
+        .filter(Boolean);
+      if (reasons.length > 0) detail = reasons.join('; ');
     } catch {
       // Not JSON: keep the status text
     }

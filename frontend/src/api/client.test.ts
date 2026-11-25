@@ -200,6 +200,37 @@ describe('startWatch (issue #12: product name and aliases)', () => {
     );
   });
 
+  it('says which field the API refused and why', async () => {
+    // The body the API sends for refused fields, captured from
+    // backend/api.py's request_validation_handler (pydantic 2 error entries)
+    const body = {
+      code: 'invalid_request',
+      detail: 'Invalid request body',
+      errors: [
+        {
+          type: 'value_error',
+          loc: ['body', 'product_aliases'],
+          msg: 'Value error, At most 10 aliases',
+          input: ['x0', 'x1'],
+          ctx: { error: {} },
+          url: 'https://errors.pydantic.dev/2.10/v/value_error',
+        },
+        {
+          type: 'missing',
+          loc: ['body', 'product_name'],
+          msg: 'Field required',
+          input: {},
+          url: 'https://errors.pydantic.dev/2.10/v/missing',
+        },
+      ],
+    };
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(body), { status: 422 }));
+
+    await expect(startWatch(REQUEST)).rejects.toThrow(
+      'Failed to start watch: product_aliases: At most 10 aliases; product_name: Field required',
+    );
+  });
+
   it('falls back to the status text when the error body is not JSON', async () => {
     fetchMock.mockResolvedValue(new Response('<html>', { status: 502, statusText: 'Bad Gateway' }));
 

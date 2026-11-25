@@ -287,6 +287,20 @@ def test_a_triggered_sentence_cannot_be_supported_by_an_empty_brief():
     assert "The brief has no sentences, so nothing can support it." in prepared.structural_failures[0][1]
 
 
+def test_an_empty_brief_and_a_plan_to_mention_the_product_fail_before_any_checker_call():
+    """Every checker answer would fail: a claim cannot cite an empty brief,
+    and a reply without a claim does not follow the plan."""
+    text = f"{REACTION} {QUESTION}"
+
+    with_plan = prepare_check(text, [], NAME, ALIASES, mention_product=True)
+    without_plan = prepare_check(text, [], NAME, ALIASES, mention_product=False)
+
+    assert not with_plan.needs_checker
+    assert "the brief has no sentences to support a product claim" in with_plan.structural_failures[0][1]
+    # With no product mention required the reply can still pass, so the checker is asked
+    assert without_plan.needs_checker
+
+
 def test_numbers_are_compared_as_digits_whatever_surrounds_them():
     sentences = brief("Latency stays under 10ms for 1,000 endpoints.")
     prepared = prepare_check("Relay keeps latency under 10 ms for 1000 endpoints.", sentences, NAME, ALIASES)

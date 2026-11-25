@@ -88,7 +88,8 @@ export function SentenceCheckList({ checks }: SentenceCheckListProps) {
                 color: '#fff',
                 marginRight: '8px',
               }}>
-                {isClaim ? 'Product claim' : 'Not about the product'}
+                {/* A row the checker was never asked about has no classification, only code's triggers */}
+                {isClaim ? 'Product claim' : check.verdict === 'not_checked' ? 'Not classified' : 'Not about the product'}
               </span>
               <span style={{
                 display: 'inline-block',

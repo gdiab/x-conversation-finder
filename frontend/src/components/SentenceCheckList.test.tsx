@@ -1,4 +1,5 @@
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ReviewCard } from './ReviewCard';
 import { SentenceCheckList } from './SentenceCheckList';
@@ -113,6 +114,9 @@ describe('SentenceCheckList', () => {
     const row = screen.getByTestId('sentence-check');
     expect(within(row).getByText('Not checked')).toBeInTheDocument();
     expect(row).toHaveTextContent('at most 3 sentences (got 4)');
+    // Nobody classified it, so the card does not say it is "not about the product"
+    expect(within(row).getByText('Not classified')).toBeInTheDocument();
+    expect(within(row).queryByText('Not about the product')).not.toBeInTheDocument();
   });
 });
 
@@ -181,6 +185,39 @@ describe('ReviewCard: written draft (issue #12)', () => {
     expect(screen.getByText(/the check of the edited text could not run/)).toBeInTheDocument();
     expect(screen.queryByTestId('sentence-check')).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Check of the Edited Text' })).not.toBeInTheDocument();
+  });
+
+  it('empties and closes the edit box when the post is removed while it is open', async () => {
+    const user = userEvent.setup();
+    const card = writtenCard();
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    expect(screen.getByDisplayValue(card.evidence.draft?.text ?? '')).toBeInTheDocument();
+
+    // Another Review of the post recorded its removal; the refresh brings the redacted card
+    const removed = {
+      ...card,
+      post: { ...card.post, text: '[removed - post deleted]', text_removed: true },
+      evidence: makeEvidence({ draft_mode: 'written', draft: makeWrittenDraft({ text: '[removed - post deleted]', sentence_checks: [] }) }),
+    };
+    rerender(<ReviewCard card={removed} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByText(/Acme Relay can retry a failed delivery/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save Edit' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    expect(screen.getByDisplayValue('[removed - post deleted]')).toBeInTheDocument();
+  });
+
+  it('opens the edit box on the current draft after the card changed', async () => {
+    const user = userEvent.setup();
+    const card = writtenCard();
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    const changed = { ...card, evidence: makeEvidence({ draft_mode: 'written', draft: makeWrittenDraft({ text: 'A newer synthetic draft.' }) }) };
+    rerender(<ReviewCard card={changed} onUpdate={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+
+    expect(screen.getByDisplayValue('A newer synthetic draft.')).toBeInTheDocument();
   });
 
   it('keeps the segment display for an assembled draft', () => {

@@ -440,6 +440,13 @@ def prepare_check(
     if mention_product is False and triggered:
         # Known before the checker is asked: a triggered sentence is a product claim
         plan_failures.append(NO_MENTION_PLAN_FAILURE)
+    if mention_product is True and not brief_sentences and not failures:
+        # Whatever the checker says, this fails: a product claim cannot cite an
+        # empty brief, and a reply without one does not follow the plan
+        failures.append([
+            "[reply]",
+            "The reply plan says to mention the product, but the brief has no sentences to support a product claim",
+        ])
     return PreparedCheck(
         text=(text or "").strip(),
         sentences=sentences,

@@ -56,6 +56,23 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   };
   const draftText = card.evidence.draft?.text;
   useEffect(closePostAnyway, [draftText, card.edited_text_gate_state]);
+  // The edit box follows the card while it is closed, so it never opens on a
+  // draft the card no longer has. When the post was removed (issue #9), the
+  // box is emptied and closed even while open: a written draft is model text
+  // that can quote the post, and it must not stay on screen (issue #12).
+  const textRemoved = card.post.text_removed === true;
+  useEffect(() => {
+    if (textRemoved) {
+      setIsEditing(false);
+      editRequestId.current = null;
+    }
+    if (textRemoved || !isEditing) {
+      setEditText(draftText ?? '');
+    }
+    // isEditing is left out on purpose: closing the box by hand must not
+    // discard what Cancel and Save already handle
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftText, textRemoved]);
   // issue #12: a written draft is the model's free text, checked per sentence
   // against the brief. An assembled draft is shown by its segments.
   const written = card.evidence.draft?.mode === 'written';
