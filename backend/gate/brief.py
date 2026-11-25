@@ -7,18 +7,22 @@ list, deterministically, and reads the feature terms the brief lists.
 
 Rules:
 - A heading sets the context of what follows and is not a sentence itself.
+  Nested headings keep their parents ("Not supported yet > Integrations"),
+  ATX ("## Title") and Setext (a title underlined with === or ---) alike.
 - Prose is split with the claim gate's splitter (split_into_sentences), then
   sentences are joined again wherever the boundary is unclear
   (merge_at_unclear_boundaries), so a brief sentence is never a fragment.
-- A list item is one sentence. Its context is the heading it stands under
-  and the lead-in line that ends in a colon ("Key features:"), when present.
+- A list item is one sentence. Its context is the heading path, the lead-in
+  line that ends in a colon ("Key features:") when present, and the items it
+  is nested under ("Integrations we do not support > Slack").
+- Text without a letter or digit (a horizontal rule) is not a sentence.
 - Ids are "b1", "b2", ... in document order.
 
 Feature terms are the short items (at most MAX_FEATURE_TERM_WORDS words) of a
-list whose lead-in or heading contains the word "feature" or "features", and
-the comma-separated terms after such a lead-in on one line ("Features: a, b").
-Nothing else in the brief is a feature term: the trigger must be predictable
-from what the founder wrote.
+list whose nearest heading, lead-in line or parent item contains the word
+"feature" or "features", and the comma-separated terms after such a lead-in
+on one line ("Features: a, b"). Nothing else in the brief is a feature term:
+the trigger must be predictable from what the founder wrote.
 
 Like every sentence splitter, this runs only inside activities, never in
 workflow code (see ADR-0006, 2026-11-21 amendment, item 2).
@@ -27,20 +31,22 @@ workflow code (see ADR-0006, 2026-11-21 amendment, item 2).
 import re
 from typing import List, Optional, Tuple
 
-from backend.activities.claim_gate_activity import split_into_sentences
+from backend.gate.sentence_split import split_into_sentences
 from backend.gate.sentence_boundary import merge_at_unclear_boundaries
 from backend.models.written import BriefSentence
 
 MAX_FEATURE_TERM_WORDS = 6
 
-_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*(.*?)\s*#*\s*$")
-_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+•]|\d{1,3}[.)])\s+(.+?)\s*$")
+_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s*(.*?)\s*#*\s*$")
+# A Setext underline: the paragraph above it is a heading (=== level 1, --- level 2)
+_SETEXT_RE = re.compile(r"^\s{0,3}(=+|-{2,})\s*$")
+_LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+\u2022]|\d{1,3}[.)])\s+(.+?)\s*$")
 _FEATURE_WORD_RE = re.compile(r"\bfeatures?\b", re.IGNORECASE)
 # "Key features: a, b and c" on one line
 _INLINE_FEATURES_RE = re.compile(r"^([^:]*\bfeatures?\b[^:]*):\s*(\S.*)$", re.IGNORECASE)
 _INLINE_SEPARATOR_RE = re.compile(r"\s*[,;]\s*(?:and\s+)?|\s+and\s+", re.IGNORECASE)
 # Where a list item's term ends and its description starts
-_TERM_END_RE = re.compile(r":|\s[-–—]\s|\(|\.\s")
+_TERM_END_RE = re.compile(r":|\s[-\u2013\u2014]\s|\(|\.\s")
 _MARKUP_RE = re.compile(r"[*_`]+")
 _WORD_RE = re.compile(r"[^\W_]+")
 
@@ -49,15 +55,26 @@ def _clean_context(text: str) -> str:
     return " ".join(_MARKUP_RE.sub("", text).split()).rstrip(":").strip()
 
 
+def _indent(whitespace: str) -> int:
+    return len(whitespace.expandtabs(4))
+
+
 def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     """Return ((text, context) units in order, feature term candidates)."""
     units: List[Tuple[str, str]] = []
     terms: List[str] = []
-    heading = ""
+    headings: List[Tuple[int, str]] = []  # (level, text): the open heading path
     colon_lead: Optional[str] = None  # lead-in of the list being read
     pending_lead: Optional[str] = None  # a "...:" sentence that may introduce a list
     paragraph: List[str] = []
-    in_list = False
+    items: List[Tuple[int, str]] = []  # (indent, text): the open items of the list being read
+
+    def heading_path() -> str:
+        return " > ".join(text for _, text in headings)
+
+    def add_unit(text: str, context: str) -> None:
+        if _WORD_RE.search(text):  # a horizontal rule or stray markup is not a sentence
+            units.append((text, context))
 
     def flush_paragraph() -> None:
         nonlocal pending_lead
@@ -71,42 +88,65 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         sentences = merge_at_unclear_boundaries(split_into_sentences(text))
         if sentences and sentences[-1].rstrip().endswith(":"):
             pending_lead = sentences.pop()
-        units.extend((s, heading) for s in sentences)
+        for sentence in sentences:
+            add_unit(sentence, heading_path())
 
     def emit_pending_lead() -> None:
         nonlocal pending_lead
         if pending_lead is not None:
-            units.append((pending_lead, heading))
+            add_unit(pending_lead, heading_path())
             pending_lead = None
+
+    def open_heading(level: int, text: str) -> None:
+        nonlocal colon_lead
+        while headings and headings[-1][0] >= level:
+            headings.pop()
+        if text:
+            headings.append((level, text))
+        colon_lead = None
+        items.clear()
 
     for line in product_brief.splitlines():
         if not line.strip():
             flush_paragraph()
             continue
+        setext = _SETEXT_RE.match(line)
+        if setext:
+            if paragraph:
+                # The paragraph above is this heading's text, not prose
+                title = _clean_context(" ".join(paragraph))
+                paragraph.clear()
+                emit_pending_lead()
+                open_heading(1 if setext.group(1).startswith("=") else 2, title)
+            continue  # otherwise a horizontal rule
         heading_match = _HEADING_RE.match(line) if line.lstrip().startswith("#") else None
         item_match = _LIST_ITEM_RE.match(line)
         if heading_match:
             flush_paragraph()
             emit_pending_lead()
-            heading = _clean_context(heading_match.group(1))
-            colon_lead, in_list = None, False
+            open_heading(len(heading_match.group(1)), _clean_context(heading_match.group(2)))
         elif item_match:
             flush_paragraph()
             if pending_lead is not None:
                 colon_lead, pending_lead = _clean_context(pending_lead), None
-            elif not in_list:
-                colon_lead = None
-            in_list = True
-            # Both, so an item under "Not supported > Integrations" keeps the "not"
-            context = " > ".join(part for part in (heading, colon_lead) if part)
-            item = item_match.group(1)
-            units.append((item, context))
-            if _FEATURE_WORD_RE.search(context):
+                items.clear()
+            indent, item = _indent(item_match.group(1)), item_match.group(2)
+            while items and items[-1][0] >= indent:
+                items.pop()
+            parents = [_clean_context(text) for _, text in items]
+            # Everything the item stands under, so an item under
+            # "Not supported > Integrations" keeps the "not"
+            context = " > ".join(part for part in (heading_path(), colon_lead, *parents) if part)
+            add_unit(item, context)
+            nearest = (parents[-1:] or [colon_lead or ""]) + [headings[-1][1] if headings else ""]
+            if any(_FEATURE_WORD_RE.search(part) for part in nearest):
                 terms.append(item)
+            items.append((indent, item))
         else:
             if not paragraph:
                 emit_pending_lead()
-                colon_lead, in_list = None, False
+                colon_lead = None
+                items.clear()
             paragraph.append(line.strip())
     flush_paragraph()
     emit_pending_lead()

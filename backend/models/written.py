@@ -69,7 +69,10 @@ class SentenceCheck:
 @dataclass
 class DrafterHint:
     """The drafting model's own claim that brief sentences support one of its
-    sentences. A hint for the checker, never a verdict (amendment item 1)."""
+    sentences (amendment item 1). Never a verdict. It is kept on the draft as
+    provenance and is not shown to the checker: a suggestion would anchor a
+    check that has to be independent (George's decision, 2026-11-24: the
+    checker gets no drafting context)."""
 
     sentence: str
     brief_sentence_ids: List[str] = field(default_factory=list)
@@ -105,6 +108,10 @@ class ClaimVerdict:
     verdict: Optional[str] = None  # "supported" | "unsupported" | None
     brief_sentence_ids: List[str] = field(default_factory=list)
     reason: str = ""
+    # The answer had a field of the wrong shape (a citation list with a
+    # non-string in it, a verdict that is neither word). Code does not repair
+    # such an answer: the sentence fails.
+    malformed: bool = False
 
 
 @dataclass
@@ -117,11 +124,8 @@ class ClaimCheckRequest:
     product_name: str
     product_aliases: List[str] = field(default_factory=list)
     # Per sentence: True when a deterministic trigger fired, so the checker
-    # must return a supported/unsupported verdict for it.
+    # must return a supported/unsupported verdict for it. Set by code.
     must_verify: List[bool] = field(default_factory=list)
-    # Per sentence: brief sentence ids the drafting model suggested (existing
-    # ids only). A hint, never a verdict.
-    suggested_ids: List[List[str]] = field(default_factory=list)
 
 
 @dataclass

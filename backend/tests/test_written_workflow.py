@@ -63,9 +63,12 @@ CLAIM = "Our product helps developers build reliable distributed systems."  # br
 CLOSER = "What are you using today?"
 FAKE_DRAFT = f"{OPENER} {CLAIM} {CLOSER}"
 
-UNSUPPORTED_DRAFT = f"{OPENER} Our product is 10x quicker than the rest. {CLOSER}"
+# A claim the brief does not make. No number in it: a number that no brief
+# sentence states is rejected in code, and these tests exercise the checker.
+UNSUPPORTED_CLAIM = "Our product is quicker than the rest."
+UNSUPPORTED_DRAFT = f"{OPENER} {UNSUPPORTED_CLAIM} {CLOSER}"
 PASSING_EDIT = "That is a hard thing to get right. What does your setup look like today?"
-FAILING_EDIT = "Ours is 10x quicker."
+FAILING_EDIT = "Ours is quicker than the rest."
 
 
 class WritingAgent(FakeReplyAgent):
@@ -203,6 +206,8 @@ async def test_written_review_stores_a_card_with_the_per_sentence_check(make_rev
             assert draft["written"]["product_name"] == PRODUCT
             assert draft["written"]["product_aliases"] == ["Acme Cloud"]
             assert draft["written"]["checker_called"] is True
+            # The drafter's own citation is kept on the draft as provenance
+            assert draft["written"]["drafter_hints"] == [{"sentence": CLAIM, "brief_sentence_ids": ["b1"]}]
             assert draft["written"]["feature_terms"] == [
                 "Automatic failover", "Strong consistency guarantees", "Real-time monitoring",
             ]
@@ -245,7 +250,10 @@ async def test_the_drafter_sees_the_post_and_the_checker_does_not(make_review_in
         assert fragment not in sent
     assert check.sentences == [OPENER, CLAIM, CLOSER]
     assert check.must_verify == [False, True, False]
-    assert check.suggested_ids == [[], ["b1"], []]  # the drafter's hint, existing ids only
+    # Nor the brief sentence the drafter pointed at (b1), although the draft records it
+    assert set(dataclasses.asdict(check)) == {
+        "sentences", "brief_sentences", "product_name", "product_aliases", "must_verify",
+    }
 
 
 @pytest.mark.asyncio
@@ -278,7 +286,7 @@ async def test_two_failed_checks_skip_the_post_with_the_reasons(make_review_inpu
 
             card = await handle.query("get_card")
             assert card["status"] == "skipped"
-            assert card["skip_reason"].startswith("Not enough evidence: Our product is 10x quicker")
+            assert card["skip_reason"].startswith("Not enough evidence: Our product is quicker than")
             draft = card["evidence"]["draft"]
             assert draft["claim_gate"]["passed"] is False
             assert draft["sentence_checks"][1]["verdict"] == "unsupported"
@@ -413,7 +421,7 @@ async def test_a_passing_edit_is_checked_and_approve_names_the_draft_shown(make_
             # The edit ran the written check, not the assembled re-gate
             scheduled = _scheduled(await handle.fetch_history())
             assert scheduled.count("check_written_draft") == 2 and "verify_edited_text" not in scheduled
-            assert checker.requests[-1].suggested_ids == [[], []]  # an edit carries no drafter hints
+            assert checker.requests[-1].must_verify == [False, False]
 
             # Issue #15: approve is bound to the draft the founder saw
             with pytest.raises(WorkflowUpdateFailedError) as stale:
@@ -443,7 +451,7 @@ async def test_a_failing_edit_needs_post_anyway_which_is_recorded(make_review_in
             assert card["edited_text_gate_state"] == "failed"
             [result] = card["edited_text_gate_results"]
             assert (result["kind"], result["verdict"], result["passed"]) == ("claim", "unsupported", False)
-            assert {t["trigger"] for t in result["triggers"]} == {"first_person_plural", "number", "comparison"}
+            assert {t["trigger"] for t in result["triggers"]} == {"first_person_plural", "comparison"}
             assert result["reason"].startswith("Checked as a product claim (uses we/our/us/ours")
 
             shown = {"text": FAILING_EDIT, "gate_state": "failed"}

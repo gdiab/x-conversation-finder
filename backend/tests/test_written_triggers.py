@@ -33,8 +33,6 @@ def _matches(sentence, trigger, name=NAME, aliases=ALIASES, terms=TERMS):
     "The policy is the interesting part.",
     "Does Ship let the same agent that wrote the change approve it?",
     "That is a hard thing to get right.",
-    "Which one are you on?",
-    "No one warns you about that.",
     "That works as well as anything.",
     "I ran into the same wall last spring.",
     "What are you using today?",
@@ -140,11 +138,19 @@ def test_numbers_fire(sentence, match):
 
 
 @pytest.mark.parametrize("sentence", [
+    "It takes one minute.",
+    "One command rolls it back.",
+    # The amendment says "any number", and code cannot tell the pronoun from
+    # the quantity: these are checked too. The drafter is told to avoid them.
     "Which one are you on?",
     "No one warns you about that.",
-    "That one bit me as well.",
 ])
-def test_the_pronoun_one_is_not_a_number(sentence):
+def test_one_counts_as_a_number(sentence):
+    assert _matches(sentence, TRIGGER_NUMBER) == ["one"]
+
+
+@pytest.mark.parametrize("sentence", ["Someone should fix that.", "Anyone can hit this.", "That alone is hard."])
+def test_one_inside_another_word_is_not_a_number(sentence):
     assert TRIGGER_NUMBER not in _kinds(sentence)
 
 

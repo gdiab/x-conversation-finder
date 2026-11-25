@@ -50,6 +50,54 @@ def test_an_item_under_a_negative_heading_keeps_the_heading():
     assert render_brief_sentence(item) == "[b1] (Not supported yet > Integrations) Single sign-on"
 
 
+def test_nested_headings_keep_their_parents():
+    """An item under "## Integrations" inside "# Not supported yet" must keep the "not"."""
+    brief = (
+        "# Acme Relay\n\nRelay delivers webhooks.\n\n"
+        "# Not supported yet\n## Integrations\n- Slack\n\n"
+        "## Regions\nOnly one region today.\n\n"
+        "# Pricing\n- Free tier\n"
+    )
+
+    assert _texts(brief) == [
+        ("b1", "Acme Relay", "Relay delivers webhooks."),
+        ("b2", "Not supported yet > Integrations", "Slack"),
+        ("b3", "Not supported yet > Regions", "Only one region today."),
+        ("b4", "Pricing", "Free tier"),  # a new top-level heading closes the old path
+    ]
+
+
+def test_nested_list_items_keep_the_items_they_stand_under():
+    brief = (
+        "- Chat tools we do not plan:\n"
+        "  - Teams\n"
+        "    1. Channel mentions\n"
+        "  - Rooms\n"
+        "- Email\n"
+    )
+
+    assert [(c, t) for _, c, t in _texts(brief)] == [
+        ("", "Chat tools we do not plan:"),
+        ("Chat tools we do not plan", "Teams"),
+        ("Chat tools we do not plan > Teams", "Channel mentions"),
+        ("Chat tools we do not plan", "Rooms"),
+        ("", "Email"),
+    ]
+
+
+def test_setext_headings_are_headings_and_rules_are_not_sentences():
+    brief = (
+        "Acme Relay\n==========\n\nRelay delivers webhooks.\n\n"
+        "Roadmap\n-------\nSingle sign-on.\n\n"
+        "---\n\n- - -\n\n***\n"
+    )
+
+    assert _texts(brief) == [
+        ("b1", "Acme Relay", "Relay delivers webhooks."),
+        ("b2", "Acme Relay > Roadmap", "Single sign-on."),
+    ]
+
+
 def test_a_colon_line_that_introduces_no_list_stays_a_sentence():
     brief = "Pricing follows usage:\n\nYou pay per delivery."
 
@@ -105,6 +153,16 @@ def test_inline_feature_list_is_read():
     brief = "Key features: retries with backoff, a dead-letter queue, and replay."
 
     assert brief_feature_terms(brief) == ["retries with backoff", "a dead-letter queue", "replay"]
+
+
+def test_feature_terms_need_the_nearest_heading_lead_in_or_parent_item_to_say_features():
+    under_heading = "# Features\nPlans:\n- Free tier\n"  # the heading says it
+    under_parent = "- Main features:\n  - Replay\n- Limits:\n  - Ten endpoints\n"
+    far_above = "# Feature overview\n## Not supported yet\n- Single sign-on\n"
+
+    assert brief_feature_terms(under_heading) == ["Free tier"]
+    assert brief_feature_terms(under_parent) == ["Replay"]
+    assert brief_feature_terms(far_above) == []  # only the nearest heading counts
 
 
 def test_lists_that_are_not_feature_lists_give_no_terms():

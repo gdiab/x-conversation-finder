@@ -17,12 +17,21 @@ Everything here is deterministic: the checker's verdicts are an input
 the amendment's wording, each of which can only add a rejection:
 - A product claim must be a statement. A checked sentence that is a question
   fails, whatever the checker says ("Did you know ours does X?").
-- A number in a supported claim must appear in a cited brief sentence.
+- A number in a supported claim must appear in a cited brief sentence, and a
+  number that no brief sentence states fails before the checker is asked.
 - The checker's answer fails closed: a missing or malformed verdict is read
   as "not supported".
+- A sentence that may be two (a terminator inside it that might end a
+  sentence, as in "Acme ships.It retries.") fails, so the sentence and claim
+  limits cannot be dodged by leaving out a space. A line break ends a sentence.
 
 The text limits are the amendment's: at most MAX_SENTENCES sentences, at most
-MAX_CHARS characters, at most MAX_PRODUCT_CLAIMS product claim.
+MAX_CHARS characters, at most MAX_PRODUCT_CLAIMS product claim. A claim is
+counted per sentence: one sentence that says two things about the product is
+one claim, and the checker must find all of it in the brief.
+
+A text that code can already reject is not sent to the checker
+(PreparedCheck.needs_checker): no paid call is made for it.
 
 Like every sentence splitter, this runs only inside activities, never in
 workflow code.
@@ -33,8 +42,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from backend.activities.claim_gate_activity import normalize_text, split_into_sentences
-from backend.gate.sentence_boundary import SPLITTER_VERSION
+from backend.gate.sentence_split import normalize_text, split_into_sentences
+from backend.gate.sentence_boundary import SPLITTER_VERSION, has_unclear_boundary_inside
 from backend.models.written import (
     VERDICT_NOT_CHECKED,
     VERDICT_NOT_PRODUCT,
@@ -43,7 +52,6 @@ from backend.models.written import (
     BriefSentence,
     ClaimCheckRequest,
     ClaimVerdict,
-    DrafterHint,
     SentenceCheck,
     TriggerHit,
     WrittenCheckResult,
@@ -75,11 +83,13 @@ TRIGGER_LABELS = {
 
 FIRST_PERSON_PLURAL = frozenset({"we", "our", "ours", "us", "ourselves"})
 
-# Number words. "one" is left out on purpose: in a reply it is nearly always a
-# pronoun ("which one", "no one"). Any digit counts.
+# Number words; any digit counts too. "one" is included: the amendment says
+# "any number", and code cannot tell the pronoun ("which one") from the
+# quantity ("one command"). The drafter is told to keep it out of every
+# sentence but the claim.
 NUMBER_WORDS = frozenset(
     """
-    zero two three four five six seven eight nine ten
+    zero one two three four five six seven eight nine ten
     eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen
     twenty thirty forty fifty sixty seventy eighty ninety
     hundred thousand million billion trillion dozen
@@ -265,34 +275,34 @@ class PreparedCheck:
     product_name: str
     product_aliases: List[str]
     feature_terms: List[str]
-    hints: List[DrafterHint] = field(default_factory=list)
     # Failures code found without the checker: (marker or sentence, reason)
     structural_failures: List[List[str]] = field(default_factory=list)
+    # The reply plan's product decision, where code alone can see it is broken
+    plan_failures: List[str] = field(default_factory=list)
 
     @property
     def needs_checker(self) -> bool:
         """False when the text already failed in code: no paid call is made."""
-        return not self.structural_failures and bool(self.sentences)
+        return not self.structural_failures and not self.plan_failures and bool(self.sentences)
 
     def request(self) -> ClaimCheckRequest:
-        known = {b.id for b in self.brief_sentences}
-        suggested: List[List[str]] = []
-        for sentence in self.sentences:
-            key = normalize_text(sentence.rstrip(".!?"))
-            ids: List[str] = []
-            for hint in self.hints:
-                if normalize_text(hint.sentence.rstrip(".!?")) == key:
-                    ids = [i for i in hint.brief_sentence_ids if i in known]
-                    break
-            suggested.append(ids)
+        """Everything the checker is given: nothing from the post, the plan or the drafter."""
         return ClaimCheckRequest(
             sentences=list(self.sentences),
             brief_sentences=list(self.brief_sentences),
             product_name=self.product_name,
             product_aliases=list(self.product_aliases),
             must_verify=[bool(hits) for hits in self.triggers],
-            suggested_ids=suggested,
         )
+
+
+def split_reply(text: str) -> List[str]:
+    """The sentences of a reply. A line break ends a sentence; within a line
+    the claim gate's splitter decides."""
+    sentences: List[str] = []
+    for line in (text or "").splitlines():
+        sentences.extend(split_into_sentences(line))
+    return sentences
 
 
 def prepare_check(
@@ -301,12 +311,15 @@ def prepare_check(
     product_name: str,
     product_aliases: Optional[Sequence[str]] = None,
     feature_terms: Optional[Sequence[str]] = None,
-    hints: Optional[Sequence[DrafterHint]] = None,
+    mention_product: Optional[bool] = None,
 ) -> PreparedCheck:
-    """Split the text, run the triggers and apply the limits code can decide alone."""
+    """Split the text, run the triggers and apply everything code can decide alone.
+
+    `mention_product` is the reply plan's decision (None for a founder edit).
+    """
     name, aliases = clean_names(product_name, product_aliases)
     terms = list(feature_terms or [])
-    sentences = split_into_sentences(text or "")
+    sentences = split_reply(text)
     triggers = [find_triggers(s, name, aliases, terms) for s in sentences]
     failures: List[List[str]] = []
     if not sentences:
@@ -327,13 +340,36 @@ def prepare_check(
             f"{len(triggered)} sentences are checked as product claims: "
             + "; ".join(f"sentence {i + 1} {_trigger_summary(triggers[i])}" for i in triggered),
         ])
+    for sentence in sentences:
+        if has_unclear_boundary_inside(sentence):
+            failures.append([
+                sentence,
+                "This may be more than one sentence: a period, question mark or ellipsis inside it "
+                "might end a sentence. Write each sentence on its own, with a space after it",
+            ])
+    brief_numbers = {
+        n for b in brief_sentences for n in _numbers(f"{b.context} {b.text}", name, aliases)
+    }
     for i in triggered:
+        why = f"Checked as a product claim ({_trigger_summary(triggers[i])})."
         if is_question(sentences[i]):
+            failures.append([sentences[i], f"{why} A product claim must be a statement, not a question."])
+            continue
+        if not brief_sentences:
+            failures.append([sentences[i], f"{why} The brief has no sentences, so nothing can support it."])
+            continue
+        # Whatever the checker cites, the number rule would reject these
+        unstated = [n for n in _numbers(sentences[i], name, aliases) if n not in brief_numbers]
+        if unstated:
             failures.append([
                 sentences[i],
-                f"A product claim must be a statement, not a question; this sentence "
-                f"{_trigger_summary(triggers[i])}",
+                f"{why} It contains a number no brief sentence states: "
+                + ", ".join(f'"{n}"' for n in dict.fromkeys(unstated)),
             ])
+    plan_failures: List[str] = []
+    if mention_product is False and triggered:
+        # Known before the checker is asked: a triggered sentence is a product claim
+        plan_failures.append(NO_MENTION_PLAN_FAILURE)
     return PreparedCheck(
         text=(text or "").strip(),
         sentences=sentences,
@@ -342,8 +378,8 @@ def prepare_check(
         product_name=name,
         product_aliases=aliases,
         feature_terms=terms,
-        hints=list(hints or []),
         structural_failures=failures,
+        plan_failures=plan_failures,
     )
 
 
@@ -358,7 +394,7 @@ def _judge_sentence(
     """Decide one sentence from its triggers and the checker's verdict."""
     # Only an explicit False takes a sentence out of the checked set, and only
     # when no trigger fired. A missing or malformed answer counts as flagged.
-    flagged = verdict is None or verdict.about_product is not False
+    flagged = verdict is None or verdict.about_product is not False or verdict.malformed
     checked = bool(hits) or flagged
     if not checked:
         return SentenceCheck(
@@ -383,10 +419,13 @@ def _judge_sentence(
         return fail("A product claim must be a statement, not a question.")
     if verdict is None:
         return fail("The checker returned no verdict for it.")
+    cited = verdict.brief_sentence_ids
+    if verdict.malformed or not isinstance(cited, list) or any(not isinstance(i, str) for i in cited):
+        # Not repaired: a citation list with one bad entry is not a citation list
+        return fail("The checker's answer for it was malformed.")
     if verdict.verdict != VERDICT_SUPPORTED:
         stated = _one_line(verdict.reason) or "The checker did not find it in the brief."
         return fail(f"The brief does not support it: {stated}")
-    cited = [i for i in verdict.brief_sentence_ids if isinstance(i, str)]
     if not cited:
         return fail("The checker called it supported but cited no brief sentence.")
     unknown = [i for i in cited if i not in brief_by_id]
@@ -411,6 +450,10 @@ def _judge_sentence(
     return check
 
 
+NO_MENTION_PLAN_FAILURE = "the reply plan says not to mention the product, but the draft has a product claim"
+MENTION_PLAN_FAILURE = "the reply plan says to mention the product, but the draft has no product claim"
+
+
 def plan_product_failures(checks: Sequence[SentenceCheck], mention_product: Optional[bool]) -> List[str]:
     """Does the checked text follow the plan's product decision (issue #5)?
 
@@ -419,9 +462,9 @@ def plan_product_failures(checks: Sequence[SentenceCheck], mention_product: Opti
     """
     claims = sum(1 for c in checks if c.kind == "claim")
     if mention_product is False and claims:
-        return ["the reply plan says not to mention the product, but the draft has a product claim"]
+        return [NO_MENTION_PLAN_FAILURE]
     if mention_product is True and not claims:
-        return ["the reply plan says to mention the product, but the draft has no product claim"]
+        return [MENTION_PLAN_FAILURE]
     return []
 
 
@@ -447,7 +490,6 @@ def judge(
         brief_sentence_count=len(prepared.brief_sentences),
         splitter_version=SPLITTER_VERSION,
         trigger_rules_version=TRIGGER_RULES_VERSION,
-        drafter_hints=list(prepared.hints),
         checker_called=verdicts is not None,
         checker_model=checker_model,
         checker_input_tokens=checker_input_tokens,
@@ -458,14 +500,16 @@ def judge(
     if verdicts is None:
         # Not sent to the checker: the text failed in code. No sentence passes;
         # each shows its own failure, or the failure of the reply as a whole.
-        if not failures:
+        plan_failures = list(prepared.plan_failures)
+        if not failures and not plan_failures:
             failures.append(["[reply]", "The product-claim check did not run"])
+        whole = failures[0][1] if failures else f"The draft does not follow the reply plan: {plan_failures[0]}"
         checks = [
             SentenceCheck(
                 sentence=s,
                 passed=False,
                 kind="claim" if hits else "non_claim",
-                reason=next((f[1] for f in failures if f[0] == s), failures[0][1]),
+                reason=next((f[1] for f in failures if f[0] == s), whole),
                 triggers=list(hits),
                 verdict=VERDICT_NOT_CHECKED,
             )
@@ -476,12 +520,17 @@ def judge(
             # the card list failing sentences)
             SentenceCheck(
                 sentence="[reply]", passed=False, kind="non_claim",
-                reason=failures[0][1], verdict=VERDICT_NOT_CHECKED,
+                reason=whole, verdict=VERDICT_NOT_CHECKED,
             )
         ]
-        reasoning = f"{len(failures)} failure(s) found before the checker call: {failures[0][1]}"
+        count = len(failures) + len(plan_failures)
         return WrittenCheckResult(
-            passed=False, sentences=checks, failures=failures, reasoning=reasoning, info=info
+            passed=False,
+            sentences=checks,
+            failures=failures,
+            reasoning=f"{count} failure(s) found before the checker call: {whole}",
+            plan_failures=plan_failures,
+            info=info,
         )
 
     by_index: Dict[int, ClaimVerdict] = {}

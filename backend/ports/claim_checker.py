@@ -8,10 +8,10 @@ drafting context, like a subagent.
 
 That isolation is this port's signature. A checker receives a
 ClaimCheckRequest and nothing else: the reply's sentences, the brief
-sentences, the product name and aliases, which sentences code requires a
-verdict for, and the brief sentence ids the drafter suggested. It never
-receives the post, the reply plan, the evidence or the drafting prompt, so an
-adapter cannot pass them to the model.
+sentences, the product name and aliases, and which sentences code requires a
+verdict for. It never receives the post, the reply plan, the evidence, the
+drafting prompt or the brief sentences the drafter pointed at, so an adapter
+cannot pass them to the model.
 
 Budget (issue #8): an adapter that makes a paid call reserves it through
 backend.budget.current_inference_meter() right before the request and settles

@@ -35,12 +35,7 @@ def build_check_prompt(request: ClaimCheckRequest) -> str:
     brief = "\n".join(render_brief_sentence(b) for b in request.brief_sentences) or "(the brief is empty)"
     lines = []
     for i, sentence in enumerate(request.sentences):
-        marks = []
-        if i < len(request.must_verify) and request.must_verify[i]:
-            marks.append("must verify")
-        if i < len(request.suggested_ids) and request.suggested_ids[i]:
-            marks.append("the writer suggests " + ", ".join(request.suggested_ids[i]) + "; check it yourself")
-        mark = f" ({'; '.join(marks)})" if marks else ""
+        mark = " (must verify)" if i < len(request.must_verify) and request.must_verify[i] else ""
         lines.append(f"[{i + 1}]{mark} {sentence}")
     reply = "\n".join(lines)
 
@@ -92,6 +87,9 @@ def parse_verdicts(content: Any, sentence_count: int) -> List[ClaimVerdict]:
 
     A sentence without a usable object gets no verdict, and code then fails it
     (backend.gate.written_check.judge). The first object for a number stands.
+    Nothing is repaired: a field of the wrong shape (a citation list holding a
+    non-string, a verdict that is neither word) marks the verdict malformed,
+    and code fails that sentence too.
     """
     try:
         result = json.loads(content)
@@ -112,12 +110,15 @@ def parse_verdicts(content: Any, sentence_count: int) -> List[ClaimVerdict]:
         verdict = item.get("verdict")
         ids = item.get("brief_sentence_ids")
         reason = item.get("reason")
+        verdict_ok = verdict is None or verdict in ("supported", "unsupported")
+        ids_ok = ids is None or (isinstance(ids, list) and all(isinstance(i, str) for i in ids))
         verdicts.append(ClaimVerdict(
             index=n,
             about_product=_strict_bool(item.get("about_product")),
             verdict=verdict if verdict in ("supported", "unsupported") else None,
-            brief_sentence_ids=[i for i in ids if isinstance(i, str)] if isinstance(ids, list) else [],
+            brief_sentence_ids=list(ids) if ids_ok and ids else [],
             reason=reason if isinstance(reason, str) else "",
+            malformed=not (verdict_ok and ids_ok),
         ))
     return verdicts
 

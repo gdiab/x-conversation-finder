@@ -1,5 +1,5 @@
 {
-  "note": "Switch-criteria cases for written drafts (issue #12; ADR-0006 amendment 2026-11-24). Synthetic products, briefs and sentences. 'correct_checker' is the answer a correct checker must give for each sentence of the text, in order (null: code rejects the text before any checker call). 'triggers' lists, per sentence, the deterministic triggers that must fire. 'decided_by' says what the outcome rests on: 'code' (rejected in code, no checker call), 'trigger' (a trigger forces the check, so the text is rejected unless the checker returns 'supported' with existing brief sentence ids), 'checker' (no trigger; rests on the checker's classification or verdict), 'step-4' (not a product claim; not gated against the brief).",
+  "note": "Switch-criteria cases for written drafts (issue #12; ADR-0006 amendment 2026-11-24). Synthetic products, briefs and sentences. 'correct_checker' is the answer a correct checker must give for each sentence of the text, in order (null: code rejects the text before any checker call). 'triggers' lists, per sentence, the deterministic triggers that must fire. 'decided_by' says what the outcome rests on: 'code' (rejected in code, no checker call: a question that makes a product claim, or a number no brief sentence states), 'trigger' (a trigger forces the check, so the text is rejected unless the checker returns 'supported' with existing brief sentence ids), 'checker' (no trigger; rests on the checker's classification or verdict), 'step-4' (not a product claim; not gated against the brief).",
   "briefs": {
     "classic": {
       "product_name": "Acme",
@@ -164,19 +164,10 @@
           "number"
         ]
       ],
-      "correct_checker": [
-        {
-          "about_product": false
-        },
-        {
-          "about_product": true,
-          "verdict": "unsupported",
-          "reason": "The brief states no speed figure."
-        }
-      ],
+      "correct_checker": null,
       "expect": "reject",
-      "decided_by": "trigger",
-      "why": "\"Ours\", a number and a comparison."
+      "decided_by": "code",
+      "why": "\"Ours\", a number and a comparison. No brief sentence states \"10\", so code rejects it before any checker call."
     },
     {
       "id": "e21-teams-switched-to-us",
@@ -210,19 +201,10 @@
           "number"
         ]
       ],
-      "correct_checker": [
-        {
-          "about_product": false
-        },
-        {
-          "about_product": true,
-          "verdict": "unsupported",
-          "reason": "The brief states no number of integrations."
-        }
-      ],
+      "correct_checker": null,
       "expect": "reject",
-      "decided_by": "trigger",
-      "why": "A number."
+      "decided_by": "code",
+      "why": "A number that no brief sentence states: code rejects it before any checker call."
     },
     {
       "id": "e21-is-ours-10x-faster-than-kafka",
@@ -619,17 +601,11 @@
           "product_name"
         ]
       ],
-      "correct_checker": [
-        {
-          "about_product": true,
-          "verdict": "unsupported",
-          "reason": "The brief says five, not ten."
-        }
-      ],
+      "correct_checker": null,
       "expect": "reject",
-      "decided_by": "trigger",
+      "decided_by": "code",
       "paraphrases": "b2",
-      "why": "Changes the number in b2. Code rejects it even if a checker wrongly calls it supported: \"ten\" is in no cited brief sentence."
+      "why": "Changes the number in b2. No brief sentence states \"ten\", so code rejects it before any checker call."
     },
     {
       "id": "pass-verbatim-claim",

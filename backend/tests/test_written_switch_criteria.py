@@ -74,9 +74,9 @@ NOT_PRODUCT_CLAIMS_UNDER_STEP_4 = {
     "Why is the issue the same?",
 }
 
-# Must-REJECT cases code still rejects when the checker wrongly calls every
-# sentence it had to verify "supported" (citing real brief sentences). Every
-# other must-REJECT case rests on the checker's judgement of entailment.
+# Must-REJECT cases code rejects whatever a checker would say (all of them
+# before the checker is even called). Every other must-REJECT case rests on
+# the checker's judgement of entailment.
 REJECTED_BY_CODE_WHATEVER_THE_CHECKER_SAYS = {
     "e21-passage-sentence-as-question",  # a triggered question
     "e21-is-ours-10x-faster-than-kafka",  # a triggered question
@@ -285,7 +285,7 @@ def test_what_code_alone_rejects_when_a_wrong_checker_calls_everything_supported
 
     rejected = {c["id"] for c in must_reject if not _check(c, rubber_stamp).passed}
 
-    assert rejected == REJECTED_BY_CODE_WHATEVER_THE_CHECKER_SAYS
+    assert rejected == REJECTED_BY_CODE_WHATEVER_THE_CHECKER_SAYS == {c["id"] for c in CODE_CASES}
     # The rest need a checker that judges entailment correctly: 18 of 24
     assert (len(must_reject), len(must_reject) - len(rejected)) == (24, 18)
 

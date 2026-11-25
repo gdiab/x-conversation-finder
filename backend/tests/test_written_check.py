@@ -15,12 +15,13 @@ from backend.gate.written_check import (
     prepare_check,
 )
 from backend.gate.sentence_boundary import SPLITTER_VERSION
-from backend.models.written import ClaimVerdict, DrafterHint
+from backend.models.written import ClaimVerdict
 from backend.tests.written_helpers import brief
 
 BRIEF = brief(
     "Relay can retry a failed delivery up to five times.",
     "Signed deliveries are available on the Team plan.",
+    "The replay tool keeps deliveries for 30 days.",
 )
 NAME = "Acme Relay"
 ALIASES = ["Relay"]
@@ -35,8 +36,8 @@ NOT_PRODUCT = dict(about_product=False)
 SUPPORTED_B1 = dict(about_product=True, verdict="supported", brief_sentence_ids=["b1"])
 
 
-def _prepare(text, hints=None):
-    return prepare_check(text, BRIEF, NAME, ALIASES, TERMS, hints)
+def _prepare(text, mention_product=None):
+    return prepare_check(text, BRIEF, NAME, ALIASES, TERMS, mention_product)
 
 
 def _verdicts(*specs):
@@ -44,7 +45,11 @@ def _verdicts(*specs):
 
 
 def _check(text, *specs, mention_product=None):
-    return judge(_prepare(text), _verdicts(*specs), mention_product)
+    """Judge with the given checker answers. Fails the test if code would not
+    have asked the checker at all (use _prepare + judge(prepared, None) then)."""
+    prepared = _prepare(text, mention_product)
+    assert prepared.needs_checker, (prepared.structural_failures, prepared.plan_failures)
+    return judge(prepared, _verdicts(*specs), mention_product)
 
 
 # ---------- the passing shape ----------
@@ -71,7 +76,7 @@ def test_the_result_records_how_it_was_checked():
 
     assert info.product_name == NAME and info.product_aliases == ALIASES
     assert info.feature_terms == TERMS
-    assert info.brief_sentence_count == 2
+    assert info.brief_sentence_count == 3
     assert info.splitter_version == SPLITTER_VERSION
     assert info.trigger_rules_version == TRIGGER_RULES_VERSION
     assert info.checker_called is True
@@ -144,9 +149,7 @@ def test_a_triggered_sentence_needs_a_supported_verdict_whatever_the_checker_say
 
 
 def test_nothing_can_take_a_triggered_sentence_out_of_the_checked_set():
-    """Not the drafter's hints either: a hint is passed on, never trusted."""
-    hints = [DrafterHint(sentence=CLAIM, brief_sentence_ids=["b1"])]
-    prepared = _prepare(GOOD, hints)
+    prepared = _prepare(GOOD)
 
     assert prepared.request().must_verify == [False, True, False]
     result = judge(prepared, _verdicts(NOT_PRODUCT, NOT_PRODUCT, NOT_PRODUCT))
@@ -173,6 +176,30 @@ def test_an_unclear_answer_for_an_untriggered_sentence_fails_closed(answer):
     assert result.sentences[1].kind == "claim"
 
 
+# ---------- a malformed answer is not repaired ----------
+
+
+def test_a_citation_list_with_a_non_string_fails_even_if_one_id_is_real():
+    """ ["b1", 7] is not read as ["b1"]: a malformed citation list is no citation."""
+    verdict = ClaimVerdict(index=2, about_product=True, verdict="supported", brief_sentence_ids=["b1", 7])
+
+    result = judge(_prepare(GOOD), [ClaimVerdict(1, False), verdict, ClaimVerdict(3, False)])
+
+    assert not result.passed
+    assert "The checker's answer for it was malformed." in result.sentences[1].reason
+
+
+def test_a_verdict_marked_malformed_fails_a_triggered_and_an_untriggered_sentence():
+    marked = dict(about_product=False, malformed=True)
+
+    triggered = _check(GOOD, NOT_PRODUCT, dict(SUPPORTED_B1, malformed=True), NOT_PRODUCT)
+    untriggered = _check(f"{REACTION} {QUESTION}", NOT_PRODUCT, marked)
+
+    assert not triggered.passed and "malformed" in triggered.sentences[1].reason
+    # Even an explicit "not about the product" does not count in a malformed answer
+    assert not untriggered.passed and untriggered.sentences[1].kind == "claim"
+
+
 def test_a_repeated_answer_cannot_overrule_the_first():
     verdicts = [
         ClaimVerdict(index=2, about_product=True, verdict="unsupported", reason="No."),
@@ -193,7 +220,8 @@ def test_a_triggered_question_fails_in_code_before_any_checker_call():
     assert not prepared.needs_checker
     result = judge(prepared, None)
     assert not result.passed
-    assert "must be a statement, not a question" in result.failures[0][1]
+    assert "A product claim must be a statement, not a question." in result.failures[0][1]
+    assert result.failures[0][1].startswith('Checked as a product claim (uses we/our/us/ours ("ours")')
     assert result.info.checker_called is False
 
 
@@ -214,18 +242,45 @@ def test_a_question_about_the_poster_is_fine():
 
 
 def test_a_number_the_cited_sentences_do_not_state_fails():
-    text = "Relay can retry a failed delivery up to ten times."
+    """ "30" is in the brief (b3), but not in the sentence the checker cites."""
+    text = "Relay can retry a failed delivery up to 30 times."
 
     result = _check(text, SUPPORTED_B1)
 
     assert not result.passed
-    assert 'a number the cited brief sentences do not state: "ten"' in result.sentences[0].reason
+    assert 'a number the cited brief sentences do not state: "30"' in result.sentences[0].reason
+    assert _check(text, dict(about_product=True, verdict="supported", brief_sentence_ids=["b1", "b3"])).passed
+
+
+def test_a_number_no_brief_sentence_states_fails_before_any_checker_call():
+    """Whatever the checker cited, the number rule would reject it: do not pay to ask."""
+    prepared = _prepare("Relay can retry a failed delivery up to ten times.")
+
+    assert not prepared.needs_checker
+    [[sentence, reason]] = prepared.structural_failures
+    assert sentence == "Relay can retry a failed delivery up to ten times."
+    assert 'It contains a number no brief sentence states: "ten"' in reason
+
+
+def test_one_is_a_number_in_a_claim_too():
+    prepared = _prepare("Relay can retry a failed delivery one time.")
+
+    assert not prepared.needs_checker
+    assert 'a number no brief sentence states: "one"' in prepared.structural_failures[0][1]
+
+
+def test_a_triggered_sentence_cannot_be_supported_by_an_empty_brief():
+    prepared = prepare_check(CLAIM, [], NAME, ALIASES)
+
+    assert not prepared.needs_checker
+    assert "The brief has no sentences, so nothing can support it." in prepared.structural_failures[0][1]
 
 
 def test_numbers_are_compared_as_digits_whatever_surrounds_them():
     sentences = brief("Latency stays under 10ms for 1,000 endpoints.")
     prepared = prepare_check("Relay keeps latency under 10 ms for 1000 endpoints.", sentences, NAME, ALIASES)
 
+    assert prepared.needs_checker
     assert judge(prepared, _verdicts(SUPPORTED_B1)).passed
 
 
@@ -277,6 +332,38 @@ def test_two_triggered_sentences_fail_without_a_checker_call():
     assert "at most 1 product claim" in reason and "2 sentences are checked as product claims" in reason
 
 
+# ---------- the limits cannot be dodged by how sentences are joined ----------
+
+
+@pytest.mark.parametrize("text", [
+    "Acme ships.It retries.",  # no space after the period
+    "That is hard.Really hard.What are you using?",
+    "Well... that depends on the queue.",  # an ellipsis may end a sentence
+])
+def test_a_sentence_that_may_be_two_fails_before_any_checker_call(text):
+    prepared = prepare_check(text, BRIEF, "Acme", [], [])
+
+    assert not prepared.needs_checker
+    assert any("This may be more than one sentence" in reason for _, reason in prepared.structural_failures)
+
+
+def test_ordinary_dots_inside_a_sentence_are_fine():
+    for text in ("Node.js handles that well enough.", "That is roughly 5 of them, e.g. the retry queue."):
+        prepared = prepare_check(text, brief("We count 5 of them."), "Acme", [], [])
+        assert not any("more than one sentence" in r for _, r in prepared.structural_failures), text
+
+
+def test_a_line_break_ends_a_sentence():
+    """Four lines are four sentences, with or without full stops."""
+    prepared = _prepare("That is hard\nReally hard\nVery hard\nWhat are you using")
+
+    assert len(prepared.sentences) == 4
+    assert "at most 3 sentences (got 4)" in prepared.structural_failures[0][1]
+    # And two product lines are two claims
+    two = _prepare("Relay retries deliveries\nOur dashboard shows them")
+    assert "at most 1 product claim" in two.structural_failures[0][1]
+
+
 def test_two_claims_found_by_the_checker_fail_on_both_sentences():
     text = f"{CLAIM} It also resends old deliveries."
 
@@ -302,8 +389,28 @@ def test_a_failed_check_always_names_a_failing_sentence():
 # ---------- the reply plan's product decision (issue #5) ----------
 
 
-def test_plan_says_no_product_but_the_draft_has_a_claim():
-    result = _check(GOOD, NOT_PRODUCT, SUPPORTED_B1, NOT_PRODUCT, mention_product=False)
+def test_plan_says_no_product_and_a_triggered_sentence_costs_no_checker_call():
+    """Code already knows the sentence is a product claim, so the plan is broken
+    before the checker is asked (issue #8: do not pay for a known failure)."""
+    prepared = _prepare(GOOD, mention_product=False)
+
+    assert not prepared.needs_checker
+    assert prepared.structural_failures == []
+    result = judge(prepared, None, False)
+    assert not result.passed
+    assert result.failures == []  # nothing is wrong with the text itself
+    assert result.plan_failures == [
+        "the reply plan says not to mention the product, but the draft has a product claim"
+    ]
+    assert result.info.checker_called is False
+    assert all(not c.passed and "does not follow the reply plan" in c.reason for c in result.sentences)
+
+
+def test_plan_says_no_product_but_the_checker_finds_a_claim():
+    """No trigger fires, so only the checker can tell."""
+    text = f"{REACTION} It resends failed deliveries for you."
+
+    result = _check(text, NOT_PRODUCT, SUPPORTED_B1, mention_product=False)
 
     assert not result.passed
     assert result.failures == []  # the claim itself is supported
@@ -329,19 +436,14 @@ def test_a_founder_edit_is_not_held_to_the_plan():
 # ---------- the request the checker gets ----------
 
 
-def test_the_request_carries_only_sentences_brief_names_flags_and_hints():
-    hints = [
-        DrafterHint(sentence=CLAIM, brief_sentence_ids=["b1", "b77"]),  # b77 does not exist
-        DrafterHint(sentence="A sentence that is not in the reply.", brief_sentence_ids=["b2"]),
-    ]
-
-    request = _prepare(GOOD, hints).request()
+def test_the_request_carries_only_sentences_brief_names_and_the_must_verify_flags():
+    request = _prepare(GOOD, mention_product=True).request()
 
     assert request.sentences == [REACTION, CLAIM, QUESTION]
-    assert [b.id for b in request.brief_sentences] == ["b1", "b2"]
+    assert [b.id for b in request.brief_sentences] == ["b1", "b2", "b3"]
     assert (request.product_name, request.product_aliases) == (NAME, ALIASES)
     assert request.must_verify == [False, True, False]
-    assert request.suggested_ids == [[], ["b1"], []]  # existing ids only, matched by sentence
+    # No post, no plan (not even its product decision), no drafter hints
     assert set(vars(request)) == {
-        "sentences", "brief_sentences", "product_name", "product_aliases", "must_verify", "suggested_ids",
+        "sentences", "brief_sentences", "product_name", "product_aliases", "must_verify",
     }

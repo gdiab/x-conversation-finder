@@ -226,8 +226,10 @@ Rules:
   not open with a greeting or with thanks, and do not repeat the post back.
 {product_rule}
 - Every other sentence must not: name {name}; use "we", "our", "us" or "ours"; contain a
-  number (a digit, or a word such as "two"); compare things (than, vs, better, faster,
-  cheaper, same as){terms}. Code checks any such sentence as a product claim, and it fails.
+  number (a digit, or a word such as "one" or "two", also in "which one" or "no one");
+  compare things (than, vs, better, faster, cheaper, same as){terms}. Code checks any such
+  sentence as a product claim, and it fails.
+- Write each sentence on its own, with a space after its end. No ellipses, and no line breaks.
 - Never state something about {name} that the brief sentences do not state.{previous}{steer_text}
 
 Return a JSON object with two keys:

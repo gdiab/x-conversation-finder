@@ -17,7 +17,7 @@ from backend.activities.store_activities import card_post_text_removed
 from backend.budget import meter_inference
 from backend.gate.brief import brief_feature_terms, split_brief
 from backend.gate.written_check import judge, prepare_check
-from backend.models.written import DrafterHint, WrittenCheckResult
+from backend.models.written import WrittenCheckResult
 from backend.ports.claim_checker import ClaimCheckerPort
 
 
@@ -36,8 +36,6 @@ class CheckWrittenDraftInput:
     product_aliases: Optional[List[str]] = None
     # The reply plan's decision; None for a founder edit, which is not held to the plan
     mention_product: Optional[bool] = None
-    # The drafter's suggested brief sentences (a hint for the checker, never a verdict)
-    hints: Optional[List[DrafterHint]] = None
 
 
 class WrittenCheckActivities:
@@ -52,9 +50,10 @@ class WrittenCheckActivities:
         Check a written text's product claims against the brief.
 
         1. Code splits the text and the brief, runs the triggers and applies
-           the limits it can decide alone (sentences, characters, more than one
-           triggered sentence, a triggered question). A text that fails here
-           is not sent to the checker: no paid call is made for it.
+           everything it can decide alone (sentences, characters, more than
+           one triggered sentence, a triggered question, a number no brief
+           sentence states, a product claim the plan ruled out). A text that
+           fails here is not sent to the checker: no paid call is made for it.
         2. Otherwise the independent checker sees the sentences, the brief
            sentences and the product name, and returns a verdict per sentence.
         3. Code decides (backend.gate.written_check.judge): the cited brief
@@ -85,7 +84,7 @@ class WrittenCheckActivities:
             input.product_name,
             input.product_aliases,
             brief_feature_terms(input.product_brief),
-            input.hints,
+            input.mention_product,
         )
         if not prepared.needs_checker:
             result = judge(prepared, None, input.mention_product)

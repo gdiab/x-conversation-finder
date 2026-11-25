@@ -8,7 +8,7 @@ real checker's judgement of paraphrase can be measured only with a live model
 run (the ADR-0006 blind comparison).
 """
 
-from backend.activities.claim_gate_activity import normalize_text
+from backend.gate.sentence_split import normalize_text
 from backend.models.written import ClaimCheckRequest, ClaimCheckResponse, ClaimVerdict
 from backend.ports.claim_checker import ClaimCheckerPort
 

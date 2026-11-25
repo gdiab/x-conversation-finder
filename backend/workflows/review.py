@@ -394,13 +394,13 @@ class ReviewWorkflow:
         )
 
     async def _check_written_text(
-        self, text: str, key: str, mention_product: Optional[bool], hints: Optional[list]
+        self, text: str, key: str, mention_product: Optional[bool]
     ) -> WrittenCheckResult:
         """Run the product-claim check of a written text (issue #12).
 
         The activity gets the text, the brief and the product name. It is not
-        given the post or the plan, only the plan's product decision
-        (None for a founder edit).
+        given the post, the plan or the drafter's hints, only the plan's
+        product decision (None for a founder edit).
         """
         input = self.input
         return await workflow.execute_activity(
@@ -412,7 +412,6 @@ class ReviewWorkflow:
                 idempotency_key=key,
                 product_aliases=input.product_aliases,
                 mention_product=mention_product,
-                hints=hints,
             ),
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
@@ -426,8 +425,12 @@ class ReviewWorkflow:
         claim_gate mirrors the outcome, so everything that reads a draft's
         gate verdict (the card, the skip path) works for both modes.
         """
+        # The drafter's own hints stay on the draft as provenance; the check
+        # never saw them
+        hints = list(draft.written.drafter_hints) if draft.written else []
         draft.sentence_checks = list(result.sentences)
         draft.written = result.info
+        draft.written.drafter_hints = hints
         draft.plan_conformance_failures = list(result.plan_failures)
         draft.claim_gate = ClaimGateResult(
             passed=result.passed,
@@ -489,7 +492,6 @@ class ReviewWorkflow:
                     evidence.draft.text,
                     f"{input.post.id}:check:attempt{claim_gate_attempts}",
                     evidence.reply_plan.mention_product if evidence.reply_plan else None,
-                    evidence.draft.written.drafter_hints if evidence.draft.written else None,
                 )
                 self._record_written_check(evidence.draft, check)
                 last_failures = [("[reply plan]", r) for r in check.plan_failures] + [
@@ -1214,7 +1216,7 @@ class ReviewWorkflow:
                     # same check as the draft (amendment item 5). It is not
                     # held to the reply plan: the founder decides that.
                     check = await self._check_written_text(
-                        new_text, f"{workflow_id}:edit_check:{client_request_id}", None, None
+                        new_text, f"{workflow_id}:edit_check:{client_request_id}", None
                     )
                     gate_results = list(check.sentences)
                     has_failures = not check.passed or any(not r.passed for r in gate_results)
@@ -1429,7 +1431,6 @@ class ReviewWorkflow:
                     draft.text,
                     f"{redrafted.post_id}:nudge_check:{client_request_id}",
                     redrafted.reply_plan.mention_product if redrafted.reply_plan else None,
-                    draft.written.drafter_hints if draft.written else None,
                 )
                 self._record_written_check(draft, check)
                 failures = list(check.plan_failures) + [
