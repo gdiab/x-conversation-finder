@@ -89,6 +89,9 @@ GOLDEN_SPLITS = [
     # Single-letter initials, either case.
     ("Built by J. Smith last year.", ["Built by J. Smith last year."], [0]),
     ("Built by j. smith in 2021.", ["Built by j. smith in 2021."], []),
+    # Codex thermo r5: initials are any Unicode letter.
+    ("Our founder is \u00c9. Dubois, who built the product.", ["Our founder is \u00c9. Dubois, who built the product."], [0]),
+    ("We serve the \u00c9.U. market.", ["We serve the \u00c9.U. market."], []),
     ("Built by J. The artist Smith in 2021.", ["Built by J. The artist Smith in 2021."], [0]),
     ("We chose Plan B. Customers need help.", ["We chose Plan B. Customers need help."], [0]),
     ("Pick option B. or C.", ["Pick option B. or C."], []),
@@ -188,6 +191,8 @@ def test_workflow_code_never_splits_sentences():
         ("(U.S.)", "terminal"),
         ("J.", "initial"),
         ("j.", "initial"),
+        ("\u00c9.", "initial"),
+        ("\u00c9.U.", "terminal"),
         ("Dr.", "prefix"),
         ("Mt.", "prefix"),
         ("e.g.", "prefix"),
@@ -490,6 +495,7 @@ async def test_edit_regate_rejects_a_passage_sentence_ending_in_an_initialism():
         "We ship in the U.S. Customers pay monthly.",
         "Built by J. The artist Smith in 2021.",
         "We partnered with Acme Inc. 2024 revenue doubled.",
+        "Our founder is \u00c9. Dubois, who built the product.",
     ],
 )
 async def test_edit_regate_rejects_a_passage_sentence_with_an_unclear_boundary(passage):

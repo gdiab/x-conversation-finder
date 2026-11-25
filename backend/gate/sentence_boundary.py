@@ -111,8 +111,10 @@ def _named(abbrevs) -> "re.Pattern[str]":
 _COMPANY_RE = _named(COMPANY_SUFFIXES)
 _PREFIX_RE = _named(PREFIX_ABBREVIATIONS)
 _TERMINAL_RE = _named(TERMINAL_ABBREVIATIONS)
-_INITIALISM_RE = re.compile(r"(?:[A-Za-z]\.){2,}")
-_INITIAL_RE = re.compile(r"[A-Za-z]\.")
+# Any Unicode letter ([^\W\d_]): "É. Dubois" is an initial like "J. Smith".
+_LETTER = r"[^\W\d_]"
+_INITIALISM_RE = re.compile(rf"(?:{_LETTER}\.){{2,}}")
+_INITIAL_RE = re.compile(rf"{_LETTER}\.")
 _LIST_MARKER_RE = re.compile(r"\d{1,3}\.")
 _NUMBER_RE = re.compile(r".*\d\.")
 _LEADING_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
@@ -160,7 +162,7 @@ def starts_new_sentence(next_word: str) -> bool:
     A word that is itself an initial ("I.", "A.") does not count.
     """
     core = next_word.lstrip(_OPENERS)
-    if re.match(r"[A-Za-z]\.", core):
+    if _INITIAL_RE.match(core):
         return False
     m = _LEADING_WORD_RE.match(core)
     if not m or not m.group()[0].isupper():
