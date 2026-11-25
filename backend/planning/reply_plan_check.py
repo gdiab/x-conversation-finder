@@ -9,6 +9,7 @@ these rules cannot make an in-flight Review workflow replay differently.
 import re
 from typing import List, Optional, Tuple
 
+from backend.gate.sentence_boundary import period_ends_sentence
 from backend.models.evidence import Segment
 from backend.models.reply_plan import REPLY_TYPES, ReplyPlan
 
@@ -23,16 +24,38 @@ _URL_RE = re.compile(r"https?://\S+?(?=[.,;:!?？)\]\"'”’]*(?:\s|$))", re.IG
 # at a newline. "Node.js" and "3.5" do not end a sentence; '?" ' does. A "?"
 # or "!" run straight into a letter or digit ("working?Yes.", "agree?yes")
 # also ends one; periods are excluded from that rule so "Node.js" stays whole.
+# A single period after an abbreviation ("U.S.A.", "Dr.", "e.g.") is not a
+# boundary unless the claim gate's rule says it ends the sentence (issue #10).
 _BOUNDARY_RE = re.compile(
     r"[.!?？]+[\"'”’)\]]*(?=\s|$)|[!?？]+[\"'”’)\]]*(?=\w)|\n"
 )
 _QUESTION_MARKS = ("?", "？")
+_CLOSERS = "\"'”’)]"
+# The non-space run that ends at a given position (the word before a boundary).
+_WORD_TAIL_RE = re.compile(r"\S*$")
+
+
+def _is_abbreviation_period(text: str, m: "re.Match[str]") -> bool:
+    """True if boundary m is a single period that does not end the sentence.
+
+    Issue #10: the same rule as the claim gate's splitter
+    (backend.gate.sentence_boundary), so "Is the U.S.A. market ready?" and
+    "Dr. Smith, can you help?" are one question each.
+    """
+    if m.group().rstrip(_CLOSERS) != ".":
+        return False
+    word = _WORD_TAIL_RE.search(text, 0, m.start()).group() + m.group()
+    following = text[m.end():].split(None, 1)
+    next_word = following[0] if following else None
+    return not period_ends_sentence(word, next_word)
 
 
 def _sentence_spans(text: str) -> List[Tuple[int, int]]:
     spans = []
     start = 0
     for m in _BOUNDARY_RE.finditer(text):
+        if _is_abbreviation_period(text, m):
+            continue
         end = m.start() if m.group() == "\n" else m.end()
         if text[start:end].strip():
             spans.append((start, end))

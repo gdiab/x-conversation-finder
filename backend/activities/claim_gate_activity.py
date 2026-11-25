@@ -20,6 +20,8 @@ import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
 from backend.gate.non_claim_set import is_closed_set_non_claim, normalize_for_closed_set
+# ends_with_abbreviation is re-exported: callers import it from this module.
+from backend.gate.sentence_boundary import ends_with_abbreviation, period_ends_sentence
 
 
 @dataclass
@@ -33,94 +35,55 @@ class ClaimGateInput:
 
 def split_into_sentences(text: str) -> List[str]:
     """
-    Split text into sentences.
-    
-    QA R13: NEVER split after a known abbreviation. A sentence ending in 
-    a known abbreviation is NOT selectable as a claim.
-    
-    S4 (QA R14): Split after company suffixes (Inc, Ltd, Co, Corp) when next
-    token is a capitalized word. Titles precede names, but company suffixes end sentences.
-    
-    Simple deterministic rule:
-    - Never split after a period between digits (decimals like 99.9)
-    - Split after company suffixes (Inc, Ltd, Co, Corp) when next token is capitalized
-    - Never split after other abbreviations (Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e. etc. approx. St.)
-    - Split on [.!?]+ followed by whitespace otherwise
-    
+    Split text into sentences (ADR-0006 claim gate contract).
+
+    Deterministic rule: a word ending in '.', '!' or '?' ends a sentence when
+    another word follows, except where backend.gate.sentence_boundary says a
+    period does not end one:
+    - QA R14: company suffixes (Inc. Ltd. Co. Corp.) end a sentence only when
+      the next word is capitalized.
+    - QA R13: prefix abbreviations (Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e.
+      approx.) never end a sentence.
+    - Issue #10: etc., St., Ph.D., dotted initialisms (U.S.A.), single-letter
+      initials (J.) and numbers (2021., 1.) end a sentence only when the next
+      word clearly starts a new one. Decimals (S-5: 99.99%) never split.
+
+    A sentence that ends in an abbreviation is NOT selectable as a claim
+    (ends_with_abbreviation).
+
+    Sentence indices are positions in this split. Changing a split point
+    changes the indices claim segments reference; see ADR-0006 (2026-11-21
+    amendment, item 2).
+
     Returns non-empty sentences.
     """
-    # S4 (QA R14): Company suffixes - split after these when next token is capitalized
-    company_suffixes = ['Inc.', 'Ltd.', 'Co.', 'Corp.']
-    
-    # Other abbreviations - NEVER split after these
-    non_split_abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
-    
-    # Build case-insensitive patterns
-    company_pattern = '|'.join(r'\b' + re.escape(a) for a in company_suffixes)
-    abbrev_pattern = '|'.join(r'\b' + re.escape(a) for a in non_split_abbrevs)
-    
     result = []
     current = []
-    
-    # Tokenize into words and spaces
+
+    # Words and the whitespace between them alternate in tokens.
     tokens = re.findall(r'\S+|\s+', text)
-    
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
+
+    for i, token in enumerate(tokens):
         current.append(token)
-        
-        # Check if token ends with sentence-ending punctuation
-        if re.search(r'[.!?]+$', token):
-            # Check if it's a decimal (digit before period)
-            if re.match(r'.*\d+\.\d*$', token):
-                # It's a decimal, don't split
-                i += 1
-                continue
-            
-            # S4 (QA R14): Check if it's a company suffix
-            is_company_suffix = re.search(r'(' + company_pattern + r')$', token, re.IGNORECASE)
-            if is_company_suffix:
-                # Split if next token is capitalized
-                if i + 1 < len(tokens) and tokens[i + 1].strip() == '' and i + 2 < len(tokens):
-                    next_content = tokens[i + 2]
-                    # Check if next token starts with a capital letter (after stripping whitespace)
-                    if next_content and next_content[0].isupper():
-                        # Split here - company suffix ends sentence
-                        sentence = ''.join(current).strip()
-                        if sentence:
-                            result.append(sentence)
-                        current = []
-                        i += 1
-                        continue
-                # Otherwise, don't split (no content after, or not capitalized)
-                i += 1
-                continue
-            
-            # Check if it's a non-split abbreviation - NEVER split
-            if re.search(r'(' + abbrev_pattern + r')$', token, re.IGNORECASE):
-                # It's an abbreviation, continue without splitting
-                i += 1
-                continue
-            
-            # Check if next token is whitespace followed by content
-            if i + 1 < len(tokens) and tokens[i + 1].strip() == '':
-                # Next is whitespace, split here if there's content after
-                if i + 2 < len(tokens):
-                    # We have more content, commit this sentence
-                    sentence = ''.join(current).strip()
-                    if sentence:
-                        result.append(sentence)
-                    current = []
-        
-        i += 1
-    
+        if token.isspace() or not token.endswith(('.', '!', '?')):
+            continue
+        next_word = tokens[i + 2] if i + 2 < len(tokens) else None
+        if next_word is None:
+            # End of text: the remainder is added below.
+            continue
+        if token.endswith('.') and not period_ends_sentence(token, next_word):
+            continue
+        sentence = ''.join(current).strip()
+        if sentence:
+            result.append(sentence)
+        current = []
+
     # Add remaining
     if current:
         sentence = ''.join(current).strip()
         if sentence:
             result.append(sentence)
-    
+
     return result
 
 
@@ -229,32 +192,6 @@ def has_unresolved_referent(text: str) -> bool:
     if re.match(r'^both\s+(are|is|do|does|have|has|were|was|of)\b', normalized):
         return True
     
-    return False
-
-
-def ends_with_abbreviation(text: str) -> bool:
-    """
-    Check if a sentence ends with a known abbreviation.
-    
-    QA R13: A sentence ending in a known abbreviation is NOT selectable.
-    S4 (QA R14): Case-insensitive matching with word boundaries.
-    
-    Returns True if the sentence ends with an abbreviation.
-    """
-    # S4: Include company suffixes in the abbreviation list (they're not selectable if they end the sentence)
-    abbrevs = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'Inc.', 'Ltd.', 'Co.', 
-               'Corp.', 'vs.', 'e.g.', 'i.e.', 'etc.', 'approx.', 'St.']
-    
-    text_stripped = text.rstrip()
-    text_lower = text_stripped.lower()
-    for abbr in abbrevs:
-        # S4 (QA R14): Case-insensitive matching with word boundary check
-        # Need to check that the abbreviation is preceded by whitespace or is at the start
-        abbr_lower = abbr.lower()
-        if text_lower.endswith(abbr_lower):
-            # Check if it's a whole word (preceded by space or start of string)
-            if len(text_lower) == len(abbr_lower) or text_lower[-(len(abbr_lower)+1)].isspace():
-                return True
     return False
 
 
