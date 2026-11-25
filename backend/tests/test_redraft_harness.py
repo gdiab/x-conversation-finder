@@ -1507,3 +1507,32 @@ def test_the_script_exits_with_an_error_when_a_removal_is_unfinished(tmp_path, m
         redraft_harness.main()
     summary = (tmp_path / "out" / "t" / "summary.md").read_text()
     assert "| refetch_wal_checkpoint_pending | `1` |" in summary
+
+
+# ---------- issue #31 review round 3 ----------
+
+
+@pytest.mark.asyncio
+async def test_a_removal_recorded_between_samples_is_counted_once(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    agent = ScriptedAgent()
+
+    def removed(post_id):
+        # Recorded after sample 1's draft and check, before sample 2 starts
+        return len(agent.requests) >= 1 and not agent._in_sample_one
+
+    agent._in_sample_one = True
+
+    class CheckerThatEndsSampleOne(CountingChecker):
+        async def check(self, request, idempotency_key):
+            response = await super().check(request, idempotency_key)
+            agent._in_sample_one = False
+            return response
+
+    records, excluded, _ = await run_harness(
+        reviews[1:], SETTINGS, agent, CheckerThatEndsSampleOne(), plans={}, max_attempts=1, samples=2,
+        is_removed=removed,
+    )
+
+    assert [r.outcome for r in records] == ["removed"]
+    assert excluded["post_text_removed"] == 1

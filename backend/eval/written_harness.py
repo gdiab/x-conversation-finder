@@ -940,8 +940,13 @@ async def run_harness(
                 )
                 record(outcome_of(attempts))
             except PostRemovedDuringRun:
-                excluded[EXCLUDED_REMOVED] += 1
-                if cap is not None and len(cap.calls) > calls_before or attempts:
+                paid = cap is not None and len(cap.calls) > calls_before or bool(attempts)
+                # Counted once per post: here, unless an earlier sample's
+                # record exists and this one makes none (apply_removals then
+                # counts the post when it marks that record removed)
+                if paid or not any(r.post_id == review.post.id for r in records):
+                    excluded[EXCLUDED_REMOVED] += 1
+                if paid:
                     # Its calls were paid for; the run is not a result, and
                     # apply_removals below drops its text
                     record("removed")
