@@ -50,7 +50,14 @@ cd frontend
 
 # Install dependencies
 npm install
+
+# Run the frontend tests (Vitest + React Testing Library, needs Node 22.22.2+)
+npm test
 ```
+
+The frontend tests mock `src/api/client.ts` and build synthetic cards from its types
+(`src/test/fixtures.ts`); they never call the backend. CI runs them in the `build-frontend` job.
+Keep fixture data invented, because the repo is public.
 
 ## Running Locally
 

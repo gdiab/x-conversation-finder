@@ -1,0 +1,400 @@
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ReviewCard } from './ReviewCard';
+import { approveReview, editReview, skipReview } from '../api/client';
+import {
+  makeCard,
+  makeDraft,
+  makeEvidence,
+  makeReplyFit,
+  makeReplyPlan,
+} from '../test/fixtures';
+
+vi.mock('../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/client')>();
+  return {
+    ...actual,
+    approveReview: vi.fn(),
+    skipReview: vi.fn(),
+    editReview: vi.fn(),
+    nudgeReview: vi.fn(),
+    confirmPostedReview: vi.fn(),
+  };
+});
+
+const approveMock = vi.mocked(approveReview);
+const skipMock = vi.mocked(skipReview);
+const editMock = vi.mocked(editReview);
+
+// The workflow's validator text, as the API client wraps it in its error.
+const POST_ANYWAY_ERROR =
+  'Failed to approve review: Bad Request. Edited text has 1 failing sentence(s). Set post_anyway=true to approve anyway.';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe('ReviewCard: skipped card', () => {
+  const skippedCard = () =>
+    makeCard({
+      status: 'skipped',
+      skip_reason: 'Replies are limited on this post.',
+      evidence: makeEvidence({ draft: makeDraft({ text: 'Rejected synthetic draft.' }) }),
+    });
+
+  it('shows the skip reason and the rejected draft as not for posting', () => {
+    render(<ReviewCard card={skippedCard()} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText('Skipped:')).toBeInTheDocument();
+    expect(screen.getByText(/Replies are limited on this post\./)).toBeInTheDocument();
+    expect(screen.getByText(/Rejected draft \(not for posting\)/)).toBeInTheDocument();
+    expect(screen.getByText('Rejected synthetic draft.')).toBeInTheDocument();
+  });
+
+  it('has no Copy button and no action buttons', () => {
+    render(<ReviewCard card={skippedCard()} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByRole('button', { name: 'Copy Draft' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Draft Reply (Combined)' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Skip' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the evidence skip reason, then to "No reason recorded"', () => {
+    const fromEvidence = makeCard({
+      status: 'skipped',
+      skip_reason: null,
+      evidence: makeEvidence({ draft: null, skip_reason: 'Evidence-level synthetic reason.' }),
+    });
+    const { unmount } = render(<ReviewCard card={fromEvidence} onUpdate={vi.fn()} />);
+    expect(screen.getByText(/Evidence-level synthetic reason\./)).toBeInTheDocument();
+    unmount();
+
+    const none = makeCard({
+      status: 'skipped',
+      skip_reason: null,
+      evidence: makeEvidence({ draft: null, skip_reason: null }),
+    });
+    render(<ReviewCard card={none} onUpdate={vi.fn()} />);
+    expect(screen.getByText(/No reason recorded/)).toBeInTheDocument();
+  });
+
+  it('shows no rejected-draft line when the card has no draft', () => {
+    const card = makeCard({
+      status: 'skipped',
+      skip_reason: 'No supporting founder material',
+      evidence: makeEvidence({ draft: null }),
+    });
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    expect(screen.queryByText(/Rejected draft/)).not.toBeInTheDocument();
+  });
+});
+
+describe('ReviewCard: pending card', () => {
+  it('shows the draft with a Copy button and the action buttons', () => {
+    render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    expect(screen.getByRole('heading', { name: 'Draft Reply (Combined)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy Draft' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeInTheDocument();
+  });
+
+  it('copies the draft text to the clipboard', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    render(
+      <ReviewCard
+        card={makeCard({ evidence: makeEvidence({ draft: makeDraft({ text: 'Copy me, synthetic.' }) }) })}
+        onUpdate={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Copy Draft' }));
+    expect(writeText).toHaveBeenCalledWith('Copy me, synthetic.');
+  });
+
+  it('shows the claim gate result and each failed sentence with its reason', () => {
+    const draft = makeDraft({
+      claim_gate: {
+        ...makeDraft().claim_gate,
+        passed: false,
+        reasoning: 'One sentence failed.',
+        failed_sentences: [{ sentence: 'It fixes everything.', reason: 'Starts with an unresolved referent' }],
+      },
+    });
+    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText('FAILED')).toBeInTheDocument();
+    expect(screen.getByText('"It fixes everything."')).toBeInTheDocument();
+    expect(screen.getByText(/starts with an unresolved referent \(it\/this\/that/i)).toBeInTheDocument();
+  });
+
+  it('renders the reply-fit and reply-plan panels when the card has them', () => {
+    const evidence = makeEvidence({
+      reply_fit: makeReplyFit({ post_kind: 'question' }),
+      reply_plan: makeReplyPlan({ reply_type: 'answer_question', target_point: 'how do I onboard faster' }),
+    });
+    render(<ReviewCard card={makeCard({ evidence })} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText('Should we reply?')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Reply Plan' })).toBeInTheDocument();
+    expect(screen.getByText('Answer their question')).toBeInTheDocument();
+  });
+
+  it('renders a legacy card that has neither panel', () => {
+    const evidence = makeEvidence();
+    expect(evidence.reply_fit).toBeUndefined();
+    expect(evidence.reply_plan).toBeUndefined();
+    render(<ReviewCard card={makeCard({ evidence })} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByText('Should we reply?')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Reply Plan' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+  });
+});
+
+describe('ReviewCard: approve flow', () => {
+  it('asks for the posted URL and makes no API call when it is empty', async () => {
+    const user = userEvent.setup();
+    render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(screen.getByText('Please enter the posted URL')).toBeInTheDocument();
+    expect(approveMock).not.toHaveBeenCalled();
+  });
+
+  it('approves with the posted URL, without post_anyway, then refreshes the queue', async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    const card = makeCard();
+    approveMock.mockResolvedValue();
+    render(<ReviewCard card={card} onUpdate={onUpdate} />);
+
+    await user.type(screen.getAllByPlaceholderText('Paste URL of your posted reply')[0], 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(approveMock).toHaveBeenCalledTimes(1);
+    expect(approveMock).toHaveBeenCalledWith(
+      card.workflow_id,
+      'https://x.example/me/status/9',
+      expect.stringMatching(/^req_/),
+      false,
+    );
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
+  });
+
+  it('offers "Post Anyway" when the edit gate rejects the approve, and retries with post_anyway', async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    const card = makeCard({
+      edited_text_gate_state: 'failed',
+      edited_text_gate_results: [
+        {
+          sentence: 'Edited synthetic sentence.',
+          passed: false,
+          kind: 'claim',
+          reason: 'No passage supports this sentence',
+          kept_segment: false,
+          phrase_id: null,
+          source_passage_id: null,
+          sentence_index: null,
+        },
+      ],
+    });
+    approveMock.mockRejectedValueOnce(new Error(POST_ANYWAY_ERROR)).mockResolvedValueOnce();
+    render(<ReviewCard card={card} onUpdate={onUpdate} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    // First attempt failed: the server's message and the override prompt are shown.
+    expect(screen.getByText(POST_ANYWAY_ERROR)).toBeInTheDocument();
+    expect(screen.getByText(/Edited text requires acknowledgement/)).toBeInTheDocument();
+    expect(screen.getByText(/The edited text contains claims that failed the claim gate\./)).toBeInTheDocument();
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Post Anyway (Override)' }));
+
+    expect(approveMock).toHaveBeenCalledTimes(2);
+    const [first, second] = approveMock.mock.calls;
+    expect(first[3]).toBe(false);
+    expect(second[3]).toBe(true);
+    // The retry reuses the request id, so the server can deduplicate it.
+    expect(second[2]).toBe(first[2]);
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
+    expect(screen.queryByText(POST_ANYWAY_ERROR)).not.toBeInTheDocument();
+  });
+
+  it('explains a gate check that ran out of retries (not_checked)', async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ edited_text_gate_state: 'not_checked' });
+    approveMock.mockRejectedValueOnce(
+      new Error('Failed to approve review: Bad Request. Edited text gate check failed (retries exhausted). Set post_anyway=true to approve anyway.'),
+    );
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(screen.getByText(/The gate check failed \(retries exhausted\)\./)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Post Anyway (Override)' })).toBeInTheDocument();
+  });
+
+  it('closes the override prompt on Cancel without calling the API again', async () => {
+    const user = userEvent.setup();
+    approveMock.mockRejectedValueOnce(new Error(POST_ANYWAY_ERROR));
+    render(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    // Two "Cancel" buttons can exist; the override prompt's is the only one while not editing.
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
+    expect(approveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows other approve errors without the override prompt', async () => {
+    const user = userEvent.setup();
+    approveMock.mockRejectedValueOnce(new Error('Failed to approve review: Not Found. workflow gone'));
+    render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(screen.getByText('Failed to approve review: Not Found. workflow gone')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+  });
+
+  it('keeps showing the server error if the override attempt fails too', async () => {
+    const user = userEvent.setup();
+    approveMock
+      .mockRejectedValueOnce(new Error(POST_ANYWAY_ERROR))
+      .mockRejectedValueOnce(new Error('Failed to approve review: Conflict. already approved'));
+    const onUpdate = vi.fn();
+    render(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={onUpdate} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await user.click(screen.getByRole('button', { name: 'Post Anyway (Override)' }));
+
+    expect(screen.getByText('Failed to approve review: Conflict. already approved')).toBeInTheDocument();
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('ReviewCard: edit gate results', () => {
+  const failedEditCard = () =>
+    makeCard({
+      edited_text_gate_state: 'failed',
+      edited_text_gate_results: [
+        {
+          sentence: 'Kept synthetic sentence.',
+          passed: true,
+          kind: 'non_claim',
+          reason: '',
+          kept_segment: true,
+          phrase_id: 'ack_01',
+          source_passage_id: null,
+          sentence_index: null,
+        },
+        {
+          sentence: 'Unsupported synthetic sentence.',
+          passed: false,
+          kind: 'claim',
+          reason: 'No passage supports this sentence',
+          kept_segment: false,
+          phrase_id: null,
+          source_passage_id: null,
+          sentence_index: null,
+        },
+      ],
+    });
+
+  it('shows the gate state, per-sentence results and the post-anyway requirement', () => {
+    render(<ReviewCard card={failedEditCard()} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText('Gate State: FAILED')).toBeInTheDocument();
+    expect(screen.getByText(/Approval requires "Post anyway" acknowledgement/)).toBeInTheDocument();
+    expect(screen.getByText('PASS')).toBeInTheDocument();
+    expect(screen.getByText('FAIL')).toBeInTheDocument();
+    expect(screen.getByText('verbatim')).toBeInTheDocument();
+    expect(screen.getByText('"Unsupported synthetic sentence."')).toBeInTheDocument();
+    expect(screen.getByText('No passage supports this sentence')).toBeInTheDocument();
+  });
+
+  it('shows no post-anyway requirement when the edit passed', () => {
+    const card = failedEditCard();
+    card.edited_text_gate_state = 'passed';
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText('Gate State: PASSED')).toBeInTheDocument();
+    expect(screen.queryByText(/Approval requires "Post anyway"/)).not.toBeInTheDocument();
+  });
+
+  it('records a posted-anyway override on an approved card', () => {
+    const card = failedEditCard();
+    card.status = 'approved';
+    card.post_anyway = true;
+    card.post_anyway_failing_sentences = ['Unsupported synthetic sentence.'];
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText(/Posted Anyway Override/)).toBeInTheDocument();
+    expect(screen.getByText('Failing sentences at approval: 1')).toBeInTheDocument();
+  });
+});
+
+describe('ReviewCard: edit and skip actions', () => {
+  it('saves an edited draft through the API and leaves edit mode', async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    const card = makeCard();
+    editMock.mockResolvedValue('Edited synthetic text.');
+    render(<ReviewCard card={card} onUpdate={onUpdate} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    const box = screen.getByDisplayValue(card.evidence.draft!.text);
+    await user.clear(box);
+    await user.type(box, 'Edited synthetic text.');
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(editMock).toHaveBeenCalledWith(card.workflow_id, 'Edited synthetic text.', expect.stringMatching(/^req_/));
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Save Edit' })).not.toBeInTheDocument();
+  });
+
+  it('refuses to save an empty edit', async () => {
+    const user = userEvent.setup();
+    const card = makeCard();
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.clear(screen.getByDisplayValue(card.evidence.draft!.text));
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(screen.getByText('Draft cannot be empty')).toBeInTheDocument();
+    expect(editMock).not.toHaveBeenCalled();
+  });
+
+  it('skips with the typed reason, or "Not relevant" when none is given', async () => {
+    const user = userEvent.setup();
+    skipMock.mockResolvedValue();
+    const card = makeCard();
+    const { unmount } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(skipMock).toHaveBeenLastCalledWith(card.workflow_id, 'Not relevant', expect.stringMatching(/^req_/));
+    unmount();
+
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    await user.type(screen.getByPlaceholderText('Skip reason (optional)'), 'off topic');
+    await user.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(skipMock).toHaveBeenLastCalledWith(card.workflow_id, 'off topic', expect.stringMatching(/^req_/));
+  });
+});
