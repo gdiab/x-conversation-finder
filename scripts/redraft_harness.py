@@ -133,6 +133,8 @@ async def run(args) -> None:
         SpendCap,
         WatchSettings,
         load_stored_reviews,
+        prune_removed_plans,
+        redact_removed_report,
         removal_recorded,
         safe_label,
         report_json,
@@ -155,6 +157,10 @@ async def run(args) -> None:
         sys.exit("--settings is not an export-settings file (it needs \"watches\" and \"review_topics\")")
     by_key = {key: WatchSettings(**value) for key, value in raw["watches"].items()}
     db = Path(args.db)
+
+    def is_removed(post_id: str) -> bool:
+        return removal_recorded(db, post_id)
+
     reviews, excluded = load_stored_reviews(db, raw["review_topics"])
     if args.limit:
         reviews = reviews[: args.limit]
@@ -180,16 +186,25 @@ async def run(args) -> None:
             reviews, by_key, agent, checker,
             plans=plans, max_attempts=settings.claim_gate_max_attempts,
             samples=args.samples, cap=cap, excluded=excluded,
-            is_removed=lambda post_id: removal_recorded(db, post_id),
+            is_removed=is_removed,
         )
     finally:
+        # Also when the run failed: no cached plan of a removed post is kept
+        prune_removed_plans(plans, is_removed)
         plans_path.parent.mkdir(parents=True, exist_ok=True)
         plans_path.write_text(json.dumps(plans, indent=2, ensure_ascii=False))
     summary = summarize(records, excluded, cap, stopped_by_cap=stopped)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(report_json(args.label, records, summary, sorted({c.model for c in cap.calls})))
-    (out_dir / "summary.md").write_text(summary_markdown(args.label, summary))
-    print(summary_markdown(args.label, summary))
+    (out_dir / "summary.md").write_text(summary_markdown(summary))
+    print(summary_markdown(summary))
+    # Reports of earlier runs under the same root: apply removals recorded since
+    for earlier in sorted(out_root.glob("*/report.json")):
+        report = json.loads(earlier.read_text())
+        if redact_removed_report(report, is_removed):
+            ensure_ignored(earlier)
+            earlier.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+            print(f"applied recorded removals to {earlier}")
     print(f"wrote {out_dir}/report.json and summary.md")
 
 

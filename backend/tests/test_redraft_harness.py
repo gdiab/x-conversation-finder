@@ -302,7 +302,7 @@ async def test_the_summary_and_its_markdown_carry_no_text(tmp_path, no_x):
     )
 
     summary = summarize(records, excluded, None, stopped_by_cap=stopped)
-    shown = json.dumps(summary) + summary_markdown("before", summary)
+    shown = json.dumps(summary) + summary_markdown(summary)
 
     assert set(summary) >= {
         "runs", "posts", "excluded", "outcomes", "pass_rate", "first_draft_pass_rate", "drafts",
@@ -488,8 +488,7 @@ def test_failure_kinds_ignore_the_checkers_own_words():
 
 def test_the_summary_refuses_a_label_that_is_not_a_short_name():
     assert harness.safe_label("after-2") and not harness.safe_label("a post about x")
-    with pytest.raises(ValueError):
-        summary_markdown("review:t:2001 text", {})
+    assert summary_markdown({}).startswith("### Redraft harness run\n")
 
 
 # ---------- review round 2 ----------
@@ -573,7 +572,7 @@ def test_provider_model_names_stay_out_of_the_pasteable_summary():
 
     summary = summarize([], harness.Counter(), cap)
 
-    assert "review:account:123" not in json.dumps(summary) + summary_markdown("x1", summary)
+    assert "review:account:123" not in json.dumps(summary) + summary_markdown(summary)
     assert json.loads(report_json("x1", [], summary, ["review:account:123"]))["models"] == ["review:account:123"]
 
 
@@ -738,3 +737,52 @@ async def test_a_post_removed_before_its_first_check_still_reports_its_cost(tmp_
     (record,) = records
     assert record.outcome == "removed" and record.attempts == []
     assert record.model_calls == 1 and record.cost_usd > 0
+
+
+
+# ---------- review round 5: removals recorded between runs ----------
+
+
+def test_cached_plans_of_removed_posts_are_pruned_also_when_no_run_touched_them():
+    plans = {"review:t:2001": {"reply_type": "x"}, "review:t:2003": {"reply_type": "x"}, "odd-key": {}}
+
+    pruned = harness.prune_removed_plans(plans, lambda post_id: post_id == "2003")
+
+    assert pruned == 1 and set(plans) == {"review:t:2001", "odd-key"}
+
+
+@pytest.mark.asyncio
+async def test_a_removal_recorded_between_runs_prunes_the_plan_the_first_run_cached(tmp_path, no_x):
+    db = _make_db(tmp_path / "cards.db")
+    reviews, _ = load_stored_reviews(db, TOPICS)
+    plans = {}
+    await run_harness(reviews[:1], SETTINGS, ScriptedAgent(), CountingChecker(), plans=plans, max_attempts=2)
+    assert "review:t:2001" in plans
+
+    # The app records the removal; the next run leaves the card out at load time
+    await run_harness(
+        [r for r in reviews if r.post.id != "2001"], SETTINGS, ScriptedAgent(), CountingChecker(),
+        plans=plans, max_attempts=2, is_removed=lambda post_id: post_id == "2001",
+    )
+
+    assert "review:t:2001" not in plans
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_report_is_redacted_for_a_removal_recorded_since(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(texts=[UNSUPPORTED]), CountingChecker(), plans={}, max_attempts=2,
+    )
+    report = json.loads(report_json("before", records, summarize(records, excluded, None)))
+    for post in report["posts"]:
+        del post["post_id"]  # a report from before the field existed: the id comes from the workflow id
+
+    changed = harness.redact_removed_report(report, lambda post_id: post_id == "2001")
+    again = harness.redact_removed_report(report, lambda post_id: post_id == "2001")
+
+    assert changed and not again
+    first, second = report["posts"]
+    assert first["outcome"] == "removed" and all(a["text"] == "" for a in first["attempts"])
+    assert POST_TEXT not in json.dumps(first)
+    assert second["outcome"] != "removed" and second["attempts"][0]["text"]

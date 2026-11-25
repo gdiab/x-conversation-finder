@@ -97,6 +97,12 @@ EXCLUDED_NO_PRODUCT_NAME = "no_product_name"  # its watch has none: a live Revie
 EXCLUDED_UNREADABLE = "unreadable"
 
 
+def post_id_of(workflow_id: str) -> str:
+    """review:<account>:<post_id>"""
+    parts = workflow_id.split(":")
+    return parts[2] if len(parts) >= 3 and parts[0] == "review" else ""
+
+
 def _account_of(workflow_id: str) -> str:
     """review:<account>:<post_id>"""
     parts = workflow_id.split(":")
@@ -657,10 +663,13 @@ def apply_removals(
     can quote the post), and its cached plan (whose target point is a span
     of the post) is deleted. Call counts, costs and failure kinds stay.
     Asked once per post after the run, so a removal recorded while the
-    harness worked on other posts is honoured too.
+    harness worked on other posts is honoured too. The whole plan cache is
+    swept as well (prune_removed_plans), also plans of posts this run left
+    out because their removal was already recorded.
     """
     if is_removed is None:
         return
+    prune_removed_plans(plans, is_removed)
     removed = {r.post_id for r in records if r.post_id and is_removed(r.post_id)}
     for record in records:
         if record.post_id not in removed:
@@ -679,6 +688,36 @@ def apply_removals(
             for sentence in attempt.sentences:
                 sentence.sentence = ""
                 sentence.reason = ""
+
+
+def prune_removed_plans(plans: Dict[str, Any], is_removed: Callable[[str], bool]) -> int:
+    """Delete every cached plan whose post's removal is recorded (a plan's
+    target point is a span of the post). Returns how many were deleted."""
+    gone = [wid for wid in plans if post_id_of(wid) and is_removed(post_id_of(wid))]
+    for wid in gone:
+        del plans[wid]
+    return len(gone)
+
+
+def redact_removed_report(report: Dict[str, Any], is_removed: Callable[[str], bool]) -> bool:
+    """Apply recorded removals to a report.json written by an earlier run:
+    the same fields apply_removals empties. Returns whether it changed."""
+    changed = False
+    for post in report.get("posts") or []:
+        if not isinstance(post, dict):
+            continue
+        post_id = str(post.get("post_id") or post_id_of(str(post.get("workflow_id") or "")))
+        if not post_id or not is_removed(post_id):
+            continue
+        before = json.dumps(post, sort_keys=True)
+        post["outcome"] = "removed"
+        post["error"] = ""
+        for attempt in post.get("attempts") or []:
+            attempt.update({"text": "", "steer": None, "reasoning": ""})
+            for sentence in attempt.get("sentences") or []:
+                sentence.update({"sentence": "", "reason": ""})
+        changed = changed or json.dumps(post, sort_keys=True) != before
+    return changed
 
 
 # --- Report ---
@@ -765,11 +804,11 @@ def safe_label(label: str) -> bool:
     return _name_like(label, 40) and "/" not in label
 
 
-def summary_markdown(label: str, summary: Dict[str, Any]) -> str:
-    """The aggregate summary as a Markdown table, safe to paste (no text)."""
-    if not safe_label(label):
-        raise ValueError("run label must be a short name: letters, digits, '.', '_' or '-'")
-    lines = [f"### Redraft harness: {label}", "", "| Measure | Value |", "|---|---|"]
+def summary_markdown(summary: Dict[str, Any]) -> str:
+    """The aggregate summary as a Markdown table, safe to paste (no text).
+    The heading is fixed: the run label is the developer's own text and
+    stays in the file path only."""
+    lines = ["### Redraft harness run", "", "| Measure | Value |", "|---|---|"]
     for key, value in summary.items():
         shown = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
         lines.append(f"| {key} | `{shown}` |")
