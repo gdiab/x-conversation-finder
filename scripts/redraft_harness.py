@@ -3,8 +3,12 @@
 
 Runs the written path (draft, check, one redraft) against the real model on
 Reviews already stored in the local database, and writes a report. It never
-searches X, never writes the database and never changes a stored card. See
-backend/eval/written_harness.py and docs/DEVELOPMENT.md ("Redraft harness").
+searches X. Before it drafts a post it looks the post up on X once (issue
+#31) through the app's eval re-fetch; a post X reports gone has its removal
+recorded through the app's removal path, which is the only change it makes
+to the cards. --no-refetch turns the lookups off, for synthetic data only.
+See backend/eval/written_harness.py and docs/DEVELOPMENT.md ("Redraft
+harness").
 
 Run it from the checkout that holds your .env (the OpenAI key and model come
 from the app's settings loader, which reads ./.env), with this repo's code:
@@ -86,6 +90,69 @@ def safe_write(path: Path, text: str) -> None:
     ensure_ignored(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def _app_database(settings) -> Path:
+    """The SQLite file the running app uses. The app resolves a relative
+    DATABASE_URL against its own checkout, which is the one holding .env:
+    the current directory (the script's code can be another checkout)."""
+    url = settings.database_url or "sqlite:///data/x_conversation_finder.db"
+    if not url.startswith("sqlite:///"):
+        sys.exit("The re-fetch needs the app's SQLite database (DATABASE_URL); pass --no-refetch otherwise")
+    path = Path(url[len("sqlite:///"):])
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _use_app_database(app_db: Path) -> None:
+    """Point the app code the re-fetch reuses (budget ledger, removal) at the
+    app's database file, whatever checkout the code comes from."""
+    from backend.config import get_settings
+
+    os.environ["DATABASE_URL"] = f"sqlite:///{app_db.resolve()}"
+    get_settings.cache_clear()
+    resolved = get_settings().get_resolved_database_url()  # what backend.database opens
+    if not (resolved.startswith("sqlite:///") and os.path.samefile(resolved[len("sqlite:///"):], app_db)):
+        sys.exit("Could not point the app code at the app's database")
+
+
+async def _refetcher(args, settings, cap, db: Path):
+    """The re-fetch of each post before it is drafted (issue #31): the app's
+    X client, the app's database (it must be --db: a removal recorded in a
+    copy would leave the text in the app's) and Temporal (a card whose Review
+    still runs is left alone)."""
+    from datetime import datetime, timezone
+
+    from temporalio.client import Client
+
+    from backend.adapters import HttpXClient
+    from backend.eval.written_harness import Refetcher
+    from backend.target_refetch import temporal_review_is_running
+
+    if settings.x_client_adapter != "real" or not settings.x_bearer_token:
+        sys.exit(
+            "The re-fetch needs the real X client (X_CLIENT_ADAPTER=real and X_BEARER_TOKEN). "
+            "Pass --no-refetch only for a database of synthetic posts."
+        )
+    app_db = _app_database(settings)
+    if not (app_db.exists() and db.exists() and os.path.samefile(app_db, db)):
+        sys.exit(
+            f"--db is not the app's database ({app_db}): a removal the re-fetch records must reach the "
+            "app's copy of the text. Run from the checkout that holds your .env, on the app's database, "
+            "or pass --no-refetch for synthetic data."
+        )
+    _use_app_database(app_db)
+    try:
+        temporal = await Client.connect(settings.temporal_host, namespace=settings.temporal_namespace)
+    except Exception as e:
+        sys.exit(f"The re-fetch asks Temporal whether each card's Review still runs; connecting failed: "
+                 f"{type(e).__name__}")
+    run_key = f"harness:{args.label}:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    refetch = Refetcher(
+        HttpXClient(bearer_token=settings.x_bearer_token), run_key,
+        temporal_review_is_running(temporal), cap, settings.x_post_read_cost,
+    )
+    refetch.checkpoint_at_start()
+    return refetch
 
 
 def _settings():
@@ -175,6 +242,7 @@ async def run(args) -> None:
     from backend.adapters.plain_claim_checker import PlainClaimChecker
     from backend.adapters.plain_reply_agent import PlainReplyAgent
     from backend.eval.written_harness import (
+        X_LOOKUP_CALL,
         SpendCap,
         WatchSettings,
         apply_removals,
@@ -204,8 +272,12 @@ async def run(args) -> None:
     db = Path(args.db)
     PROTECTED.append(db.resolve())
 
+    refetch = None
+
     def is_removed(post_id: str) -> bool:
-        return removal_recorded(db, post_id)
+        # A post X reported gone in this run counts even when recording its
+        # removal failed: the harness drops its own copies of it
+        return removal_recorded(db, post_id) or (refetch is not None and refetch.reported_gone(post_id))
 
     reviews, excluded = load_stored_reviews(db, raw["review_topics"])
     if args.limit:
@@ -225,16 +297,20 @@ async def run(args) -> None:
     # budget ledger, so the adapters run without the activity meter.
     agent = PlainReplyAgent(openai_client=client, require_budget_meter=False)
     checker = PlainClaimChecker(openai_client=client, require_budget_meter=False)
+    refetch = None if args.no_refetch else await _refetcher(args, settings, cap, db)
 
-    print(f"{len(reviews)} stored reviews, model {settings.openai_model}, cap ${args.max_cost:.2f}")
+    print(f"{len(reviews)} stored reviews, model {settings.openai_model}, cap ${args.max_cost:.2f}, "
+          f"X re-fetch {'off' if refetch is None else 'on'}")
     try:
         records, excluded, stopped = await run_harness(
             reviews, by_key, agent, checker,
             plans=plans, max_attempts=settings.claim_gate_max_attempts,
             samples=args.samples, cap=cap, excluded=excluded,
-            is_removed=is_removed,
+            is_removed=is_removed, refetch=refetch,
         )
     finally:
+        if refetch is not None:
+            refetch.checkpoint_at_end()
         # Also when the run failed: no cached plan of a removed post is kept,
         # and earlier reports get the removals recorded since they were written
         prune_removed_plans(plans, is_removed)
@@ -247,8 +323,9 @@ async def run(args) -> None:
     # this run's records too, right before they are written
     apply_removals(records, plans, is_removed, excluded)
     safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))  # pruned again
-    summary = summarize(records, excluded, cap, stopped_by_cap=stopped)
-    safe_write(out_dir / "report.json", report_json(args.label, records, summary, sorted({c.model for c in cap.calls})))
+    summary = summarize(records, excluded, cap, stopped_by_cap=stopped, refetch=refetch or False)
+    models = sorted({c.model for c in cap.calls if c.call != X_LOOKUP_CALL})
+    safe_write(out_dir / "report.json", report_json(args.label, records, summary, models))
     safe_write(out_dir / "summary.md", summary_markdown(summary))
     print(summary_markdown(summary))
     # The new report has the removals already; sweep again in case one was
@@ -256,6 +333,15 @@ async def run(args) -> None:
     swept_again = sweep_earlier_reports(out_root, is_removed)
     if prune_removed_plans(plans, is_removed):
         safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))
+    if refetch is not None and refetch.incomplete_removals:
+        sys.exit(
+            f"Unfinished removals: {refetch.removal_failed} removal(s) X asked for could not be recorded (the post "
+            "text is still stored; the next run looks the post up again and records it), and "
+            f"{refetch.checkpoint_pending + int(refetch.startup_checkpoint_pending)} WAL checkpoint(s) did not "
+            "complete (a removal committed, but old pages can stay in the -wal file; the next run retries the "
+            "checkpoint at start). A checkpoint completes once no reader holds an old snapshot: restart the "
+            "API process if a rerun does not clear it."
+        )
     if not (swept_again and swept):
         sys.exit("Some reports could not be checked for recorded removals (see above)")
     print(f"wrote {out_dir}/report.json and summary.md")
@@ -270,7 +356,10 @@ def main() -> None:
     exp.add_argument("--out", required=True, help="JSON file, keyed by account:topic (merged if it exists)")
 
     r = sub.add_parser("run", help="draft, check and redraft stored reviews against the real model")
-    r.add_argument("--db", required=True, help="the SQLite database with the stored cards (opened read-only)")
+    r.add_argument(
+        "--db", required=True,
+        help="the app's SQLite database with the stored cards (read-only, but for removals the re-fetch records)",
+    )
     r.add_argument("--settings", required=True, help="the export-settings JSON file")
     r.add_argument("--out-root", required=True, help="output directory; plans.json is shared between labels")
     r.add_argument("--label", required=True, help="run name, e.g. before or after")
@@ -278,7 +367,12 @@ def main() -> None:
     r.add_argument("--limit", type=int, default=0, help="only the first N stored reviews")
     r.add_argument(
         "--max-cost", type=float, default=0.25,
-        help="spend cap in USD for this run (default 0.25), priced with INFERENCE_*_TOKEN_COST_USD",
+        help="spend cap in USD for this run (default 0.25): model calls priced with INFERENCE_*_TOKEN_COST_USD, "
+             "X lookups with X_POST_READ_COST",
+    )
+    r.add_argument(
+        "--no-refetch", action="store_true",
+        help="do not look each post up on X first; only for a database of synthetic posts (issue #31)",
     )
 
     args = parser.parse_args()

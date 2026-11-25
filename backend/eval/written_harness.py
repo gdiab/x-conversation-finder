@@ -7,14 +7,20 @@ writer-prompt changes, and the first piece of the ADR-0006 2026-11-24
 amendment's switch criterion 3 (assembled against written on stored
 evidence).
 
-What it does not do:
-- It never searches or reads X: the post and its research come from the
-  stored card. A card whose post text was removed (issue #9) is not used.
-- It never writes the database it reads. The cards are read through a
-  read-only SQLite connection; nothing is stored, updated or redacted.
-- It never opens the app's daily budget ledger. Every paid call goes through
-  a client wrapper with its own spend cap (SpendCap), which refuses a call
-  whose worst-case cost would pass the cap.
+What it does and does not do:
+- It never searches X: the post and its research come from the stored card.
+  A card whose post text was removed (issue #9) is not used.
+- Before it drafts a post it asks X once per run whether the post still
+  exists (issue #31, Refetcher), through the eval re-fetch the app already
+  has (backend/target_refetch.py): that lookup reserves the X read in the
+  app's budget ledger and, when the post is gone, records the removal
+  through delete_post_text, so the stored text is redacted as the app does
+  it. Those are the only database writes. A caller can turn the re-fetch
+  off (synthetic data); the summary says which.
+- Its own reads are through a read-only SQLite connection.
+- Every paid call (model calls and X lookups) goes through its own spend
+  cap (SpendCap), which refuses a call whose worst-case cost would pass the
+  cap. The model calls never open the app's daily budget ledger.
 
 The report holds model-written text that can quote real posts, so it must be
 written outside version control (scripts/redraft_harness.py refuses a path
@@ -29,7 +35,7 @@ import sqlite3
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from temporalio.converter import value_to_type
 
@@ -95,6 +101,12 @@ EXCLUDED_NO_TOPIC = "no_review_topic"  # its Review's watch topic is unknown (no
 EXCLUDED_NO_SETTINGS = "no_watch_settings"  # no watch settings for its account and topic
 EXCLUDED_NO_PRODUCT_NAME = "no_product_name"  # its watch has none: a live Review stays assembled
 EXCLUDED_UNREADABLE = "unreadable"
+# Left out by the re-fetch before drafting (issue #31)
+EXCLUDED_REMOVED_AT_REFETCH = "removed_at_refetch"  # X says the post is gone; the removal is recorded
+EXCLUDED_LOOKUP_FAILED = "lookup_failed"  # the lookup failed (network, rate limit, budget): nothing recorded
+EXCLUDED_REVIEW_RUNNING = "review_running"  # its Review still runs: it re-fetches at approve
+EXCLUDED_CARD_MISSING = "card_missing"  # the card was gone when the re-fetch read it
+EXCLUDED_REMOVAL_FAILED = "removal_failed"  # X says gone, but recording the removal kept failing
 
 
 def post_id_of(workflow_id: str) -> str:
@@ -113,23 +125,35 @@ def _connect_read_only(db_path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
 
 
+def _removed_post_ids(conn: sqlite3.Connection) -> set:
+    """Every post whose removal is recorded: on a stored card (issue #9) or
+    on the stored post (issue #23's stored_posts table), as the app's
+    review_docs._post_removed reads it. A database from before issue #23 has
+    no stored_posts table."""
+    removed = set()
+    sources = ["SELECT post_data FROM review_cards"]
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='stored_posts'").fetchone():
+        sources.append("SELECT post_data FROM stored_posts")
+    for query in sources:
+        for (post_data,) in conn.execute(query).fetchall():
+            try:
+                post = json.loads(post_data) if isinstance(post_data, str) else post_data
+            except (TypeError, ValueError):
+                continue
+            if isinstance(post, dict) and post.get("text_removed") and post.get("id") is not None:
+                removed.add(str(post["id"]))
+    return removed
+
+
 def removal_recorded(db_path: Path, post_id: str) -> bool:
-    """Does any stored card of the post record its removal (issue #9)? Read
-    before each post's model calls, so a removal the app records during a
-    run stops the harness from sending that post's text."""
+    """Is the post's removal recorded, on any stored card of it or on its
+    stored post? Read before each post's model calls, so a removal the app
+    records during a run stops the harness from sending that post's text."""
     conn = _connect_read_only(db_path)
     try:
-        rows = conn.execute("SELECT post_data FROM review_cards").fetchall()
+        return str(post_id) in _removed_post_ids(conn)
     finally:
         conn.close()
-    for (post_data,) in rows:
-        try:
-            post = json.loads(post_data) if isinstance(post_data, str) else post_data
-        except (TypeError, ValueError):
-            continue
-        if isinstance(post, dict) and str(post.get("id")) == str(post_id) and post.get("text_removed"):
-            return True
-    return False
 
 
 def load_stored_reviews(
@@ -153,9 +177,13 @@ def load_stored_reviews(
     excluded: Counter = Counter()
     conn = _connect_read_only(db_path)
     try:
+        # The card row holds the post as the card shows it, for cards stored
+        # before issue #23 and after (store_card composes the full card from
+        # stored_posts); the removal can be recorded on either table
         rows = conn.execute(
             "SELECT workflow_id, post_data, evidence_data FROM review_cards ORDER BY created_at, workflow_id"
         ).fetchall()
+        removed_ids = _removed_post_ids(conn)
     finally:
         conn.close()
     for workflow_id, post_data, evidence_data in rows:
@@ -168,7 +196,7 @@ def load_stored_reviews(
         if not isinstance(post_dict, dict) or not isinstance(evidence_dict, dict):
             excluded[EXCLUDED_UNREADABLE] += 1
             continue
-        if post_dict.get("text_removed"):
+        if post_dict.get("text_removed") or str(post_dict.get("id")) in removed_ids:
             excluded[EXCLUDED_REMOVED] += 1
             continue
         if not evidence_dict.get("draft") and not evidence_dict.get("reply_plan"):
@@ -209,6 +237,10 @@ def _stop_if_removed(is_removed: Optional[Callable[[str], bool]], post_id: str) 
     """Asked right before each model call, as the live activities do."""
     if is_removed is not None and is_removed(post_id):
         raise PostRemovedDuringRun(post_id)
+
+
+# The call label of an X lookup on the spend cap (the others are model calls)
+X_LOOKUP_CALL = "x_lookup"
 
 
 @dataclass
@@ -253,6 +285,41 @@ class SpendCap:
     def cost(self, input_tokens: int, output_tokens: int) -> float:
         return input_tokens * self.input_cost_usd + output_tokens * self.output_cost_usd
 
+    def require_room(self, worst_usd: float, label: str) -> None:
+        """Raise SpendCapReached when a call costing up to worst_usd could
+        pass the cap."""
+        if self.spent_usd + worst_usd > self.cap_usd:
+            raise SpendCapReached(
+                f"{label} call refused: ${self.spent_usd:.4f} spent, up to ${worst_usd:.4f} more "
+                f"would pass the ${self.cap_usd:.2f} cap"
+            )
+
+    def wrap_x(self, client: Any, cost_per_read: float) -> Any:
+        """An X client whose lookup_post is recorded on this cap (call
+        X_LOOKUP_CALL), priced as the app's budget prices it: a returned post
+        is one billed read; a lookup that found the post gone returned no
+        post object and is not billed (issue #17); a failed request is
+        counted unless X billed nothing for it (x_billed_nothing, issue #8).
+        The caller checks for room (require_room) before the lookup starts:
+        the lookup reserves the read in the app's ledger first, and a refusal
+        raised from here would leave that reservation counted."""
+        from backend.activities.x_activities import x_billed_nothing
+
+        cap = self
+
+        class _MeteredX:
+            async def lookup_post(self, post_id: str):
+                try:
+                    post = await client.lookup_post(post_id)
+                except Exception as e:
+                    cost = 0.0 if x_billed_nothing(e) else cost_per_read
+                    cap.calls.append(CallRecord(X_LOOKUP_CALL, "", 0, 0, cost))
+                    raise
+                cap.calls.append(CallRecord(X_LOOKUP_CALL, "", 0, 0, cost_per_read if post is not None else 0.0))
+                return post
+
+        return _MeteredX()
+
     def wrap(self, client: Any) -> Any:
         """A client whose chat.completions.create goes through this cap."""
         cap = self
@@ -262,11 +329,7 @@ class SpendCap:
                 bound_in = prompt_token_bound(kwargs.get("messages") or [])
                 bound_out = int(kwargs.get("max_completion_tokens") or 0)
                 worst = cap.cost(bound_in, bound_out)
-                if cap.spent_usd + worst > cap.cap_usd:
-                    raise SpendCapReached(
-                        f"{cap.label} call refused: ${cap.spent_usd:.4f} spent, up to ${worst:.4f} more "
-                        f"would pass the ${cap.cap_usd:.2f} cap"
-                    )
+                cap.require_room(worst, cap.label)
                 model = str(kwargs.get("model") or "")
                 try:
                     response = await client.chat.completions.create(**kwargs)
@@ -577,6 +640,235 @@ def outcome_of(attempts: Sequence[AttemptRecord]) -> str:
     return "skipped"
 
 
+# --- Re-fetch before drafting (issue #31) ---
+
+# What Refetcher returns for a review; anything but "found" leaves it out
+REFETCH_EXCLUDED = {
+    "removed": EXCLUDED_REMOVED_AT_REFETCH,
+    "failed": EXCLUDED_LOOKUP_FAILED,
+    "live": EXCLUDED_REVIEW_RUNNING,
+    "no_card": EXCLUDED_CARD_MISSING,
+    "removal_failed": EXCLUDED_REMOVAL_FAILED,
+}
+
+
+def _error_type(e: BaseException) -> str:
+    """An ApplicationError's type (RateLimitError, BudgetExceeded, ...), or
+    the exception class name; only names that look like code are kept."""
+    name = getattr(e, "type", None) or type(e).__name__
+    return name if isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,63}", name) else "other"
+
+
+def _checkpoint_completed() -> bool:
+    """The app's WAL checkpoint; an error (a locked database) counts as not
+    completed."""
+    from backend.database import checkpoint_wal
+
+    try:
+        return bool(checkpoint_wal())
+    except Exception:
+        return False
+
+
+class Refetcher:
+    """Asks X whether a stored review's post still exists, once per post per
+    run, through the app's eval re-fetch (refetch_stored_card_target):
+
+    - "found": the post exists; the review may be drafted.
+    - "removed": X says it is gone (the outcomes the approve re-fetch treats
+      as removal). refetch_stored_card_target has recorded the removal
+      through delete_post_text, so the stored text and every copy of it are
+      redacted as the app does it. Also returned when the removal was
+      already recorded.
+    - "failed": the lookup failed (network, rate limit, the app's X budget
+      or kill switch, Temporal unreachable): nothing is recorded, and the
+      review is left out. `failures` counts the error type names.
+    - "live": the card's Review workflow still runs; nothing is looked up.
+      It re-fetches at approve. Asked per card (also when the post's lookup
+      is cached: another card of the post can have a running Review).
+    - "no_card": the card is gone.
+
+    Only a lookup that is about to be made is checked against the spend
+    cap, right before the app's re-fetch reserves the read (after its
+    removed and liveness checks): it raises SpendCapReached and nothing is
+    reserved or looked up. Each lookup is recorded on the cap as
+    X_LOOKUP_CALL. The app's eval re-fetch reserves the read in the app's
+    budget ledger too (ADR-0005 daily cap and kill switch).
+
+    When X said the post is gone but the re-fetch then raised (recording
+    the removal failed, e.g. the database was locked; or its WAL checkpoint
+    is pending because a reader holds an old snapshot, issue #23), the
+    removal is retried through the app's removal path (delete_post_text,
+    idempotent) without another X lookup, up to `removal_attempts` times:
+    - it completes: "removed";
+    - only the WAL checkpoint stays pending (the removal has committed):
+      "removed", counted in `checkpoint_pending`;
+    - recording the removal kept failing: "removal_failed", counted in
+      `removal_failed`. The post is skipped; its text is still stored.
+    A caller must report both counters as an unfinished removal
+    (`incomplete_removals`).
+    """
+
+    def __init__(
+        self,
+        x_client: Any,
+        run_key: str,
+        review_is_running: Callable[[str], Awaitable[bool]],
+        cap: Optional[SpendCap],
+        cost_per_read: float,
+        *,
+        removal_attempts: int = 5,
+        removal_wait_seconds: float = 1.0,
+    ):
+        metered = cap.wrap_x(x_client, cost_per_read) if cap is not None else x_client
+        self._x_said_gone: set = set()  # posts X answered gone in this run
+        refetcher = self
+
+        class _NotesGone:
+            async def lookup_post(self, post_id: str):
+                post = await metered.lookup_post(post_id)
+                if post is None:
+                    refetcher._x_said_gone.add(str(post_id))
+                return post
+
+        self._x_client = _NotesGone()
+        self._run_key = run_key
+        self._review_is_running = review_is_running
+        self._cap = cap
+        self._cost_per_read = cost_per_read
+        self._removal_attempts = max(1, removal_attempts)
+        self._removal_wait_seconds = removal_wait_seconds
+        self._by_post: Dict[str, str] = {}
+        self.outcomes: Counter = Counter()  # per post, and per card for live / no_card
+        self.failures: Counter = Counter()  # error type names of failed lookups and removals
+        self.checkpoint_pending = 0
+        self.removal_failed = 0
+
+        # The database's WAL checkpoint failed when the run started (an
+        # earlier removal's checkpoint may still be pending)
+        self.startup_checkpoint_pending = False
+
+    def reported_gone(self, post_id: str) -> bool:
+        """Did X report the post gone in this run? True also when recording
+        its removal failed: the harness must drop its own copies of the
+        post (cached plans, reports) all the same."""
+        return str(post_id) in self._x_said_gone
+
+    @property
+    def incomplete_removals(self) -> int:
+        """Removals that did not fully complete: X asked for them in this
+        run, or (a failed checkpoint at start) an earlier run's may wait."""
+        return self.checkpoint_pending + self.removal_failed + int(self.startup_checkpoint_pending)
+
+    def checkpoint_at_start(self) -> None:
+        """Retry a checkpoint an earlier run (or the app) left pending: a
+        later run leaves an already-removed card out, so it never retries
+        that card's checkpoint otherwise."""
+        self.startup_checkpoint_pending = not _checkpoint_completed()
+
+    def checkpoint_at_end(self) -> None:
+        """One more checkpoint when one is pending; a completed TRUNCATE
+        checkpoint copies the whole WAL, so it settles every pending one."""
+        if (self.checkpoint_pending or self.startup_checkpoint_pending) and _checkpoint_completed():
+            self.checkpoint_pending = 0
+            self.startup_checkpoint_pending = False
+
+    async def __call__(self, review: StoredReview) -> str:
+        post_id = str(review.post.id)
+        cached = self._by_post.get(post_id)
+        if cached is not None:
+            if cached != "found":
+                return cached
+            try:
+                running = await self._review_is_running(review.workflow_id)
+            except Exception as e:
+                self.failures[_error_type(e)] += 1
+                self.outcomes["failed"] += 1
+                return "failed"
+            if running:
+                self.outcomes["live"] += 1
+                return "live"
+            return "found"
+        from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
+        from backend.target_refetch import refetch_stored_card_target
+
+        try:
+            outcome = await refetch_stored_card_target(
+                self._x_client, review.workflow_id, self._run_key, review_is_running=self._running_or_cap_room,
+            )
+        except SpendCapReached:
+            raise
+        except Exception as e:
+            if post_id in self._x_said_gone or getattr(e, "type", None) == WAL_CHECKPOINT_PENDING_ERROR:
+                # X said gone (or the removal already committed): finish the removal
+                outcome = await self._finish_removal(
+                    review, getattr(e, "type", None) == WAL_CHECKPOINT_PENDING_ERROR,
+                )
+            else:
+                # A type name only: an error message can quote the response
+                self.failures[_error_type(e)] += 1
+                outcome = "failed"
+        self.outcomes[outcome] += 1
+        if outcome in ("found", "removed", "failed", "removal_failed"):
+            self._by_post[post_id] = outcome
+        return outcome
+
+    async def _finish_removal(self, review: StoredReview, first_error_committed: bool = False) -> str:
+        """Record the removal through the app's removal path, as the re-fetch
+        does (same idempotency key), retrying; no further X lookup."""
+        import asyncio
+
+        from temporalio.exceptions import ApplicationError
+
+        from backend.activities.store_activities import (
+            WAL_CHECKPOINT_PENDING_ERROR,
+            DeletePostTextInput,
+            _delete_post_text_sync,
+        )
+
+        last: Optional[BaseException] = None
+        committed = first_error_committed
+        for attempt in range(self._removal_attempts):
+            if attempt:
+                await asyncio.sleep(self._removal_wait_seconds)
+            try:
+                _delete_post_text_sync(DeletePostTextInput(
+                    workflow_id=review.workflow_id,
+                    idempotency_key=f"{review.workflow_id}:delete_text:eval:{self._run_key}",
+                    post_id=review.post.id,
+                ))
+                return "removed"
+            except Exception as e:
+                last = e
+                if isinstance(e, ApplicationError) and e.type == WAL_CHECKPOINT_PENDING_ERROR:
+                    committed = True  # a later failure does not undo it
+        if committed:
+            # The removal committed; the old pages may stay in the -wal file
+            self.checkpoint_pending += 1
+            return "removed"
+        self.removal_failed += 1
+        self.failures[_error_type(last)] += 1
+        return "removal_failed"
+
+    async def _running_or_cap_room(self, workflow_id: str) -> bool:
+        """The re-fetch's liveness check, the last step before it reserves
+        and makes a lookup: a card whose Review does not run is about to be
+        looked up, so the spend cap is checked here."""
+        running = await self._review_is_running(workflow_id)
+        if not running and self._cap is not None:
+            self._cap.label = X_LOOKUP_CALL
+            self._cap.require_room(self._cost_per_read, X_LOOKUP_CALL)
+        return running
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "refetch_outcomes": dict(sorted(self.outcomes.items())),
+            "refetch_failure_types": dict(sorted(self.failures.items())),
+            "refetch_wal_checkpoint_pending": self.checkpoint_pending + int(self.startup_checkpoint_pending),
+            "refetch_removal_failed": self.removal_failed,
+        }
+
+
 async def run_harness(
     reviews: Sequence[StoredReview],
     settings_by_key: Dict[str, WatchSettings],
@@ -589,10 +881,15 @@ async def run_harness(
     cap: Optional[SpendCap] = None,
     excluded: Optional[Counter] = None,
     is_removed: Optional[Callable[[str], bool]] = None,
+    refetch: Optional[Callable[[StoredReview], Awaitable[str]]] = None,
 ) -> Tuple[List[PostRecord], Counter, bool]:
     """Run every review `samples` times. Returns the per-post records, the
     count of reviews left out by reason, and whether the spend cap stopped
     the run early (the records then cover what finished).
+
+    `refetch` (a Refetcher, issue #31) is asked once per review before its
+    first model call; a review whose answer is not "found" is left out
+    (REFETCH_EXCLUDED names the reason). None: no X lookup (synthetic data).
 
     `settings_by_key` maps settings_key(account, topic) to the watch's
     settings. `is_removed(post_id)` is asked right before each model call
@@ -613,6 +910,15 @@ async def run_harness(
         attempt_limit = (
             max_attempts if settings.claim_gate_max_attempts is None else settings.claim_gate_max_attempts
         )
+        if refetch is not None:
+            try:
+                found = await refetch(review)
+            except SpendCapReached:
+                apply_removals(records, plans, is_removed, excluded)
+                return records, excluded, True
+            if found != "found":
+                excluded[REFETCH_EXCLUDED.get(found, EXCLUDED_LOOKUP_FAILED)] += 1
+                continue
         for sample in range(1, samples + 1):
             attempts: List[AttemptRecord] = []
             source, mention = "", None
@@ -640,8 +946,13 @@ async def run_harness(
                 )
                 record(outcome_of(attempts))
             except PostRemovedDuringRun:
-                excluded[EXCLUDED_REMOVED] += 1
-                if cap is not None and len(cap.calls) > calls_before or attempts:
+                paid = cap is not None and len(cap.calls) > calls_before or bool(attempts)
+                # Counted once per post: here, unless an earlier sample's
+                # record exists and this one makes none (apply_removals then
+                # counts the post when it marks that record removed)
+                if paid or not any(r.post_id == review.post.id for r in records):
+                    excluded[EXCLUDED_REMOVED] += 1
+                if paid:
                     # Its calls were paid for; the run is not a result, and
                     # apply_removals below drops its text
                     record("removed")
@@ -762,9 +1073,15 @@ def summarize(
     cap: Optional[SpendCap],
     *,
     stopped_by_cap: bool = False,
+    refetch: "Optional[Refetcher | bool]" = None,
 ) -> Dict[str, Any]:
     """Aggregate numbers only: no post, draft or brief text, no ids. This is
-    what may be pasted into a pull request of the public repo."""
+    what may be pasted into a pull request of the public repo.
+
+    `refetch` (issue #31): the run's Refetcher ("refetch": "on" and its
+    outcomes), False for a run without X lookups ("refetch": "off"), None
+    to leave the key out (a recount of an earlier report keeps its own).
+    The X lookups' count and cost are under "calls" (X_LOOKUP_CALL)."""
     outcomes = Counter(r.outcome for r in records)
     # A removed post's runs are not results: they count only in "outcomes"
     drafted = [r for r in records if r.attempts and r.outcome != "removed"]
@@ -804,6 +1121,11 @@ def summarize(
         "mention_product": dict(sorted(Counter(str(r.mention_product) for r in drafted).items())),
         "stopped_by_spend_cap": stopped_by_cap,
     }
+    if refetch is False:
+        summary["refetch"] = "off"
+    elif isinstance(refetch, Refetcher):
+        summary["refetch"] = "on"
+        summary.update(refetch.summary())
     if cap is not None:
         by_call: Dict[str, Dict[str, float]] = {}
         for c in cap.calls:
