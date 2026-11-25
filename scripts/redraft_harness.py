@@ -68,9 +68,11 @@ def _settings():
 
 async def export_settings(args) -> None:
     """Write the product brief, name, aliases and key features of each
-    TopicWatch's current run, keyed by topic. Reads Temporal only."""
+    TopicWatch's current run, keyed by account and topic. Reads Temporal
+    only."""
     from temporalio.client import Client
 
+    from backend.eval.written_harness import settings_key
     from backend.workflows.topic_watch import TopicWatchInput
 
     out = Path(args.out)
@@ -85,7 +87,7 @@ async def export_settings(args) -> None:
         history = await handle.fetch_history()
         started = history.events[0].workflow_execution_started_event_attributes
         (watch,) = await client.data_converter.decode(started.input.payloads, [TopicWatchInput])
-        result[watch.topic] = {
+        result[settings_key(watch.account, watch.topic)] = {
             "product_brief": watch.product_brief,
             "product_name": watch.product_name,
             "product_aliases": list(watch.product_aliases or []),
@@ -106,22 +108,27 @@ async def run(args) -> None:
         SpendCap,
         WatchSettings,
         load_stored_reviews,
+        removal_recorded,
+        safe_label,
         report_json,
         run_harness,
         summarize,
         summary_markdown,
     )
 
+    if not safe_label(args.label):
+        sys.exit("--label must be a short name: letters, digits, '.', '_' or '-' (it goes into summary.md)")
     out_root = Path(args.out_root)
     out_dir = out_root / args.label
     plans_path = out_root / "plans.json"
-    for path in (out_dir / "report.json", plans_path):
+    for path in (out_dir / "report.json", out_dir / "summary.md", plans_path):
         ensure_ignored(path)
 
     settings = _settings()
     raw = json.loads(Path(args.settings).read_text())
-    by_topic = {topic: WatchSettings(**value) for topic, value in raw.items()}
-    reviews, excluded = load_stored_reviews(Path(args.db))
+    by_key = {key: WatchSettings(**value) for key, value in raw.items()}
+    db = Path(args.db)
+    reviews, excluded = load_stored_reviews(db)
     if args.limit:
         reviews = reviews[: args.limit]
     plans = json.loads(plans_path.read_text()) if plans_path.exists() else {}
@@ -138,9 +145,10 @@ async def run(args) -> None:
     print(f"{len(reviews)} stored reviews, model {settings.openai_model}, cap ${args.max_cost:.2f}")
     try:
         records, excluded, stopped = await run_harness(
-            reviews, by_topic, agent, checker,
+            reviews, by_key, agent, checker,
             plans=plans, max_attempts=settings.claim_gate_max_attempts,
             samples=args.samples, cap=cap, excluded=excluded,
+            is_removed=lambda post_id: removal_recorded(db, post_id),
         )
     finally:
         plans_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,7 +167,7 @@ def main() -> None:
 
     exp = sub.add_parser("export-settings", help="export watch settings from Temporal (read-only)")
     exp.add_argument("--workflow-id", action="append", required=True, help="a TopicWatch id; repeatable")
-    exp.add_argument("--out", required=True, help="JSON file, keyed by topic (merged if it exists)")
+    exp.add_argument("--out", required=True, help="JSON file, keyed by account:topic (merged if it exists)")
 
     r = sub.add_parser("run", help="draft, check and redraft stored reviews against the real model")
     r.add_argument("--db", required=True, help="the SQLite database with the stored cards (opened read-only)")
@@ -168,7 +176,10 @@ def main() -> None:
     r.add_argument("--label", required=True, help="run name, e.g. before or after")
     r.add_argument("--samples", type=int, default=1, help="written-path runs per post (default 1)")
     r.add_argument("--limit", type=int, default=0, help="only the first N stored reviews")
-    r.add_argument("--max-cost", type=float, default=0.25, help="spend cap in USD for this run (default 0.25)")
+    r.add_argument(
+        "--max-cost", type=float, default=0.25,
+        help="spend cap in USD for this run (default 0.25), priced with INFERENCE_*_TOKEN_COST_USD",
+    )
 
     args = parser.parse_args()
     asyncio.run(export_settings(args) if args.command == "export-settings" else run(args))

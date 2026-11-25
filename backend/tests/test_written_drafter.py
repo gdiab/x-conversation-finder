@@ -210,7 +210,10 @@ def _failed_written_evidence():
         segments=[], mode="written",
         claim_gate=ClaimGateResult(
             passed=False, segments=[],
-            failed_sentences=[["Relay retries forever and it makes queues painless.", "synthetic reason"]],
+            failed_sentences=[[
+                "Relay retries forever and it makes queues painless.",
+                "The brief does not state that retries are unlimited.",
+            ]],
             reasoning="1 failure(s)",
         ),
         sentence_checks=[
@@ -260,12 +263,48 @@ def test_a_nudge_of_a_passing_draft_lists_no_failures(sample_post):
 def test_a_failed_check_without_sentence_reasons_shows_its_reasoning(sample_post):
     evidence = _failed_written_evidence()
     evidence.draft.sentence_checks = []
+    evidence.draft.claim_gate.failed_sentences = []
     evidence.draft.plan_conformance_failures = []
     evidence.draft.claim_gate.reasoning = "The reply has 4 sentences; the limit is 3."
 
     prompt = build_written_draft_prompt(_request(sample_post, steer="x", evidence=evidence))
 
     assert "failed the product-claim check:\n- The reply has 4 sentences; the limit is 3." in prompt
+
+
+def test_a_failure_found_before_the_checker_names_only_what_failed(sample_post):
+    """Before the checker call every sentence row is marked failed; the
+    redraft prompt lists only the failures the check found."""
+    from backend.gate.written_check import judge, prepare_check
+    from backend.models import ClaimGateResult, Draft
+    from backend.workflows.review import record_written_check
+
+    text = "Retries are the part people skip. Does Acme Relay retry a failed delivery?"
+    prepared = prepare_check(text, split_brief(RELAY_BRIEF), RELAY_NAME, RELAY_ALIASES, None, True)
+    assert not prepared.needs_checker  # a product claim that is a question fails in code
+    evidence = _evidence()
+    evidence.draft = Draft(
+        text=text, segments=[], mode="written", steers_applied=[],
+        claim_gate=ClaimGateResult(passed=True, segments=[], failed_sentences=[], reasoning=""),
+    )
+    record_written_check(evidence.draft, judge(prepared, None, True))
+    assert all(not c.passed for c in evidence.draft.sentence_checks)  # every row, as the card shows
+
+    prompt = build_written_draft_prompt(_request(sample_post, steer="x", evidence=evidence))
+
+    assert '- "Does Acme Relay retry a failed delivery?": Checked as a product claim' in prompt
+    assert '- "Retries are the part people skip."' not in prompt
+
+
+def test_a_failure_of_the_whole_reply_is_listed_as_such(sample_post):
+    evidence = _failed_written_evidence()
+    evidence.draft.claim_gate.failed_sentences = [["[reply]", "The reply must have at most 3 sentences (got 4)"]]
+    evidence.draft.plan_conformance_failures = []
+
+    prompt = build_written_draft_prompt(_request(sample_post, steer="x", evidence=evidence))
+
+    assert "- The reply as a whole: The reply must have at most 3 sentences (got 4)" in prompt
+    assert '"[reply]"' not in prompt
 
 
 def test_an_assembled_previous_draft_lists_no_written_failures(sample_post):

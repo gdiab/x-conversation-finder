@@ -210,18 +210,24 @@ def written_product_rule(name: str, mention_product: bool) -> str:
 def written_check_failures_for_prompt(draft: Optional[Draft]) -> str:
     """The previous draft's failed check, for a redraft prompt (issue #29).
 
-    The Review workflow's steer cuts each failed sentence to 50 characters,
-    and the steer string is recorded in workflow history, so it stays as it
-    is. The full sentences and reasons are on the previous draft
-    (sentence_checks, plan_conformance_failures), which the drafter is sent
-    anyway; this lists them. Empty when there is no failed written check.
+    The Review workflow's steer cuts each failed sentence to 50 characters
+    and keeps 3 failures, and the steer string is recorded in workflow
+    history, so it stays as it is. The previous draft, which the drafter is
+    sent anyway, carries the whole check: its failures (claim_gate.
+    failed_sentences, one per failing sentence or "[reply]" for the reply as
+    a whole) and the plan failures. This lists them all. The per-sentence
+    rows are not used: after a failure found before the checker call, every
+    sentence row is marked failed, also the sentences that caused nothing.
+    Empty when there is no failed written check.
     """
     if draft is None or draft.mode != DRAFT_MODE_WRITTEN or draft.claim_gate.passed:
         return ""
     lines = []
-    for check in draft.sentence_checks or []:
-        if not getattr(check, "passed", True):
-            lines.append(f"- \"{check.sentence}\": {check.reason}")
+    for sentence, reason in draft.claim_gate.failed_sentences or []:
+        if sentence.startswith("[") and sentence.endswith("]"):
+            lines.append(f"- The reply as a whole: {reason}")
+        else:
+            lines.append(f"- \"{sentence}\": {reason}")
     for reason in draft.plan_conformance_failures or []:
         lines.append(f"- The reply as a whole: {reason}")
     if not lines:

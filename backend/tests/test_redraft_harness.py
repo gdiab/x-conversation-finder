@@ -40,7 +40,7 @@ from backend.workflows.review import redraft_steer
 
 POST_TEXT = "Synthetic post: our webhook consumer drops events. How do you retry deliveries?"
 TOPIC = "webhooks"
-SETTINGS = {TOPIC: WatchSettings(RELAY_BRIEF, RELAY_NAME, RELAY_ALIASES, ["Signed deliveries"])}
+SETTINGS = {f"t:{TOPIC}": WatchSettings(RELAY_BRIEF, RELAY_NAME, RELAY_ALIASES, ["Signed deliveries"])}
 PLAN = ReplyPlan(
     reply_type="answer_question",
     target_point="How do you retry deliveries?",
@@ -88,6 +88,12 @@ def _evidence(post_id: str, *, draft: bool = True, plan: bool = False) -> dict:
     return dataclasses.asdict(evidence)
 
 
+def _plan_skipped_evidence(post_id: str) -> dict:
+    evidence = _evidence(post_id, draft=False, plan=True)
+    evidence["reply_plan_errors"] = ["synthetic: target_point is not in the post"]
+    return evidence
+
+
 def _make_db(path: Path) -> Path:
     engine = create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(engine)
@@ -97,6 +103,7 @@ def _make_db(path: Path) -> Path:
         ("review:t:2002", _post("2002"), _evidence("2002", plan=True), "skipped"),  # written, with a plan
         ("review:t:2003", _post("2003", removed=True), _evidence("2003"), "skipped"),  # removed post
         ("review:t:2004", _post("2004"), _evidence("2004", draft=False), "skipped"),  # skipped at research
+        ("review:t:2005", _post("2005"), _plan_skipped_evidence("2005"), "skipped"),  # plan invalid twice
     ]
     with sessionmaker(bind=engine)() as session:
         for workflow_id, post, evidence, status in rows:
@@ -164,8 +171,9 @@ def test_only_stored_reviews_that_reached_drafting_are_loaded(tmp_path):
     reviews, excluded = load_stored_reviews(db)
 
     assert [r.workflow_id for r in reviews] == ["review:t:2001", "review:t:2002"]
-    assert dict(excluded) == {"post_text_removed": 1, "not_drafted": 1}
+    assert dict(excluded) == {"post_text_removed": 1, "not_drafted": 1, "plan_skipped": 1}
     assert reviews[1].evidence.reply_plan == PLAN
+    assert reviews[0].settings_key == "t:webhooks"
 
 
 @pytest.mark.asyncio
@@ -389,3 +397,86 @@ async def test_a_plan_invalid_twice_is_cached_so_later_runs_leave_the_post_out(t
     assert list(plans["review:t:2001"]) == ["invalid"]
     assert [(r.plan_source, r.outcome) for r in again] == [("invalid", "plan_invalid")]
     assert agent.requests == []
+
+
+@pytest.mark.asyncio
+async def test_settings_are_matched_by_account_and_topic(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    other_account = {f"someone-else:{TOPIC}": SETTINGS[f"t:{TOPIC}"]}
+
+    records, excluded, _ = await run_harness(reviews, other_account, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2)
+
+    assert records == [] and excluded["no_watch_settings"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_watch_without_a_product_name_is_left_out(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    unnamed = {f"t:{TOPIC}": WatchSettings(RELAY_BRIEF, "  ")}
+    agent = ScriptedAgent()
+
+    records, excluded, _ = await run_harness(reviews, unnamed, agent, CountingChecker(), plans={}, max_attempts=2)
+
+    assert records == [] and excluded["no_product_name"] == 2
+    assert agent.requests == [] and agent.plans == 0
+
+
+@pytest.mark.asyncio
+async def test_a_removal_recorded_during_a_run_stops_that_posts_model_calls(tmp_path, no_x):
+    db = _make_db(tmp_path / "cards.db")
+    reviews, _ = load_stored_reviews(db)
+    assert harness.removal_recorded(db, "2003") and not harness.removal_recorded(db, "2002")
+    agent = ScriptedAgent()
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, agent, CountingChecker(), plans={}, max_attempts=2, samples=2,
+        is_removed=lambda post_id: post_id == "2002",
+    )
+
+    assert [r.workflow_id for r in records] == ["review:t:2001", "review:t:2001"]
+    assert excluded["post_text_removed"] == 1
+    assert all(r.post.id != "2002" for r in agent.requests)
+
+
+@pytest.mark.asyncio
+async def test_finished_attempts_are_kept_when_the_redraft_fails(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+
+    class FailingRedraft(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            if request.steer:
+                raise SpendCapReached("synthetic cap")
+            return await super().draft_written(request, idempotency_key)
+
+    records, _, stopped = await run_harness(
+        reviews[1:], SETTINGS, FailingRedraft(texts=[UNSUPPORTED]), CountingChecker(), plans={}, max_attempts=2,
+    )
+
+    (record,) = records
+    assert stopped and record.outcome == "error"
+    assert len(record.attempts) == 1 and not record.attempts[0].passed
+    summary = summarize(records, harness.Counter(), None, stopped_by_cap=True)
+    # The finished first draft counts; the cut-off run is not a finished run
+    assert summary["first_draft_pass_rate"] == 0.0
+    assert summary["pass_rate"] is None
+    assert summary["first_draft_failure_kinds"] == {"unsupported": 1}
+
+
+def test_failure_kinds_ignore_the_checkers_own_words():
+    from backend.models.written import WrittenCheckResult
+
+    result = WrittenCheckResult(passed=False, failures=[[
+        "Some sentence.",
+        "Checked as a product claim (names the product). The brief does not support it: "
+        "this may be more than one sentence and the reply must have at most 3 sentences (got 4)",
+    ]])
+
+    assert harness.failure_kinds(result) == ["unsupported"]
+
+
+def test_the_summary_refuses_a_label_that_is_not_a_short_name():
+    assert harness.safe_label("after-2") and not harness.safe_label("a post about x")
+    with pytest.raises(ValueError):
+        summary_markdown("review:t:2001 text", {})
+    assert harness._model_label("gpt-4o-mini-2024-07-18") == "gpt-4o-mini-2024-07-18"
+    assert harness._model_label("some text with spaces") == "(unrecognized model name)"

@@ -23,11 +23,12 @@ git does not ignore). summarize() gives the aggregate numbers only.
 
 import copy
 import json
+import re
 import sqlite3
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from temporalio.converter import value_to_type
 
@@ -48,12 +49,19 @@ from backend.workflows.review import REPLY_PLAN_MAX_ATTEMPTS, record_written_che
 class WatchSettings:
     """What a TopicWatch was started with that the written path needs. Cards
     do not store these; scripts/redraft_harness.py exports them from the
-    watch's start input."""
+    watch's start input, keyed by settings_key(account, topic). A watch
+    restarted with other settings gives its older cards the new ones: the
+    cards do not record which run they came from."""
 
     product_brief: str
     product_name: str
     product_aliases: List[str] = field(default_factory=list)
     key_features: Optional[List[str]] = None
+
+
+def settings_key(account: str, topic: str) -> str:
+    """A TopicWatch is one per account and topic (watch:<account>:<topic>)."""
+    return f"{account}:{topic}"
 
 
 @dataclass
@@ -62,13 +70,49 @@ class StoredReview:
     topic: str
     post: Post
     evidence: Evidence
+    account: str = ""
+
+    @property
+    def settings_key(self) -> str:
+        return settings_key(self.account, self.topic)
 
 
 # Why a stored card is not used
 EXCLUDED_REMOVED = "post_text_removed"
-EXCLUDED_NOT_DRAFTED = "not_drafted"  # skipped before drafting (research rules, plan, confidence)
-EXCLUDED_NO_SETTINGS = "no_watch_settings"  # no watch settings for its topic
+EXCLUDED_NOT_DRAFTED = "not_drafted"  # skipped before drafting (research rules, confidence)
+EXCLUDED_PLAN_SKIPPED = "plan_skipped"  # a live Review skipped it at the plan stage
+EXCLUDED_NO_SETTINGS = "no_watch_settings"  # no watch settings for its account and topic
+EXCLUDED_NO_PRODUCT_NAME = "no_product_name"  # its watch has none: a live Review stays assembled
 EXCLUDED_UNREADABLE = "unreadable"
+
+
+def _account_of(workflow_id: str) -> str:
+    """review:<account>:<post_id>"""
+    parts = workflow_id.split(":")
+    return parts[1] if len(parts) >= 3 and parts[0] == "review" else ""
+
+
+def _connect_read_only(db_path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+
+
+def removal_recorded(db_path: Path, post_id: str) -> bool:
+    """Does any stored card of the post record its removal (issue #9)? Read
+    before each post's model calls, so a removal the app records during a
+    run stops the harness from sending that post's text."""
+    conn = _connect_read_only(db_path)
+    try:
+        rows = conn.execute("SELECT post_data FROM review_cards").fetchall()
+    finally:
+        conn.close()
+    for (post_data,) in rows:
+        try:
+            post = json.loads(post_data) if isinstance(post_data, str) else post_data
+        except (TypeError, ValueError):
+            continue
+        if isinstance(post, dict) and str(post.get("id")) == str(post_id) and post.get("text_removed"):
+            return True
+    return False
 
 
 def load_stored_reviews(db_path: Path) -> Tuple[List[StoredReview], Counter]:
@@ -76,14 +120,14 @@ def load_stored_reviews(db_path: Path) -> Tuple[List[StoredReview], Counter]:
     and a count of the cards left out, by reason.
 
     A card reached drafting when it has a draft or a reply plan; a card
-    skipped by the research rules, the confidence threshold or an invalid
-    plan has neither. A card whose post text was removed is left out: its
-    text must not be sent to a model.
+    skipped by the research rules or the confidence threshold has neither.
+    A card with a plan that a live Review skipped (an invalid plan, or a
+    plan-stage skip rule) is left out too. A card whose post text was
+    removed is left out: its text must not be sent to a model.
     """
-    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
     reviews: List[StoredReview] = []
     excluded: Counter = Counter()
-    conn = sqlite3.connect(uri, uri=True)
+    conn = _connect_read_only(db_path)
     try:
         rows = conn.execute(
             "SELECT workflow_id, post_data, evidence_data FROM review_cards ORDER BY created_at, workflow_id"
@@ -106,13 +150,18 @@ def load_stored_reviews(db_path: Path) -> Tuple[List[StoredReview], Counter]:
         if not evidence_dict.get("draft") and not evidence_dict.get("reply_plan"):
             excluded[EXCLUDED_NOT_DRAFTED] += 1
             continue
+        if evidence_dict.get("reply_plan") and (
+            evidence_dict.get("reply_plan_errors") or evidence_dict.get("reply_plan_skip_rule")
+        ):
+            excluded[EXCLUDED_PLAN_SKIPPED] += 1
+            continue
         try:
             post = value_to_type(Post, post_dict)
             evidence = value_to_type(Evidence, evidence_dict)
         except Exception:
             excluded[EXCLUDED_UNREADABLE] += 1
             continue
-        reviews.append(StoredReview(workflow_id, evidence.matched_topic, post, evidence))
+        reviews.append(StoredReview(workflow_id, evidence.matched_topic, post, evidence, _account_of(workflow_id)))
     return reviews, excluded
 
 
@@ -256,9 +305,19 @@ FAILURE_KINDS = (
 )
 
 
+_CHECKER_TEXT_MARKER = "The brief does not support it:"
+
+
+def _code_written(reason: str) -> str:
+    """A reason without the checker's own words, which follow the marker:
+    a phrase in them must not count as a failure kind."""
+    head, marker, _ = reason.partition(_CHECKER_TEXT_MARKER)
+    return head + marker
+
+
 def failure_kinds(result: WrittenCheckResult) -> List[str]:
     """The kinds of failure in a failed check, for the aggregate report."""
-    reasons = [reason for _, reason in result.failures]
+    reasons = [_code_written(reason) for _, reason in result.failures]
     kinds = []
     for kind, needles in FAILURE_KINDS:
         if any(needle in reason for reason in reasons for needle in needles):
@@ -354,6 +413,7 @@ async def run_written_path(
     max_attempts: int,
     sample: int = 1,
     cap: Optional[SpendCap] = None,
+    attempts: Optional[List[AttemptRecord]] = None,
 ) -> List[AttemptRecord]:
     """The written branch of ReviewWorkflow._draft_and_check, offline.
 
@@ -362,6 +422,9 @@ async def run_written_path(
     same check (check_text) recorded on the draft the same way
     (record_written_check), and the same reuse of a check for a text already
     checked. Works on a copy of the stored evidence.
+
+    `attempts` collects each attempt as it finishes, so a caller keeps the
+    finished ones when a later call fails or hits the spend cap.
     """
     evidence = copy.deepcopy(review.evidence)
     evidence.draft = None
@@ -373,7 +436,7 @@ async def run_written_path(
 
     checks: Dict[str, WrittenCheckResult] = {}
     last_failures: List[tuple] = []
-    attempts: List[AttemptRecord] = []
+    attempts = [] if attempts is None else attempts
     for attempt in range(1, max_attempts + 1):
         steer = redraft_steer(last_failures) if attempt > 1 else None
         if cap is not None:
@@ -448,7 +511,7 @@ def outcome_of(attempts: Sequence[AttemptRecord]) -> str:
 
 async def run_harness(
     reviews: Sequence[StoredReview],
-    settings_by_topic: Dict[str, WatchSettings],
+    settings_by_key: Dict[str, WatchSettings],
     agent: ReplyAgentPort,
     checker: ClaimCheckerPort,
     *,
@@ -457,39 +520,53 @@ async def run_harness(
     samples: int = 1,
     cap: Optional[SpendCap] = None,
     excluded: Optional[Counter] = None,
+    is_removed: Optional[Callable[[str], bool]] = None,
 ) -> Tuple[List[PostRecord], Counter, bool]:
     """Run every review `samples` times. Returns the per-post records, the
     count of reviews left out by reason, and whether the spend cap stopped
-    the run early (the records then cover what finished)."""
+    the run early (the records then cover what finished).
+
+    `settings_by_key` maps settings_key(account, topic) to the watch's
+    settings. `is_removed(post_id)` is asked before each post's model calls
+    (removal_recorded on the database read).
+    """
     excluded = Counter(excluded or {})
     records: List[PostRecord] = []
     for review in reviews:
-        settings = settings_by_topic.get(review.topic)
+        settings = settings_by_key.get(review.settings_key)
         if settings is None:
             excluded[EXCLUDED_NO_SETTINGS] += 1
             continue
+        if not clean_names(settings.product_name, settings.product_aliases)[0]:
+            excluded[EXCLUDED_NO_PRODUCT_NAME] += 1
+            continue
         for sample in range(1, samples + 1):
+            if is_removed is not None and is_removed(review.post.id):
+                excluded[EXCLUDED_REMOVED] += 1
+                break
+            attempts: List[AttemptRecord] = []
             try:
                 plan, source = await plan_for(review, agent, plans, cap)
                 if plan is None:
                     records.append(PostRecord(review.workflow_id, review.topic, sample, source, None, "plan_invalid"))
                     break  # a plan that fails twice fails for every sample
-                attempts = await run_written_path(
+                await run_written_path(
                     review, settings, plan, agent, checker,
-                    max_attempts=max_attempts, sample=sample, cap=cap,
+                    max_attempts=max_attempts, sample=sample, cap=cap, attempts=attempts,
                 )
                 records.append(PostRecord(
                     review.workflow_id, review.topic, sample, source, plan.mention_product,
                     outcome_of(attempts), attempts,
                 ))
             except SpendCapReached as e:
+                # The attempts that finished are kept: their calls were paid
                 records.append(PostRecord(
-                    review.workflow_id, review.topic, sample, "", None, "error", error=str(e),
+                    review.workflow_id, review.topic, sample, "", None, "error", attempts, error=str(e),
                 ))
                 return records, excluded, True
             except Exception as e:  # one post's failure does not end the run
                 records.append(PostRecord(
-                    review.workflow_id, review.topic, sample, "", None, "error",
+                    review.workflow_id, review.topic, sample, "", None, "error", attempts,
                     error=f"{type(e).__name__}: {e}",
                 ))
     return records, excluded, False
@@ -520,14 +597,21 @@ def summarize(
             checker_calls += int(a.checker_called)
             claim_counts[str(a.claim_sentences)] += 1
             (first_kinds if a.attempt == 1 else redraft_kinds).update(a.failure_kinds)
-    runs = len(drafted)
+    # Pass rates count finished runs only (passed or skipped); a run cut off
+    # by an error is in "outcomes" as "error", and its finished attempts
+    # count in the failure kinds. The first-draft rate counts every run
+    # whose first draft was checked.
+    finished = outcomes["passed_first"] + outcomes["passed_redraft"] + outcomes["skipped"]
+    first_checked = len(drafted)
     summary: Dict[str, Any] = {
         "runs": len(records),
         "posts": len({r.workflow_id for r in records}),
         "excluded": dict(sorted(excluded.items())),
         "outcomes": dict(sorted(outcomes.items())),
-        "pass_rate": round((outcomes["passed_first"] + outcomes["passed_redraft"]) / runs, 3) if runs else None,
-        "first_draft_pass_rate": round(outcomes["passed_first"] / runs, 3) if runs else None,
+        "pass_rate": round((outcomes["passed_first"] + outcomes["passed_redraft"]) / finished, 3) if finished else None,
+        "first_draft_pass_rate": round(
+            sum(1 for r in drafted if r.attempts[0].passed) / first_checked, 3
+        ) if first_checked else None,
         "drafts": drafts,
         "checker_calls": checker_calls,
         "first_draft_failure_kinds": dict(sorted(first_kinds.items())),
@@ -545,15 +629,31 @@ def summarize(
             entry["input_tokens"] += c.input_tokens
             entry["output_tokens"] += c.output_tokens
             entry["cost_usd"] = round(entry["cost_usd"] + c.cost_usd, 6)
-        summary["models"] = sorted({c.model for c in cap.calls})
+        summary["models"] = sorted({_model_label(c.model) for c in cap.calls})
         summary["calls"] = by_call
         summary["cost_usd"] = round(cap.spent_usd, 6)
         summary["spend_cap_usd"] = cap.cap_usd
     return summary
 
 
+_SAFE_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$")
+
+
+def safe_label(label: str) -> bool:
+    """A run label that can go into the pasteable summary: a short name."""
+    return bool(_SAFE_LABEL_RE.match(label))
+
+
+def _model_label(model: str) -> str:
+    """A model name as reported by the provider, if it looks like one."""
+    return model if _MODEL_RE.match(model or "") else "(unrecognized model name)"
+
+
 def summary_markdown(label: str, summary: Dict[str, Any]) -> str:
     """The aggregate summary as a Markdown table, safe to paste (no text)."""
+    if not safe_label(label):
+        raise ValueError("run label must be a short name: letters, digits, '.', '_' or '-'")
     lines = [f"### Redraft harness: {label}", "", "| Measure | Value |", "|---|---|"]
     for key, value in summary.items():
         shown = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
