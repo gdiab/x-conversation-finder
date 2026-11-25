@@ -18,9 +18,13 @@ POST_TEXT_REMOVED = "[removed - post deleted]"
 POST_REMOVED_SKIP_REASON = "Post removed: the target post was deleted or is no longer visible on X"
 
 
-def _redact_material(material: Dict[str, Any]) -> Dict[str, Any]:
-    """A founder material without its model-written relevance note and source label."""
+def _redact_material(material: Dict[str, Any], passage_unverified: bool = False) -> Dict[str, Any]:
+    """A founder material without its model-written relevance note and source
+    label, and without its passage when that was never checked against the
+    brief (issue #9)."""
     redacted = dict(material)
+    if passage_unverified and redacted.get("passage"):
+        redacted["passage"] = POST_TEXT_REMOVED
     if redacted.get("relevance"):
         redacted["relevance"] = POST_TEXT_REMOVED
     if redacted.get("source") and redacted["source"] != "product_brief":
@@ -50,6 +54,8 @@ def _redact_segment(segment: Dict[str, Any], passages: Dict[str, str]) -> Dict[s
     from backend.gate.non_claim_set import UNKNOWN_IDENTIFIER, get_phrase_text, known_phrase_id
 
     redacted = dict(segment)
+    if redacted.get("kind") not in (None, "claim", "non_claim"):
+        redacted["kind"] = UNKNOWN_IDENTIFIER
     if redacted.get("phrase_id"):
         redacted["phrase_id"] = known_phrase_id(redacted["phrase_id"])
     source = redacted.get("source_passage_id")
@@ -73,9 +79,10 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
     """A stored draft without model-derived gate details (issue #9).
 
     The assembled draft text and segments inserted by code are kept; free
-    text or unknown identifiers in segments, gate failure rows built from
-    segment markers, and gate-generated steers are removed. Founder nudges
-    and edits are the founder's own text and stay.
+    text or unknown identifiers in segments and gate-generated steers are
+    removed, and the claim-gate details are dropped as a whole (older cards
+    can hold echoed model values in any of them). Founder nudges and edits
+    are the founder's own text and stay.
     """
     passages = {
         m.get("passage_id"): m.get("passage") or ""
@@ -95,18 +102,14 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
         ]
     gate = redacted.get("claim_gate")
     if isinstance(gate, dict):
-        gate = dict(gate)
-        if isinstance(gate.get("segments"), list):
-            gate["segments"] = [
-                _redact_segment(s, passages) if isinstance(s, dict) else s for s in gate["segments"]
-            ]
-        if isinstance(gate.get("failed_sentences"), list):
-            gate["failed_sentences"] = [
-                {**f, "reason": GATE_DETAILS_REMOVED}
-                if isinstance(f, dict) and str(f.get("sentence", "")).startswith("[") else f
-                for f in gate["failed_sentences"]
-            ]
-        redacted["claim_gate"] = gate
+        redacted["claim_gate"] = {
+            "passed": gate.get("passed"),
+            "segments": [],
+            "failed_sentences": [],
+            "reasoning": f"Claim gate {GATE_DETAILS_REMOVED}",
+            "claims": [],
+            "failed_claims": [],
+        }
     return redacted
 
 
@@ -133,11 +136,17 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
     for key in ("why_it_fits", "matched_topic"):
         if evidence_data.get(key):
             evidence_data[key] = POST_TEXT_REMOVED
+    # Issue #4 checks each founder passage against the brief and records
+    # reply_fit. A card without reply_fit predates that check, so its
+    # passages are model output too (they could copy the post) and go, along
+    # with the draft text assembled from them.
+    passages_unverified = not evidence_data.get("reply_fit")
     materials = evidence_data.get("founder_materials")
     if isinstance(materials, list):
         evidence_data["founder_materials"] = [
-            _redact_material(m) if isinstance(m, dict) else m for m in materials
+            _redact_material(m, passages_unverified) if isinstance(m, dict) else m for m in materials
         ]
+        materials = evidence_data["founder_materials"]
     reply_fit = evidence_data.get("reply_fit")
     if isinstance(reply_fit, dict):
         evidence_data["reply_fit"] = {
@@ -158,7 +167,10 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
             redacted["reply_type"] = POST_TEXT_REMOVED
         evidence_data["reply_plan"] = redacted
     if isinstance(evidence_data.get("draft"), dict):
-        evidence_data["draft"] = _redact_draft(evidence_data["draft"], evidence_data.get("founder_materials"))
+        draft = _redact_draft(evidence_data["draft"], evidence_data.get("founder_materials"))
+        if passages_unverified and draft.get("text"):
+            draft["text"] = POST_TEXT_REMOVED
+        evidence_data["draft"] = draft
     if evidence_data.get("skip_reason"):
         evidence_data["skip_reason"] = redact_skip_reason(evidence_data["skip_reason"])
     return evidence_data

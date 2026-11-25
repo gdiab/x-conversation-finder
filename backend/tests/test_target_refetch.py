@@ -636,6 +636,7 @@ async def test_removal_redacts_model_written_topic_and_source():
     from backend.activities.store_activities import redact_post_text_copies
 
     out = redact_post_text_copies({
+        "reply_fit": {"post_kind": "question"},  # passages were checked (issue #4)
         "matched_topic": f"posts like '{QUESTION}'",
         "founder_materials": [
             {"source": f"brief, for '{QUESTION}'", "passage": "Our product records work.", "relevance": ""},
@@ -718,16 +719,43 @@ async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_inp
         assert fragment not in dumped
 
 
-@pytest.mark.asyncio
-async def test_removal_scrubs_gate_details_of_a_card_stored_before_issue_9():
-    """Cards stored before the gate stopped echoing model identifiers can hold
-    a post quote in gate failures, rejected segments, gate steers and the
-    skip reason. A removal scrubs those by provenance and keeps founder text."""
+def _insert_legacy_card(workflow_id, with_reply_fit):
+    """A card in the shape stored before issue #9 (and, without reply_fit,
+    before issue #4), with a post quote in every model-derived field."""
     from backend.database import ReviewCardDB, get_db
-    from backend.target_refetch import refetch_stored_card_target
 
-    workflow_id = "review:test:legacy_gate_card"
-    founder_nudge = "Make it shorter"
+    evidence = {
+        "post_id": TARGET_ID,
+        "matched_topic": "reliability",
+        "why_it_fits": "fits",
+        "founder_materials": [{"source": "product_brief",
+                               "passage": "Our product records work." if with_reply_fit else f"They said: {QUESTION}",
+                               "relevance": "r", "passage_id": "passage_0"}],
+        "draft": {
+            "text": "Thanks for sharing." if with_reply_fit else f"They said: {QUESTION}",
+            "segments": [{"kind": "non_claim", "text": f"As you said, {QUESTION}",
+                          "source_passage_id": None, "sentence_index": None},
+                         {"kind": f"quote: {QUESTION}", "text": None,
+                          "source_passage_id": None, "sentence_index": None}],
+            "claim_gate": {
+                "passed": False,
+                "segments": [{"kind": "non_claim", "text": f"As you said, {QUESTION}",
+                              "source_passage_id": None, "sentence_index": None}],
+                "failed_sentences": [
+                    {"sentence": "[non_claim segment]", "reason": f"Unknown phrase_id: {QUESTION}"},
+                ],
+                "reasoning": f"Composition violation: Unknown phrase_id: {QUESTION}",
+                "claims": [], "failed_claims": [],
+            },
+            "steers_applied": [
+                "Make it shorter",
+                f"Previous draft failed claim gate. Fix these issues: '[non_claim segment]...': Unknown phrase_id: {QUESTION}",
+            ],
+        },
+        "skip_reason": f"Not enough evidence: [non_claim segment]... (Unknown phrase_id: {QUESTION})",
+    }
+    if with_reply_fit:
+        evidence["reply_fit"] = {"post_kind": "question", "brief_problem_span": None, "span_check": "missing"}
     db = get_db()
     try:
         db.add(ReviewCardDB(
@@ -735,42 +763,27 @@ async def test_removal_scrubs_gate_details_of_a_card_stored_before_issue_9():
             post_data={"id": TARGET_ID, "text": "Struggling with distributed systems reliability.",
                        "author": {"id": "a", "username": "synthetic_dev", "name": "Synthetic Dev",
                                   "followers_count": 1, "verified": False}},
-            evidence_data={
-                "post_id": TARGET_ID,
-                "matched_topic": "reliability",
-                "why_it_fits": "fits",
-                "founder_materials": [{"source": "product_brief", "passage": "Our product records work.",
-                                       "relevance": "r", "passage_id": "passage_0"}],
-                "draft": {
-                    "text": "Thanks for sharing.",
-                    "segments": [{"kind": "non_claim", "text": f"As you said, {QUESTION}",
-                                  "source_passage_id": None, "sentence_index": None}],
-                    "claim_gate": {
-                        "passed": False,
-                        "segments": [{"kind": "claim", "text": "Our product records work",
-                                      "source_passage_id": "passage_0", "sentence_index": 0}],
-                        "failed_sentences": [
-                            {"sentence": "[non_claim segment]", "reason": f"Unknown phrase_id: {QUESTION}"},
-                            {"sentence": "Thanks for sharing.", "reason": "Sentence does not map to any segment"},
-                        ],
-                        "reasoning": "r", "claims": [], "failed_claims": [],
-                    },
-                    "steers_applied": [
-                        founder_nudge,
-                        f"Previous draft failed claim gate. Fix these issues: '[non_claim segment]...': Unknown phrase_id: {QUESTION}",
-                    ],
-                },
-                "skip_reason": f"Not enough evidence: [non_claim segment]... (Unknown phrase_id: {QUESTION})",
-            },
+            evidence_data=evidence,
             status="skipped",
             created_at="2026-11-20T00:00:00+00:00",
             updated_at="2026-11-20T00:00:00+00:00",
-            skip_reason=f"Not enough evidence: [non_claim segment]... (Unknown phrase_id: {QUESTION})",
+            skip_reason=evidence["skip_reason"],
         ))
         db.commit()
     finally:
         db.close()
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_reply_fit", [True, False], ids=["after_issue_4", "before_issue_4"])
+async def test_removal_scrubs_a_card_stored_before_issue_9(with_reply_fit):
+    """Older cards can hold a post quote in echoed gate values (and, before
+    issue #4, in unverified founder passages). A removal scrubs those by
+    provenance and keeps founder text."""
+    from backend.target_refetch import refetch_stored_card_target
+
+    workflow_id = f"review:test:legacy_card_{with_reply_fit}"
+    _insert_legacy_card(workflow_id, with_reply_fit)
     assert await refetch_stored_card_target(
         TargetClient(["gone"]), workflow_id, "run1", review_is_running=_finished
     ) == "removed"
@@ -779,10 +792,12 @@ async def test_removal_scrubs_gate_details_of_a_card_stored_before_issue_9():
     for fragment in POST_FRAGMENTS:
         assert fragment not in dumped
     draft = stored["evidence"]["draft"]
-    assert founder_nudge in draft["steers_applied"]  # founder text kept
-    assert draft["claim_gate"]["segments"][0]["text"] == "Our product records work"  # code-inserted, kept
-    assert draft["claim_gate"]["failed_sentences"][1]["reason"] == "Sentence does not map to any segment"
+    assert "Make it shorter" in draft["steers_applied"]  # founder nudge kept
     assert stored["skip_reason"].startswith("Not enough evidence:")
+    if with_reply_fit:
+        # Verified passages and the assembled draft stay
+        assert stored["evidence"]["founder_materials"][0]["passage"] == "Our product records work."
+        assert draft["text"] == "Thanks for sharing."
 
 @pytest.mark.asyncio
 async def test_eval_refetch_unknown_card():
