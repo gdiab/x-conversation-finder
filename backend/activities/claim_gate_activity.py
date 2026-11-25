@@ -20,6 +20,7 @@ import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
 from backend.models.summaries import GateSummary
+from backend.review_docs import text_free_activity as _text_free_activity
 from backend.gate.non_claim_set import (
     UNKNOWN_IDENTIFIER,
     is_closed_set_non_claim,
@@ -319,6 +320,7 @@ def _verdict_reusable(
 
 
 @activity.defn(name="verify_edited_text")
+@_text_free_activity(lambda input: bool(input.text_slot))
 async def verify_edited_text(input: EditedTextGateInput) -> Union[List[SentenceGateResult], GateSummary]:
     """The edit re-gate activity; see _verify_edited_text. Issue #23: a
     text-free input (text_slot set) reads and stores through the database."""
@@ -592,6 +594,7 @@ async def _verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRe
 
 
 @activity.defn(name="claim_gate")
+@_text_free_activity(lambda input: bool(input.slot))
 async def claim_gate(input: ClaimGateInput) -> Union[ClaimGateResult, GateSummary]:
     """The claim gate activity; see _claim_gate. Issue #23: with input.slot
     set, gate the stored draft and record the result on it, as the Review

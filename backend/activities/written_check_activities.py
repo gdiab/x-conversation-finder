@@ -91,6 +91,7 @@ class WrittenCheckActivities:
         self._claim_checker = claim_checker
 
     @activity.defn(name="check_written_draft")
+    @review_docs.text_free_activity(lambda input: bool(input.source_slot))
     async def check_written_draft(self, input: CheckWrittenDraftInput) -> Union[WrittenCheckResult, GateSummary]:
         """
         Check a written text's product claims against the brief.

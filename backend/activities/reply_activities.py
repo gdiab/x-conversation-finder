@@ -132,6 +132,7 @@ class ReplyActivities:
         self._draft_mode = draft_mode
     
     @activity.defn(name="research_post")
+    @review_docs.text_free_activity(lambda input: input.post is None)
     async def research_post(self, input: ResearchPostInput) -> Union[Evidence, ResearchSummary]:
         """
         Research a post and gather evidence.
@@ -188,6 +189,7 @@ class ReplyActivities:
         return evidence
     
     @activity.defn(name="plan_reply")
+    @review_docs.text_free_activity(lambda input: input.post is None)
     async def plan_reply(self, input: PlanReplyInput) -> PlanReplyResult:
         """
         Plan the reply before drafting (issue #5).
@@ -268,6 +270,7 @@ class ReplyActivities:
         )
     
     @activity.defn(name="draft_reply")
+    @review_docs.text_free_activity(lambda input: input.evidence is None)
     async def draft_reply(self, input: DraftReplyInput) -> Union[Evidence, DraftSummary]:
         """
         Draft a reply with claim gate.

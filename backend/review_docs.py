@@ -57,6 +57,48 @@ def text_safe_db_errors():
         ) from None
 
 
+@contextmanager
+def text_safe_errors():
+    """Any error but our own ApplicationErrors, without its message.
+
+    A text-free activity sends the post, a draft or a founder's text to a
+    model or an API; a library's exception message can echo that request,
+    and an activity failure's message is recorded in Temporal history. The
+    original goes to the worker log; the replacement keeps the exception's
+    type name, so retries behave as before. ApplicationErrors are raised by
+    this code base with code-written messages and pass through.
+    """
+    try:
+        yield
+    except ApplicationError:
+        raise
+    except SQLAlchemyError as e:
+        logger.exception("Database error (issue #23: details kept out of workflow history)")
+        raise ApplicationError(
+            f"Database error ({type(e).__name__}); the details are in the worker log",
+            type=DATABASE_ERROR_TYPE,
+        ) from None
+    except Exception as e:
+        logger.exception("Activity error (issue #23: details kept out of workflow history)")
+        raise ApplicationError(
+            f"{type(e).__name__}; the details are in the worker log", type=type(e).__name__
+        ) from None
+
+
+def text_free_activity(is_text_free):
+    """Decorate an activity: when `is_text_free(input)`, its errors reach
+    history through text_safe_errors. Put it under @activity.defn."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args):
+            if not is_text_free(args[-1]):
+                return await fn(*args)
+            with text_safe_errors():
+                return await fn(*args)
+        return wrapper
+    return decorate
+
+
 def _text_safe(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -277,6 +319,22 @@ def written_later(row, writer: Optional[tuple]) -> bool:
 
 def doc_written_later(db, workflow_id: str, slot: str, writer: Optional[tuple] = None) -> bool:
     return written_later(db.get(ReviewDocDB, (workflow_id, slot)), writer or current_writer())
+
+
+def claim_write(db, workflow_id: str, post_id: str, slot: str) -> bool:
+    """For a card write that has no document of its own (the follow-up
+    replies): record this activity as the writer of a marker slot, unless a
+    later attempt already did. Returns False for a late attempt, whose write
+    the caller then drops. The marker holds no text, so it is kept after a
+    removal like the card it guards."""
+    writer = current_writer()
+    if written_later(db.get(ReviewDocDB, (workflow_id, slot)), writer):
+        return False
+    db.merge(ReviewDocDB(
+        workflow_id=workflow_id, slot=slot, post_id=post_id, data={}, updated_at=_now(),
+        writer_seq=writer[0] if writer else None, writer_attempt=writer[1] if writer else None,
+    ))
+    return True
 
 
 @_text_safe

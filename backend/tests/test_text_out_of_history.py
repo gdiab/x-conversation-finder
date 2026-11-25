@@ -543,3 +543,50 @@ def test_the_post_anyway_sentences_are_the_ones_acknowledged(make_review_input):
         assert db.get(ReviewCardDB, wid).post_anyway_failing_sentences == ["The acknowledged one."]
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_provider_error_that_echoes_the_prompt_stays_out_of_history(make_review_input):
+    """A model provider's error can quote the request (the post, a draft);
+    an activity failure's message is recorded in history (review round 3)."""
+    from temporalio.client import WorkflowFailureError
+
+    class EchoingAgent(WritingAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            raise RuntimeError(f"400 Bad Request: could not process {request.post.text!r}")
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, x_client=MarkerXClient(), agent=EchoingAgent(plans=[no_mention_plan()])):
+            handle = await _start_review(env, make_review_input, "provider_error_23", product_name=PRODUCT)
+            with pytest.raises(WorkflowFailureError):
+                await handle.result()
+            history = await handle.fetch_history()
+            failures = [e for e in history.events if e.HasField("activity_task_failed_event_attributes")]
+            assert failures and "RuntimeError" in failures[-1].activity_task_failed_event_attributes.failure.message
+            assert_no_post_text(history)
+
+
+def test_a_late_follow_up_write_is_dropped(make_review_input):
+    """check_followup writes the replies to the card directly; a late
+    attempt cannot replace what its retry wrote (review round 3)."""
+    from unittest import mock
+    from backend import review_docs
+    from backend.activities.store_activities import UpdateCardInput, _update_card_sync, get_stored_card
+    from backend.database import ReviewCardDB, get_db
+
+    review_input = make_review_input()
+    wid = "review:test:1001_followup_late"
+    db = get_db()
+    db.add(ReviewCardDB(workflow_id=wid, post_data={"id": review_input.post_id, "text": "t"}, evidence_data={},
+                        status="approved", created_at="t", updated_at="t"))
+    db.commit()
+    db.close()
+
+    def write_as(attempt, replies):
+        with mock.patch.object(review_docs, "current_writer", return_value=(9, attempt)):
+            _update_card_sync(UpdateCardInput(workflow_id=wid, idempotency_key="k",
+                                              followup_replies=replies, writer_slot="followup"))
+
+    write_as(2, [{"id": "2", "text": "newer"}])
+    write_as(1, [{"id": "1", "text": "older"}])  # the late first attempt
+    assert get_stored_card(wid)["followup_replies"] == [{"id": "2", "text": "newer"}]

@@ -328,6 +328,7 @@ def redact_removed_card(card: Dict[str, Any]) -> Dict[str, Any]:
             redacted[key] = redact(card[key], evidence)
     return redacted
 from backend.database import get_db, ReviewCardDB
+from backend.review_docs import text_free_activity as _text_free_activity
 
 
 @dataclass
@@ -412,6 +413,9 @@ class UpdateCardInput:
     # the written check's); an approve after a "not_checked" edit names none
     post_anyway_results_slot: str = ""
     post_anyway_check_slot: str = ""
+    # A write that has no document of its own (check_followup's replies):
+    # dropped when a later attempt already wrote it (review_docs.claim_write)
+    writer_slot: str = ""
 
 
 @dataclass
@@ -709,6 +713,7 @@ def _store_card_in_transaction(input: StoreCardInput, make_current: bool) -> boo
 
 
 @activity.defn(name="store_card")
+@_text_free_activity(lambda input: input.card is None)
 async def store_card(input: StoreCardInput) -> bool:
     """
     Store a review card in SQLite.
@@ -767,6 +772,12 @@ def _update_card_in_transaction(input: UpdateCardInput) -> bool:
         # transaction, so a stale edit (below) writes neither the card nor them
         evidence_value = input.evidence
         workflow_id = input.workflow_id
+        if input.writer_slot:
+            from backend import review_docs
+
+            post_id = (card_db.post_data or {}).get("id") or ""
+            if not review_docs.claim_write(db, input.workflow_id, post_id, input.writer_slot):
+                return True
         # issue #23: a write naming Review documents is dropped as a whole
         # when it comes from a late attempt: a retry of an edit write that
         # already committed (same edit_seq: the first one wrote it all), or a
@@ -905,6 +916,7 @@ def _update_card_in_transaction(input: UpdateCardInput) -> bool:
 
 
 @activity.defn(name="update_card")
+@_text_free_activity(lambda input: bool(input.post_id or input.writer_slot))
 async def update_card(input: UpdateCardInput) -> bool:
     """
     Update a review card.

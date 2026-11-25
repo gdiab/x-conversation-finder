@@ -377,6 +377,8 @@ class XActivities:
                     workflow_id=activity.info().workflow_id,
                     idempotency_key=input.idempotency_key,
                     followup_replies=[followup_reply_fields(p) for p in posts],
+                    # a late attempt cannot replace its retry's replies
+                    writer_slot="followup",
                 ),
             )
             return len(posts)
