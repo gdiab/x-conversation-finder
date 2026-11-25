@@ -208,7 +208,10 @@ call is counted per Temporal activity attempt:
   the request to X's 10-100 range, and the reservation covers what is sent.
 - A reservation that is already closed refuses to authorize another request
   (`ReservationClosed`). `lookup_post` counts 1 read per attempt even when it returns None:
-  the HTTP adapter returns None for a 404 and for post data it cannot convert.
+  the HTTP adapter returns None only when X's error names the post as gone
+  (issue #9), and raises `MalformedLookupResponse` (also counted, X billed it)
+  for post data it cannot convert. A 404 that does not name the post is raised
+  as the HTTP error and released.
 - Output that hits the max output tokens (`finish_reason == "length"`) fails
   research, plan and draft without retry (`InferenceOutputTruncated`); the call
   stays counted.

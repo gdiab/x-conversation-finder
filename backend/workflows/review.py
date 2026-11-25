@@ -40,6 +40,10 @@ TARGET_REFETCH_PATCH_ID = "target-refetch-on-approve-v1"
 # the card stayed "pending" after the workflow ended, so the eval re-fetch
 # (backend/target_refetch.py) treated it as live and never checked it.
 PERSIST_FOUNDER_SKIP_PATCH_ID = "persist-founder-skip-v1"
+# Patch id (issue #9): when the deadline fires in the same task as an approve
+# or skip (or during approve's re-fetch), the decision wins over expiry.
+# Before, the timeout always expired the Review; old histories keep that.
+DECISION_AT_DEADLINE_PATCH_ID = "decision-wins-at-deadline-v1"
 
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
@@ -480,7 +484,12 @@ class ReviewWorkflow:
         if self._approve_in_flight_count > 0:
             await workflow.wait_condition(lambda: self._approve_in_flight_count == 0)
 
-        if timed_out and not (self.approved or self.skipped):
+        decided_at_deadline = (
+            timed_out
+            and (self.approved or self.skipped)
+            and workflow.patched(DECISION_AT_DEADLINE_PATCH_ID)
+        )
+        if timed_out and not decided_at_deadline:
             self.status = "expired"
             workflow.logger.info(f"Review expired after {timeout_hours}h")
             
