@@ -216,7 +216,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           </div>
           {card.post.text_removed ? (
             <div style={{ fontStyle: 'italic', color: '#666' }}>
-              Post removed: it was deleted on X, so its text and the research quoting it were removed.
+              Post removed: it was deleted or is no longer visible on X, so its text and the research quoting it were removed.
             </div>
           ) : (
             <div>{card.post.text}</div>

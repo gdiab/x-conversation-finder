@@ -170,7 +170,7 @@ class ReplyActivities:
         # evidence may quote a deleted post: do not send it to the model.
         if card_post_text_removed(activity.info().workflow_id):
             raise ApplicationError(
-                "Post removed: the target post was deleted on X; not redrafting",
+                "Post removed: the target post was deleted or is no longer visible on X; not redrafting",
                 type="PostRemoved",
                 non_retryable=True,
             )

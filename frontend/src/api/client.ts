@@ -53,7 +53,7 @@ export interface ReviewCard {
     created_at: string;
     like_count: number;
     reply_count: number;
-    // issue #9: set when the post was deleted on X and its text was removed
+    // issue #9: set when the post was deleted or is no longer visible on X and its text was removed
     text_removed?: boolean;
   };
   evidence: {
@@ -221,10 +221,10 @@ export async function approveReview(
   }
 }
 
-/** Approve found the target post deleted on X; the review is now skipped (issue #9). */
+/** Approve found the target post deleted or no longer visible on X; the review is now skipped (issue #9). */
 export class PostRemovedError extends Error {
   constructor(detail: string) {
-    super(`Post removed: the post was deleted on X, so this review was skipped. ${detail}`);
+    super(`Post removed: the post was deleted or is no longer visible on X, so this review was skipped. ${detail}`);
     this.name = 'PostRemovedError';
   }
 }
