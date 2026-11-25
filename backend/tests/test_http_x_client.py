@@ -225,9 +225,13 @@ async def test_lookup_post_not_found():
         mock_client = AsyncMock()
         mock_client_class.return_value.__aenter__.return_value = mock_client
         
-        # Mock 404 response
+        # Mock 404 response naming the post as not found (issue #9)
         mock_response_obj = Mock()
         mock_response_obj.status_code = 404
+        mock_response_obj.json.return_value = {
+            "errors": [{"resource_id": "nonexistent_id", "title": "Not Found Error",
+                        "type": "https://api.twitter.com/2/problems/resource-not-found"}]
+        }
         mock_request = Mock()
         error = httpx.HTTPStatusError("Not Found", request=mock_request, response=mock_response_obj)
         mock_response_obj.raise_for_status.side_effect = error
@@ -236,6 +240,31 @@ async def test_lookup_post_not_found():
         post = await client.lookup_post("nonexistent_id")
     
     assert post is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [ValueError("not JSON"), {"title": "Not Found", "status": 404}, {}])
+async def test_lookup_post_bare_404_raises(body):
+    """Issue #9: a 404 that does not name the post (a wrong route, a proxy)
+    must not read as "post deleted", which would remove its text."""
+    from temporalio.exceptions import ApplicationError
+
+    client = HttpXClient("test_bearer_token_123")
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_response_obj = Mock()
+        mock_response_obj.status_code = 404
+        if isinstance(body, Exception):
+            mock_response_obj.json.side_effect = body
+        else:
+            mock_response_obj.json.return_value = body
+        error = httpx.HTTPStatusError("Not Found", request=Mock(), response=mock_response_obj)
+        mock_response_obj.raise_for_status.side_effect = error
+        mock_client.get.return_value = mock_response_obj
+        with pytest.raises(ApplicationError) as excinfo:
+            await client.lookup_post("1234567890")
+    assert excinfo.value.type == "MalformedLookupResponse"
 
 
 @pytest.mark.asyncio

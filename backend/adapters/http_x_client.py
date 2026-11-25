@@ -206,7 +206,20 @@ class HttpXClient(XClientPort):
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
-                    return None
+                    # Issue #9: None removes the post text, so a 404 counts
+                    # only when its body names this post as gone (X answers a
+                    # deleted post with a problem body). A bare 404 from a
+                    # wrong route or a proxy fails the lookup instead.
+                    try:
+                        body = e.response.json()
+                    except Exception:
+                        body = None
+                    if isinstance(body, dict) and _post_is_gone(body, post_id):
+                        return None
+                    raise ApplicationError(
+                        f"X API returned 404 for post {post_id} without a not-found error naming it",
+                        type="MalformedLookupResponse",
+                    )
                 # R4-SF4: Handle 429 rate limit with typed ApplicationError
                 if e.response.status_code == 429:
                     retry_after_str = e.response.headers.get("Retry-After", "60")
