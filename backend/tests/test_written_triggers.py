@@ -111,9 +111,10 @@ def test_first_person_plural_needs_a_whole_word(sentence):
 
 
 def test_look_alike_letters_and_invisible_characters_do_not_hide_a_trigger():
-    cyrillic_o = "оurs is quicker."  # Cyrillic small o
-    zero_width = "o​ur default is different."
-    fullwidth = "Ｗｅ handle that."  # fullwidth "We"
+    # Written with chr() so the odd characters are visible in the source
+    cyrillic_o = chr(0x043E) + "urs is quicker."  # Cyrillic small o, not Latin o
+    zero_width = "o" + chr(0x200B) + "ur default is different."  # zero-width space inside "our"
+    fullwidth = chr(0xFF37) + chr(0xFF45) + " handle that."  # fullwidth "We"
 
     assert TRIGGER_FIRST_PERSON_PLURAL in _kinds(cyrillic_o)
     assert TRIGGER_FIRST_PERSON_PLURAL in _kinds(zero_width)
@@ -132,6 +133,15 @@ def test_look_alike_letters_and_invisible_characters_do_not_hide_a_trigger():
     ("Dozens of teams do this.", "dozens"),
     ("The p99 was fine.", "p99"),
     ("Zero downtime is the goal.", "zero"),
+    ("It is twice as fast.", "twice"),
+    ("That cut the queue in half.", "half"),
+    ("It has half the latency.", "half"),
+    ("Throughput doubled.", "doubled"),
+    # Ordinals, fractions and "single"/"couple" are numbers too ("any number")
+    ("It was the first to ship that.", "first"),
+    ("A quarter of the calls fail.", "quarter"),
+    ("A single command rolls it back.", "single"),
+    ("It takes a couple of minutes.", "couple"),
 ])
 def test_numbers_fire(sentence, match):
     assert match in _matches(sentence, TRIGGER_NUMBER)

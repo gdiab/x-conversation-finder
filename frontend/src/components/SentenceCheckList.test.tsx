@@ -88,6 +88,20 @@ describe('SentenceCheckList', () => {
     );
   });
 
+  it('does not call a supported claim unsupported when another rule rejects the reply', () => {
+    const check = makeSupportedClaim({
+      passed: false,
+      reason: 'The reply must have at most 1 product claim, and 2 sentences are checked as product claims.',
+    });
+    render(<SentenceCheckList checks={[check]} />);
+
+    const row = screen.getByTestId('sentence-check');
+    expect(within(row).getByText('Rejected')).toBeInTheDocument();
+    expect(within(row).queryByText('Not supported')).not.toBeInTheDocument();
+    expect(row).toHaveTextContent('at most 1 product claim');
+    expect(within(row).getByText('Supporting brief sentence:')).toBeInTheDocument();
+  });
+
   it('marks a sentence the checker was never asked about as not checked', () => {
     const check = makeSentenceCheck({
       passed: false,

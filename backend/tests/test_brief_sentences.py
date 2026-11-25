@@ -98,10 +98,58 @@ def test_setext_headings_are_headings_and_rules_are_not_sentences():
     ]
 
 
-def test_a_colon_line_that_introduces_no_list_stays_a_sentence():
-    brief = "Pricing follows usage:\n\nYou pay per delivery."
+def test_a_colon_line_is_the_context_of_the_paragraph_that_follows_it():
+    """ "Not offered yet:" must stay attached to the sentences it introduces."""
+    brief = "Not offered yet:\n\nSingle sign-on. Audit logs.\n\nBilling is monthly."
 
-    assert [t for _, _, t in _texts(brief)] == ["Pricing follows usage:", "You pay per delivery."]
+    assert _texts(brief) == [
+        ("b1", "Not offered yet", "Single sign-on."),
+        ("b2", "Not offered yet", "Audit logs."),
+        ("b3", "", "Billing is monthly."),  # the lead-in covers one paragraph
+    ]
+
+
+def test_a_colon_line_that_introduces_nothing_stays_a_sentence():
+    assert _texts("Billing is monthly. Pricing follows usage:") == [
+        ("b1", "", "Billing is monthly."),
+        ("b2", "", "Pricing follows usage:"),
+    ]
+    assert _texts("Pricing follows usage:\n\n# Plans\n- Free tier") == [
+        ("b1", "", "Pricing follows usage:"),
+        ("b2", "Plans", "Free tier"),
+    ]
+
+
+def test_a_list_items_continuation_lines_stay_one_sentence_with_it():
+    """A wrapped "- Not supported:" must not lose hold of the names below it."""
+    brief = (
+        "## Integrations\n"
+        "- Not supported:\n"
+        "  Slack and Microsoft Teams.\n"
+        "- Supported\n"
+        "\n"
+        "  Email, in a second paragraph of the item.\n"
+        "- Webhooks\n"
+        "with a lazy continuation line.\n"
+        "\n"
+        "A paragraph after the list.\n"
+    )
+
+    assert _texts(brief) == [
+        ("b1", "Integrations", "Not supported: Slack and Microsoft Teams."),
+        ("b2", "Integrations", "Supported Email, in a second paragraph of the item."),
+        ("b3", "Integrations", "Webhooks with a lazy continuation line."),
+        ("b4", "Integrations", "A paragraph after the list."),
+    ]
+
+
+def test_a_nested_item_sees_its_parents_continuation():
+    brief = "- We do not plan\n  these chat tools:\n  - Teams\n"
+
+    assert _texts(brief) == [
+        ("b1", "", "We do not plan these chat tools:"),
+        ("b2", "We do not plan these chat tools", "Teams"),
+    ]
 
 
 def test_a_brief_sentence_is_never_a_fragment_at_an_unclear_boundary():

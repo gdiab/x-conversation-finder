@@ -338,6 +338,9 @@ def test_two_triggered_sentences_fail_without_a_checker_call():
 @pytest.mark.parametrize("text", [
     "Acme ships.It retries.",  # no space after the period
     "That is hard.Really hard.What are you using?",
+    "Acme works.it retries.it ships.it scales.",  # lowercase joins: four sentences, four claims
+    "That is hard,right?yes it is.",  # a question mark between letters
+    "Hmm...that depends on the queue.",
     "Well... that depends on the queue.",  # an ellipsis may end a sentence
 ])
 def test_a_sentence_that_may_be_two_fails_before_any_checker_call(text):
@@ -347,10 +350,36 @@ def test_a_sentence_that_may_be_two_fails_before_any_checker_call(text):
     assert any("This may be more than one sentence" in reason for _, reason in prepared.structural_failures)
 
 
-def test_ordinary_dots_inside_a_sentence_are_fine():
-    for text in ("Node.js handles that well enough.", "That is roughly 5 of them, e.g. the retry queue."):
-        prepared = prepare_check(text, brief("We count 5 of them."), "Acme", [], [])
-        assert not any("more than one sentence" in r for _, r in prepared.structural_failures), text
+@pytest.mark.parametrize("text", [
+    "Node.js handles that well enough.",
+    "ASP.NET does the same.",
+    "The docs at docs.example.com cover that.",
+    "Put it in config.yaml and restart.",
+    "That is roughly 5 of them, e.g. the retry queue.",
+    "It shipped in the U.S.A before anywhere else.",
+    "Version 2.0 fixed that.",
+])
+def test_ordinary_dots_inside_a_sentence_are_fine(text):
+    prepared = prepare_check(text, brief("We count 5 of them in version 2.0."), "Acme", [], [])
+
+    assert not any("more than one sentence" in r for _, r in prepared.structural_failures)
+
+
+def test_fullwidth_and_ideographic_terminators_end_a_sentence():
+    text = "Acme ships" + chr(0x3002) + "It retries" + chr(0xFF01) + "Does it" + chr(0xFF1F) + "Yes" + chr(0xFF0E) + "Done"
+
+    prepared = prepare_check(text, BRIEF, "Acme", [], [])
+
+    assert len(prepared.sentences) == 5
+    assert "at most 3 sentences (got 5)" in prepared.structural_failures[0][1]
+
+
+@pytest.mark.parametrize("mark", ["?", chr(0xFF1F), chr(0x2047), chr(0x2048)])
+def test_a_question_mark_of_any_width_makes_a_triggered_sentence_a_question(mark):
+    prepared = _prepare(f"Did you know Relay can retry a failed delivery up to five times{mark}")
+
+    assert not prepared.needs_checker
+    assert "must be a statement, not a question" in prepared.structural_failures[0][1]
 
 
 def test_a_line_break_ends_a_sentence():

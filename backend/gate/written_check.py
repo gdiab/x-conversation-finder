@@ -22,8 +22,9 @@ the amendment's wording, each of which can only add a rejection:
 - The checker's answer fails closed: a missing or malformed verdict is read
   as "not supported".
 - A sentence that may be two (a terminator inside it that might end a
-  sentence, as in "Acme ships.It retries.") fails, so the sentence and claim
-  limits cannot be dodged by leaving out a space. A line break ends a sentence.
+  sentence, as in "Acme ships.It retries." or "works.it retries") fails, so
+  the sentence and claim limits cannot be dodged by leaving out a space. A
+  line break ends a sentence, and so does a fullwidth terminator.
 
 The text limits are the amendment's: at most MAX_SENTENCES sentences, at most
 MAX_CHARS characters, at most MAX_PRODUCT_CLAIMS product claim. A claim is
@@ -73,6 +74,9 @@ TRIGGER_NUMBER = "number"
 TRIGGER_COMPARISON = "comparison"
 TRIGGER_FEATURE_TERM = "feature_term"
 
+NO_MENTION_PLAN_FAILURE = "the reply plan says not to mention the product, but the draft has a product claim"
+MENTION_PLAN_FAILURE = "the reply plan says to mention the product, but the draft has no product claim"
+
 TRIGGER_LABELS = {
     TRIGGER_PRODUCT_NAME: "names the product",
     TRIGGER_FIRST_PERSON_PLURAL: "uses we/our/us/ours",
@@ -83,10 +87,12 @@ TRIGGER_LABELS = {
 
 FIRST_PERSON_PLURAL = frozenset({"we", "our", "ours", "us", "ourselves"})
 
-# Number words; any digit counts too. "one" is included: the amendment says
-# "any number", and code cannot tell the pronoun ("which one") from the
-# quantity ("one command"). The drafter is told to keep it out of every
-# sentence but the claim.
+# Number words; any digit counts too. The list is closed and read broadly,
+# because the amendment says "any number": cardinals, ordinals, fractions and
+# multipliers. "one", "first" and "second" are included although a reply often
+# uses them as plain words ("which one", "First, ..."): code cannot tell the
+# two uses apart, and the drafter is told to keep them out of every sentence
+# but the claim.
 NUMBER_WORDS = frozenset(
     """
     zero one two three four five six seven eight nine ten
@@ -94,6 +100,11 @@ NUMBER_WORDS = frozenset(
     twenty thirty forty fifty sixty seventy eighty ninety
     hundred thousand million billion trillion dozen
     hundreds thousands millions billions trillions dozens
+    first second third fourth fifth sixth seventh eighth ninth tenth
+    eleventh twelfth twentieth hundredth thousandth
+    half halves quarter quarters thirds fourths fifths tenths
+    twice thrice double doubles doubled triple triples tripled quadruple
+    single couple
     """.split()
 )
 
@@ -122,7 +133,7 @@ _DIGIT_RUN_RE = re.compile(r"\d+")
 def _fold(text: str) -> str:
     """Text for trigger matching: the claim gate's normalization (NFKC,
     look-alike letters, casefold, single spaces) without invisible format
-    characters, so "o​ur" still reads "our"."""
+    characters, so "our" with a zero-width space inside still reads "our"."""
     visible = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
     return normalize_text(visible)
 
@@ -233,7 +244,8 @@ def find_triggers(
 
 
 def is_question(sentence: str) -> bool:
-    return "?" in sentence or "？" in sentence
+    """A question mark anywhere, in any width or doubled form (NFKC folds them to "?")."""
+    return "?" in unicodedata.normalize("NFKC", sentence)
 
 
 _THOUSANDS_SEPARATOR_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
@@ -296,11 +308,58 @@ class PreparedCheck:
         )
 
 
+# Sentence terminators the claim gate's splitter does not know: fullwidth and
+# ideographic stops and marks, and the doubled marks. A reply that uses one
+# without a space after it still ends a sentence there.
+_OTHER_TERMINATORS = "".join(map(chr, (0x3002, 0xFF0E, 0xFF61, 0xFF01, 0xFF1F, 0x203C, 0x2047, 0x2048, 0x2049)))
+_OTHER_TERMINATOR_RE = re.compile(f"([{_OTHER_TERMINATORS}]+)(?=\\S)")
+
+
+# What may follow a dot inside one word without the dot ending a sentence: a
+# file extension or a domain ending ("Node.js", "docs.example.com"). English
+# words that are also endings ("it", "is", "in", "me", "so") are left out on
+# purpose: "works.it" is two sentences.
+SAFE_DOT_ENDINGS = frozenset(
+    """
+    js ts jsx tsx mjs py rb rs php java kt swift cpp sql sh
+    io ai com org net dev app
+    md json yaml yml toml html css txt csv xml
+    """.split()
+)
+_LETTER = r"[^\W\d_]"
+_JOINED_TERMINATOR_RE = re.compile(rf"{_LETTER}([.!?\u2026]+){_LETTER}")
+
+
+def has_joined_sentences(sentence: str) -> bool:
+    """True if a word of the reply joins two sentences without a space.
+
+    The claim gate's rule (has_unclear_boundary_inside) sees a join only
+    before a capital letter ("fast.It"). In a reply the lowercase join counts
+    too, or "Acme works.it retries.it scales." would be one sentence and one
+    claim. Dotted abbreviations ("e.g", "U.S.A") and names with a known
+    ending ("Node.js") are not joins.
+    """
+    for word in sentence.split():
+        joins = _JOINED_TERMINATOR_RE.findall(word)
+        if not joins:
+            continue
+        if any(join != "." for join in joins):
+            return True  # "agree?yes", "wait...what"
+        labels = [label for label in re.split(r"\.", word.strip("\"'()[]{}<>,;:!?")) if label]
+        if all(len(label) == 1 for label in labels):
+            continue  # "e.g", "U.S.A"
+        if re.sub(r"\W+$", "", labels[-1]).casefold() in SAFE_DOT_ENDINGS:
+            continue  # "Node.js", "docs.example.com"
+        return True
+    return False
+
+
 def split_reply(text: str) -> List[str]:
-    """The sentences of a reply. A line break ends a sentence; within a line
-    the claim gate's splitter decides."""
+    """The sentences of a reply. A line break ends a sentence, and so does a
+    fullwidth or ideographic terminator; within a line the claim gate's
+    splitter decides."""
     sentences: List[str] = []
-    for line in (text or "").splitlines():
+    for line in _OTHER_TERMINATOR_RE.sub("\\1\n", text or "").splitlines():
         sentences.extend(split_into_sentences(line))
     return sentences
 
@@ -341,7 +400,7 @@ def prepare_check(
             + "; ".join(f"sentence {i + 1} {_trigger_summary(triggers[i])}" for i in triggered),
         ])
     for sentence in sentences:
-        if has_unclear_boundary_inside(sentence):
+        if has_unclear_boundary_inside(sentence) or has_joined_sentences(sentence):
             failures.append([
                 sentence,
                 "This may be more than one sentence: a period, question mark or ellipsis inside it "
@@ -448,10 +507,6 @@ def _judge_sentence(
     check.verdict = VERDICT_SUPPORTED
     check.supporting = supporting
     return check
-
-
-NO_MENTION_PLAN_FAILURE = "the reply plan says not to mention the product, but the draft has a product claim"
-MENTION_PLAN_FAILURE = "the reply plan says to mention the product, but the draft has no product claim"
 
 
 def plan_product_failures(checks: Sequence[SentenceCheck], mention_product: Optional[bool]) -> List[str]:

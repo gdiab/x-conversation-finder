@@ -12,9 +12,13 @@ Rules:
 - Prose is split with the claim gate's splitter (split_into_sentences), then
   sentences are joined again wherever the boundary is unclear
   (merge_at_unclear_boundaries), so a brief sentence is never a fragment.
-- A list item is one sentence. Its context is the heading path, the lead-in
-  line that ends in a colon ("Key features:") when present, and the items it
-  is nested under ("Integrations we do not support > Slack").
+- A list item is one sentence, with its continuation lines ("- Not
+  supported:" followed by an indented "Slack and Teams." is one sentence).
+  Its context is the heading path, the lead-in line that ends in a colon
+  ("Key features:") when present, and the items it is nested under
+  ("Integrations we do not support > Slack").
+- A line that ends in a colon is the context of the list or paragraph that
+  follows it, and is a sentence of its own only when nothing follows.
 - Text without a letter or digit (a horizontal rule) is not a sentence.
 - Ids are "b1", "b2", ... in document order.
 
@@ -64,20 +68,25 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     units: List[Tuple[str, str]] = []
     terms: List[str] = []
     headings: List[Tuple[int, str]] = []  # (level, text): the open heading path
-    colon_lead: Optional[str] = None  # lead-in of the list being read
-    pending_lead: Optional[str] = None  # a "...:" sentence that may introduce a list
+    colon_lead: Optional[str] = None  # lead-in of the list or paragraph being read
+    pending_lead: Optional[str] = None  # a "...:" sentence that may introduce what follows
     paragraph: List[str] = []
-    items: List[Tuple[int, str]] = []  # (indent, text): the open items of the list being read
+    # The open items of the list being read: [indent, text, index in units or None]
+    items: List[list] = []
+    blank_since_item = False
 
-    def heading_path() -> str:
-        return " > ".join(text for _, text in headings)
+    def context(*inner: Optional[str]) -> str:
+        path = [text for _, text in headings]
+        return " > ".join(part for part in (*path, *inner) if part)
 
-    def add_unit(text: str, context: str) -> None:
-        if _WORD_RE.search(text):  # a horizontal rule or stray markup is not a sentence
-            units.append((text, context))
+    def add_unit(text: str, where: str) -> Optional[int]:
+        if not _WORD_RE.search(text):  # a horizontal rule or stray markup is not a sentence
+            return None
+        units.append((text, where))
+        return len(units) - 1
 
     def flush_paragraph() -> None:
-        nonlocal pending_lead
+        nonlocal pending_lead, colon_lead
         if not paragraph:
             return
         text = " ".join(paragraph)
@@ -86,16 +95,24 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         if inline:
             terms.extend(_INLINE_SEPARATOR_RE.split(inline.group(2).rstrip(".")))
         sentences = merge_at_unclear_boundaries(split_into_sentences(text))
+        lead, colon_lead = colon_lead, None  # a lead-in covers one paragraph
         if sentences and sentences[-1].rstrip().endswith(":"):
             pending_lead = sentences.pop()
         for sentence in sentences:
-            add_unit(sentence, heading_path())
+            add_unit(sentence, context(lead))
 
     def emit_pending_lead() -> None:
+        """Nothing followed the lead-in: it is a sentence of its own."""
         nonlocal pending_lead
         if pending_lead is not None:
-            add_unit(pending_lead, heading_path())
+            add_unit(pending_lead, context())
             pending_lead = None
+
+    def take_pending_lead() -> None:
+        """The lead-in introduces what follows: it becomes its context."""
+        nonlocal pending_lead, colon_lead
+        if pending_lead is not None:
+            colon_lead, pending_lead = _clean_context(pending_lead), None
 
     def open_heading(level: int, text: str) -> None:
         nonlocal colon_lead
@@ -109,6 +126,7 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     for line in product_brief.splitlines():
         if not line.strip():
             flush_paragraph()
+            blank_since_item = True
             continue
         setext = _SETEXT_RE.match(line)
         if setext:
@@ -128,25 +146,39 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         elif item_match:
             flush_paragraph()
             if pending_lead is not None:
-                colon_lead, pending_lead = _clean_context(pending_lead), None
+                take_pending_lead()
                 items.clear()
             indent, item = _indent(item_match.group(1)), item_match.group(2)
             while items and items[-1][0] >= indent:
                 items.pop()
-            parents = [_clean_context(text) for _, text in items]
+            parents = [_clean_context(open_item[1]) for open_item in items]
             # Everything the item stands under, so an item under
             # "Not supported > Integrations" keeps the "not"
-            context = " > ".join(part for part in (heading_path(), colon_lead, *parents) if part)
-            add_unit(item, context)
+            index = add_unit(item, context(colon_lead, *parents))
             nearest = (parents[-1:] or [colon_lead or ""]) + [headings[-1][1] if headings else ""]
             if any(_FEATURE_WORD_RE.search(part) for part in nearest):
                 terms.append(item)
-            items.append((indent, item))
+            items.append([indent, item, index])
+            blank_since_item = False
+        elif items and not paragraph and (
+            not blank_since_item or _indent(line[: len(line) - len(line.lstrip())]) > items[-1][0]
+        ):
+            # A continuation line of the open list item (wrapped text, or an
+            # indented paragraph inside it): one sentence with the item, so
+            # "- Not supported:" keeps hold of the "Slack and Teams." below it
+            open_item = items[-1]
+            open_item[1] = f"{open_item[1]} {line.strip()}"
+            if open_item[2] is None:
+                open_item[2] = add_unit(open_item[1], context(colon_lead, *(
+                    _clean_context(parent[1]) for parent in items[:-1]
+                )))
+            else:
+                units[open_item[2]] = (open_item[1], units[open_item[2]][1])
         else:
             if not paragraph:
-                emit_pending_lead()
-                colon_lead = None
                 items.clear()
+                colon_lead = None
+                take_pending_lead()
             paragraph.append(line.strip())
     flush_paragraph()
     emit_pending_lead()

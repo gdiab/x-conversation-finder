@@ -46,6 +46,10 @@ function verdictLabel(check: SentenceCheck | EditGateResult): { text: string; co
   if (check.verdict === 'not_checked') {
     return { text: 'Not checked', color: '#f44336' };
   }
+  if (check.verdict === 'supported') {
+    // Supported by the brief, but the reply breaks another rule (see the reason)
+    return { text: 'Rejected', color: '#f44336' };
+  }
   return { text: 'Not supported', color: '#f44336' };
 }
 

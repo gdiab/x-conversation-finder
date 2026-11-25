@@ -121,10 +121,12 @@ class ReplyAgentPort(ABC):
         the model's reply (at most 3 sentences and 280 characters, at most one
         product claim), `segments` is empty, and `written.drafter_hints` lists,
         for each sentence the model says is about the product, the brief
-        sentence ids it says support it. The hints go to the claim checker as
-        suggestions; they are never a verdict. Nothing the drafter returns
-        decides what is checked: the check_written_draft activity splits the
-        text, runs the triggers and asks the independent checker.
+        sentence ids it says support it. The hints are never a verdict, and
+        they are not passed to the claim checker either (it gets no drafting
+        context, see ClaimCheckerPort): they stay on the draft as provenance.
+        Nothing the drafter returns decides what is checked: the
+        check_written_draft activity splits the text, runs the triggers and
+        asks the independent checker.
         
         Adapters must not raise on malformed model output: return what was
         parsed (an empty text fails the check and is redrafted).
