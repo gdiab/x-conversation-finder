@@ -8,12 +8,13 @@ Tests with new quoted-claim architecture:
 4. Replay deterministic
 5. S-6: Tests assert on stored card, not just workflow memory
 
-Issue #14: no test here waits on elapsed time. On the time-skipping test
-server, env.sleep(1) returns early only while nothing is running; while
+Issue #14: no test here passes or fails on elapsed time. On the time-skipping
+test server, env.sleep(1) returns early only while nothing is running; while
 activities run, virtual time follows real time, so env.sleep(1) was a 1 s
 real-time race against research -> plan -> draft -> claim_gate -> store_card.
-Tests now wait on the card write they need (CardWrites) or on an
-asyncio.Event set inside a blocking activity.
+Tests now wait on the card write they need (CardWrites), on an asyncio.Event
+set inside a blocking activity, or (replay test) on recorded history events;
+that last wait re-fetches every 50 ms, which sets only how soon it notices.
 """
 
 import asyncio
