@@ -337,6 +337,40 @@ describe('ReviewCard: error codes (issues #15, #20)', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
+  it('closes the override prompt when the draft changes, so it never acknowledges another draft', async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ edited_text_gate_state: 'failed' });
+    approveMock.mockRejectedValueOnce(postAnywayError());
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(screen.getByRole('button', { name: 'Post Anyway (Override)' })).toBeInTheDocument();
+
+    // The queue reloads with an edited draft (another tab, or this card's edit)
+    const edited = makeCard({ edited_text_gate_state: 'failed' });
+    edited.evidence = makeEvidence({ draft: makeDraft({ text: 'A different synthetic draft.' }) });
+    rerender(<ReviewCard card={edited} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Failing: "Edited synthetic sentence."')).not.toBeInTheDocument();
+  });
+
+  it('closes the override prompt after a successful edit', async () => {
+    const user = userEvent.setup();
+    approveMock.mockRejectedValueOnce(postAnywayError());
+    editMock.mockResolvedValue('Edited synthetic text.');
+    render(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(editMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+  });
+
   it('shows a busy nudge as a notice with the server message', async () => {
     const user = userEvent.setup();
     const detail = 'Cannot nudge while another draft change is in progress. Retry after it completes.';

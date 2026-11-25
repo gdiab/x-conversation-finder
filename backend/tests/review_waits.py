@@ -16,17 +16,14 @@ WAIT_TIMEOUT_SEC = 60
 
 
 async def wait_for_card_ready(handle) -> dict:
-    """Return get_card once the Review has stored its pending card.
+    """Return get_card once the Review has stored its card.
 
     get_card reports "in_progress": true until the workflow task that handled
-    the pending store_card completion (issue #20), which is the same flag the
-    approve, edit and nudge validators check, so an update sent after this
-    returns is not rejected as not ready. The query is re-sent every 50 ms;
-    that sets only how soon the wait notices.
-
-    Also returns when the Review ended before a card was stored. For a Review
-    that skips, the skip card's store may still be running: wait on
-    handle.result() before reading the database.
+    a store_card completion (issue #20): the pending card, or a skip card.
+    For a pending card that task also sets the flag the approve, edit and
+    nudge validators check, so an update sent after this returns is not
+    rejected as not ready, and the stored row can be read. The query is
+    re-sent every 50 ms; that sets only how soon the wait notices.
     """
     async def _poll() -> dict:
         while True:

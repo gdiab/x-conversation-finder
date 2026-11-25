@@ -203,6 +203,10 @@ class ReviewWorkflow:
         # re-fetch would find no card to remove the text from, and the card
         # stored afterwards would hold it.
         self._card_ready = False
+        # issue #20: set once any card row (pending or skipped) is stored.
+        # Until then get_card returns no post or evidence: there is no stored
+        # row for a removal recorded elsewhere to be checked against.
+        self._card_stored = False
         # issue #20: what a pending Review is doing before its card is stored
         # ("researching", "planning", "drafting"); get_card reports it then.
         # Plain state, no commands, so replaying old histories is unaffected.
@@ -277,6 +281,7 @@ class ReviewWorkflow:
                 StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:skip"),
                 start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
             )
+            self._card_stored = True
             
             return None
         
@@ -348,6 +353,7 @@ class ReviewWorkflow:
             StoreCardInput(card=card, idempotency_key=store_key),
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
         )
+        self._card_stored = True
         return None
 
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
@@ -479,7 +485,8 @@ class ReviewWorkflow:
             StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:gate_fail"),
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
         )
-        
+        self._card_stored = True
+
         return None
 
     async def _wait_for_decision(self, workflow_id: str) -> Optional[str]:
@@ -587,6 +594,7 @@ class ReviewWorkflow:
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
         )
         self._card_ready = True
+        self._card_stored = True
         
         # Step 3: Wait for human decision
         result = await self._wait_for_decision(workflow_id)
@@ -1319,26 +1327,28 @@ class ReviewWorkflow:
         Returns a dict matching ReviewCard schema (see models/review.py).
         S-4: Fix .value references - status is already a string.
 
-        issue #20: until the pending card is stored, returns only
-        {"workflow_id", "status", "in_progress", "created_at", "skip_reason",
-        "evidence": None}, with status "researching", "planning" or "drafting"
-        while the Review is still pending ("in_progress": true), or the
-        Review's status if it ended before a card existed (a founder skip).
-        Before, building the card from evidence that did not exist yet failed
-        the query and the API reported "Review not found". The post is left
-        out: nothing has shown it yet, and a removal elsewhere may apply.
+        issue #20: until a card row is stored (the pending card, or a skip
+        card), returns only {"workflow_id", "status", "in_progress": True,
+        "created_at", "skip_reason", "evidence": None}. "status" names the
+        stage ("researching", "planning", "drafting") while the Review is
+        pending, else its status (a founder skip during research: the
+        workflow still drafts and stores the card). Before, building the card
+        from evidence that did not exist yet failed the query and the API
+        reported "Review not found". The post and evidence are left out until
+        the row exists: only then can the API apply a removal recorded by
+        another Review of the post (apply_stored_removal), and store_card
+        stores a removed post's card redacted.
         """
         if (
             not self.workflow_id
             or not self.created_at
             or self.evidence is None
-            or (self.status == "pending" and not self._card_ready)
+            or not self._card_stored
         ):
-            in_progress = self.status == "pending"
             return {
                 "workflow_id": self.workflow_id,
-                "status": self._stage if in_progress else self.status,
-                "in_progress": in_progress,
+                "status": self._stage if self.status == "pending" else self.status,
+                "in_progress": True,
                 "created_at": self.created_at,
                 "skip_reason": self.skip_reason if self.skipped else None,
                 "evidence": None,

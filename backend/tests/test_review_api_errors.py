@@ -191,6 +191,50 @@ async def test_requests_during_research_are_not_ready_and_get_reports_the_stage(
 
 
 @pytest.mark.asyncio
+async def test_founder_skip_during_research_shows_no_post_until_the_card_is_stored(
+    make_review_input, x_activities, api_client
+):
+    """A founder skip during research does not end the workflow: it still
+    drafts and stores the card. Until that row exists the query shows no post
+    or evidence, since a removal recorded by another Review of the post can be
+    applied only against the stored row (ADR-0006 removal duty)."""
+    agent = HeldResearch()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, x_activities, agent), api_client(env.client) as http:
+            review_input = make_review_input()
+            workflow_id = f"review:test:{review_input.post.id}_api_skip_researching"
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
+            )
+            skipped = await _post(http, workflow_id, "skip", reason="Not relevant")
+            assert skipped.status_code == 200, skipped.text
+
+            got = (await http.get(f"/api/reviews/{workflow_id}")).json()
+            assert got["status"] == "skipped" and got["in_progress"] is True
+            assert got["evidence"] is None and "post" not in got
+            assert got["skip_reason"] == "Not relevant"
+
+            agent.release.set()
+            assert await handle.result() == "skipped"
+            got = (await http.get(f"/api/reviews/{workflow_id}")).json()
+            assert got["status"] == "skipped" and "in_progress" not in got
+            assert got["post"]["id"] == review_input.post.id
+            assert _db_card(workflow_id)["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_malformed_body_and_missing_temporal_client_have_codes(api_client):
+    async with api_client(None) as http:
+        response = await http.post("/api/reviews/review:test:any/approve", json={"posted_url": APPROVE_URL})
+        assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+        assert response.json()["errors"]
+
+        response = await _post(http, "review:test:any", "edit", new_text="Synthetic.")
+        assert (response.status_code, response.json()["code"]) == (500, "server_error")
+        assert response.json()["detail"] == "Temporal client not connected"
+
+
+@pytest.mark.asyncio
 async def test_edit_before_the_card_is_stored_is_rejected_then_saved(make_review_input, x_activities, api_client):
     """issue #20 item 2: the draft exists but store_card has not written the
     row. main accepted the edit and its update_card found no row, so the

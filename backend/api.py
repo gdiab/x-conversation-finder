@@ -14,7 +14,9 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowUpdateFailedError
@@ -118,6 +120,16 @@ OTHER_REJECTION = (422, "rejected")
 
 def error_response(status_code: int, code: str, detail: str, **extra) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"code": code, "detail": detail, **extra})
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request, exc: RequestValidationError):
+    """A malformed request body: FastAPI's 422, with a code like every other error."""
+    return error_response(422, "invalid_request", "Invalid request body", errors=jsonable_encoder(exc.errors()))
+
+
+def temporal_not_connected() -> JSONResponse:
+    return error_response(500, "server_error", "Temporal client not connected")
 
 
 def review_error_response(exc: Exception, action: str) -> JSONResponse:
@@ -273,7 +285,7 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
     card is not stored yet (issue #20). See REJECTION_CODES.
     """
     if not temporal_client:
-        raise HTTPException(status_code=500, detail="Temporal client not connected")
+        return temporal_not_connected()
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
@@ -292,7 +304,7 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
 async def skip_review(workflow_id: str, request: SkipRequest):
     """Send skip signal to a review workflow."""
     if not temporal_client:
-        raise HTTPException(status_code=500, detail="Temporal client not connected")
+        return temporal_not_connected()
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
@@ -311,7 +323,7 @@ async def skip_review(workflow_id: str, request: SkipRequest):
 async def edit_review(workflow_id: str, request: EditRequest):
     """Send edit update to a review workflow (errors: see REJECTION_CODES)."""
     if not temporal_client:
-        raise HTTPException(status_code=500, detail="Temporal client not connected")
+        return temporal_not_connected()
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
@@ -331,7 +343,7 @@ async def nudge_review(workflow_id: str, request: NudgeRequest):
     """Send nudge update to a review workflow (errors: see REJECTION_CODES;
     a redraft the gate refuses is 422 "rejected" with its reasons)."""
     if not temporal_client:
-        raise HTTPException(status_code=500, detail="Temporal client not connected")
+        return temporal_not_connected()
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
@@ -356,7 +368,7 @@ async def get_review(workflow_id: str):
     there is no such workflow.
     """
     if not temporal_client:
-        raise HTTPException(status_code=500, detail="Temporal client not connected")
+        return temporal_not_connected()
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
@@ -374,7 +386,7 @@ async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest)
     """Send confirm_posted update to a review workflow (errors: see
     REJECTION_CODES; a URL that is not a reply to the post is 422 "rejected")."""
     if not temporal_client:
-        raise HTTPException(status_code=500, detail="Temporal client not connected")
+        return temporal_not_connected()
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)

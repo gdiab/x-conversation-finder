@@ -60,10 +60,10 @@ async def test_review_workflow_replay(make_review_input, x_activities, reply_act
                 args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
             )
             
-            await env.sleep(1)
-            
-            # Fetch history with full flow
-            history = await handle.fetch_history()
+            # Fetch history with full flow: wait until it shows run() past the
+            # approval write (a sleep raced it, issue #20 review)
+            from backend.tests.test_edit_regate import fetch_history_past_approve
+            history = await fetch_history_past_approve(handle)
             
             # S6 (QA R14): Assert that history contains phrase_id segments
             card = await handle.query("get_card")

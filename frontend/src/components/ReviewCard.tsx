@@ -2,7 +2,7 @@
  * ReviewCard component - shows a single review with evidence and draft.
  */
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { ReviewCard as ReviewCardType } from '../api/client';
 import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId, PostRemovedError, ReviewApiError } from '../api/client';
 import { ReplyFitPanel } from './ReplyFitPanel';
@@ -43,6 +43,16 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const editRequestId = useRef<string | null>(null);
   const nudgeRequestId = useRef<string | null>(null);
   const confirmRequestId = useRef<string | null>(null);
+
+  // The override acknowledges the failures of one draft. Once the draft or
+  // its gate result changes (an edit, a nudge, a reload), close the prompt:
+  // only a fresh post_anyway_required for the current draft reopens it.
+  const closePostAnyway = () => {
+    setShowPostAnywayConfirm(false);
+    setFailingSentences([]);
+  };
+  const draftText = card.evidence.draft?.text;
+  useEffect(closePostAnyway, [draftText, card.edited_text_gate_state]);
 
   const handleApprove = async (postAnyway: boolean = false) => {
     if (!postedUrl.trim()) {
@@ -129,6 +139,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       await editReview(card.workflow_id, editText, editRequestId.current);
       editRequestId.current = null; // Reset for next action
       setIsEditing(false);
+      closePostAnyway();
       onUpdate();
     } catch (err) {
       const wait = retryNotice(err);
@@ -160,6 +171,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       setEditText(newDraft);
       setNudgeInstruction('');
       setIsNudging(false);
+      closePostAnyway();
       onUpdate();
     } catch (err) {
       const wait = retryNotice(err);
@@ -847,7 +859,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                   Post Anyway (Override)
                 </button>
                 <button
-                  onClick={() => setShowPostAnywayConfirm(false)}
+                  onClick={closePostAnyway}
                   disabled={loading}
                   style={{ marginLeft: '8px' }}
                 >
