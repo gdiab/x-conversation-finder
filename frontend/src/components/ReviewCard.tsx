@@ -70,8 +70,6 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       setIsNudging(false);
       setNudgeInstruction('');
       nudgeRequestId.current = null;
-      // A nudge rejection's message quotes the redraft (issue #23)
-      setError(null);
     }
     if (textRemoved || !isEditing) {
       setEditText(draftText ?? '');
@@ -880,7 +878,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       )}
 
       {/* Error Display */}
-      {error && (
+      {/* issue #23: an error can quote the draft (a nudge rejection); none is
+          shown on a removed card, also one that arrives after the removal */}
+      {error && !textRemoved && (
         <div style={{
           backgroundColor: '#ffebee',
           color: '#c62828',
