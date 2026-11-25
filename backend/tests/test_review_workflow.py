@@ -18,6 +18,7 @@ from backend.activities.reply_activities import ReplyActivities
 from backend.activities.store_activities import store_card, update_card
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
+from backend.tests.review_waits import wait_for_card_ready
 
 
 @pytest.mark.asyncio
@@ -50,7 +51,7 @@ async def test_review_workflow_approve(make_review_input, x_activities, reply_ac
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             card = await handle.query("get_card")
             assert card["status"] == "pending"
@@ -110,7 +111,7 @@ async def test_review_workflow_skip(make_review_input, x_activities, reply_activ
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             client_request_id = str(uuid.uuid4())
             await handle.signal(
@@ -152,7 +153,7 @@ async def test_review_workflow_nudge(make_review_input, x_activities, reply_acti
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             client_request_id = str(uuid.uuid4())
             new_draft = await handle.execute_update(
@@ -287,7 +288,7 @@ async def test_review_workflow_approved_not_confirmed(make_review_input, x_activ
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             # Approve but don't confirm
             client_request_id = str(uuid.uuid4())
@@ -333,7 +334,7 @@ async def test_review_workflow_confirm_posted_invalid_url(make_review_input, x_a
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             # Approve
             client_request_id = str(uuid.uuid4())
@@ -391,7 +392,7 @@ async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_ac
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             # Approve with first request ID
             request_id = str(uuid.uuid4())
@@ -806,7 +807,7 @@ async def test_review_workflow_confirm_posted_with_post_1005(x_activities, reply
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             # Approve
             client_request_id = str(uuid.uuid4())

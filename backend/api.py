@@ -19,11 +19,20 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError, RPCStatusCode
 
 from backend.config import get_settings
 from backend.workflows import TopicWatchInput, ReviewInput
 from backend.workflows.topic_watch import TopicWatchWorkflow
-from backend.workflows.review import ReviewWorkflow
+from backend.workflows.review import (
+    ReviewWorkflow,
+    BUSY_ERROR,
+    INVALID_REQUEST_ERROR,
+    INVALID_STATE_ERROR,
+    NOT_READY_ERROR,
+    POST_ANYWAY_REQUIRED_ERROR,
+    POST_REMOVED_ERROR,
+)
 from backend.activities.store_activities import apply_stored_removal, get_all_cards
 from backend.database import init_db
 from backend.budget import get_today_budget
@@ -84,8 +93,58 @@ async def global_exception_handler(request, exc):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal server error"},
+        content={"code": "server_error", "detail": "Internal server error"},
     )
+
+
+# --- Review update errors (issue #15) ---
+# Every error from a review endpoint is JSON {"code": ..., "detail": <message>}
+# plus code-specific fields; the UI switches on "code", never on the message.
+# The Review workflow's validators raise ApplicationError with a type
+# (backend/workflows/review.py); the type picks the status and code here.
+REJECTION_CODES = {
+    NOT_READY_ERROR: (409, "not_ready"),  # card not stored yet: retry shortly
+    BUSY_ERROR: (409, "busy"),  # another change is in flight: retry after it
+    POST_ANYWAY_REQUIRED_ERROR: (409, "post_anyway_required"),  # + gate_state, failing_sentences
+    POST_REMOVED_ERROR: (409, "post_removed"),  # review now skipped; reload it
+    INVALID_STATE_ERROR: (409, "invalid_state"),
+    INVALID_REQUEST_ERROR: (400, "invalid_request"),
+}
+# Any other ApplicationError the Review raises is a business rejection from an
+# update handler (a nudged draft the gate refused, a reply URL that is not a
+# reply to the post): the request was understood and refused.
+OTHER_REJECTION = (422, "rejected")
+
+
+def error_response(status_code: int, code: str, detail: str, **extra) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"code": code, "detail": detail, **extra})
+
+
+def review_error_response(exc: Exception, action: str) -> JSONResponse:
+    """Map an exception from a Review update, signal or query to a response.
+
+    A rejected update (validator or handler) is a WorkflowUpdateFailedError
+    whose str() is only "Workflow update failed"; the reason is its cause.
+    Only failures that are not the Review's own decision (an activity that
+    failed, Temporal unreachable) are 500s.
+    """
+    if isinstance(exc, WorkflowUpdateFailedError) and isinstance(exc.cause, ApplicationError):
+        cause = exc.cause
+        status_code, code = REJECTION_CODES.get(cause.type, OTHER_REJECTION)
+        extra = {}
+        if code == "post_anyway_required":
+            details = cause.details[0] if cause.details and isinstance(cause.details[0], dict) else {}
+            extra = {
+                "gate_state": details.get("gate_state"),
+                "failing_sentences": list(details.get("failing_sentences") or []),
+            }
+        return error_response(status_code, code, cause.message, **extra)
+    if isinstance(exc, RPCError) and exc.status == RPCStatusCode.NOT_FOUND:
+        # No such workflow, or (for updates and signals) it has already ended
+        return error_response(404, "not_found", f"Review not found or no longer running: {exc.message}")
+    reason = exc.cause if isinstance(exc, WorkflowUpdateFailedError) else exc
+    logger.error(f"{action} failed: {reason}", exc_info=exc)
+    return error_response(500, "server_error", f"{action} failed: {reason}")
 
 
 class StartWatchRequest(BaseModel):
@@ -207,7 +266,11 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
     Send approve update to a review workflow.
     
     Per ADR-0006 Amendment E: Now an Update (not Signal) with validation.
-    Requires post_anyway=true if edited text failed re-gate.
+    Requires post_anyway=true if edited text failed re-gate: otherwise 409
+    with code "post_anyway_required", "gate_state" and "failing_sentences"
+    (issue #15). 409 "post_removed" means the target post was gone on the
+    re-fetch and the review is skipped (issue #9); 409 "not_ready" means the
+    card is not stored yet (issue #20). See REJECTION_CODES.
     """
     if not temporal_client:
         raise HTTPException(status_code=500, detail="Temporal client not connected")
@@ -221,14 +284,8 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         
         return {"message": result}
 
-    except WorkflowUpdateFailedError as e:
-        # issue #9: return the update's own reason, not "Workflow update failed",
-        # so the UI can tell "post removed" (409) from other failures
-        cause = e.cause
-        code = 409 if isinstance(cause, ApplicationError) and cause.type == "PostRemoved" else 500
-        raise HTTPException(status_code=code, detail=str(cause))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return review_error_response(e, "Approve")
 
 
 @app.post("/api/reviews/{workflow_id}/skip")
@@ -247,12 +304,12 @@ async def skip_review(workflow_id: str, request: SkipRequest):
         return {"message": "Skipped"}
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return review_error_response(e, "Skip")
 
 
 @app.post("/api/reviews/{workflow_id}/edit")
 async def edit_review(workflow_id: str, request: EditRequest):
-    """Send edit update to a review workflow."""
+    """Send edit update to a review workflow (errors: see REJECTION_CODES)."""
     if not temporal_client:
         raise HTTPException(status_code=500, detail="Temporal client not connected")
     
@@ -266,12 +323,13 @@ async def edit_review(workflow_id: str, request: EditRequest):
         return {"message": "Edited", "new_text": result}
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return review_error_response(e, "Edit")
 
 
 @app.post("/api/reviews/{workflow_id}/nudge")
 async def nudge_review(workflow_id: str, request: NudgeRequest):
-    """Send nudge update to a review workflow."""
+    """Send nudge update to a review workflow (errors: see REJECTION_CODES;
+    a redraft the gate refuses is 422 "rejected" with its reasons)."""
     if not temporal_client:
         raise HTTPException(status_code=500, detail="Temporal client not connected")
     
@@ -285,30 +343,36 @@ async def nudge_review(workflow_id: str, request: NudgeRequest):
         return {"message": "Nudged", "new_draft": result}
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return review_error_response(e, "Nudge")
 
 
 @app.get("/api/reviews/{workflow_id}")
 async def get_review(workflow_id: str):
-    """Get a review card by workflow ID."""
+    """Get a review card by workflow ID.
+
+    issue #20: while the Review is still researching, planning or drafting,
+    the result is the in-progress state from get_card ("in_progress": true,
+    "status" names the stage, "evidence": null), not a 404. 404 only when
+    there is no such workflow.
+    """
     if not temporal_client:
         raise HTTPException(status_code=500, detail="Temporal client not connected")
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
         result = await handle.query("get_card")
-        
-        # issue #9: a removal recorded outside this workflow (eval re-fetch,
-        # another account's Review of the post) applies to the query too
-        return apply_stored_removal(workflow_id, result)
-    
     except Exception as e:
-        raise HTTPException(status_code=404, detail="Review not found")
+        return review_error_response(e, "Get review")
+
+    # issue #9: a removal recorded outside this workflow (eval re-fetch,
+    # another account's Review of the post) applies to the query too
+    return apply_stored_removal(workflow_id, result)
 
 
 @app.post("/api/reviews/{workflow_id}/confirm_posted")
 async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest):
-    """Send confirm_posted update to a review workflow."""
+    """Send confirm_posted update to a review workflow (errors: see
+    REJECTION_CODES; a URL that is not a reply to the post is 422 "rejected")."""
     if not temporal_client:
         raise HTTPException(status_code=500, detail="Temporal client not connected")
     
@@ -322,7 +386,7 @@ async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest)
         return {"message": "Confirmed", "result": result}
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return review_error_response(e, "Confirm posted")
 
 
 @app.get("/api/budget")

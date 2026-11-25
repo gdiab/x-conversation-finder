@@ -36,6 +36,7 @@ from backend.activities.store_activities import (
 from backend.gate.reply_fit import assess_reply_fit, check_span, thread_position, verify_materials
 from backend.models import Author, Evidence, FounderMaterial, Post, ReplyFit, ReviewCard
 from backend.workflows.review import ReviewWorkflow
+from backend.tests.review_waits import wait_for_card_ready
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "reply_fit_posts.json").read_text())
 NOW = datetime.fromisoformat(FIXTURE["now"])
@@ -561,7 +562,7 @@ async def test_passing_post_is_drafted(make_review_input, x_activities):
                 ReviewWorkflow.run, review_input,
                 id=f"review:test:{post.id}_pass_{uuid.uuid4().hex[:6]}", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             card = await handle.query("get_card")
             assert card["status"] == "pending"
             assert agent.plan_calls == 1

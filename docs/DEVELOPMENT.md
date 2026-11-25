@@ -169,6 +169,25 @@ Each re-fetch reserves one X read through `backend/budget.py` (about $0.005, ADR
 
 Pending cards are **not** re-checked on a schedule, so X cost stays proportional to approvals and eval runs. A deleted post's text can therefore stay on a card that is never approved (pending, skipped or expired) until the eval re-fetches it.
 
+### Review API errors (issues #15, #20)
+
+The review endpoints (`approve`, `edit`, `nudge`, `confirm_posted`, `skip`, `GET /api/reviews/{id}`) answer an error with JSON `{"code": ..., "detail": <message>}`. The UI switches on `code`, never on the message. The Review workflow's validators raise `ApplicationError` with a type; `backend/api.py` (`REJECTION_CODES`) maps it:
+
+| code | HTTP | meaning |
+|---|---|---|
+| `post_anyway_required` | 409 | the edited text failed the re-gate; also `gate_state` and `failing_sentences`. Approve again with `post_anyway=true` |
+| `not_ready` | 409 | the pending card is not stored yet; try again in a moment. The card row is written inside `store_card` slightly before the workflow marks the card ready, so the UI can briefly show a card this rejects |
+| `busy` | 409 | another edit, nudge or approval is running; try again after it |
+| `post_removed` | 409 | approve's re-fetch found the target post gone; the review is skipped |
+| `invalid_state` / `invalid_request` | 409 / 400 | not allowed in this status / bad input |
+| `rejected` | 422 | an update handler refused it (a nudged draft failed the gate, a URL that is not a reply to the post) |
+| `not_found` | 404 | no such workflow, or it has ended (updates and signals) |
+| `server_error` | 500 | not the Review's decision: an activity failed, Temporal is unreachable |
+
+Approve, edit and nudge are rejected as `not_ready` until the pending card is stored, so no update writes to a card row that does not exist yet. Until then `GET /api/reviews/{id}` returns `{"status": "researching" | "planning" | "drafting", "in_progress": true, "evidence": null, ...}` instead of a 404.
+
+Tests that start a Review wait for its card with `backend/tests/review_waits.py` (`wait_for_card_ready`), not `env.sleep(1)`: on the time-skipping server that sleep is a real-time race against the activity chain.
+
 ### Key Constraints (ADRs)
 
 - **ADR-0002:** Workflow shape with signals/updates/queries

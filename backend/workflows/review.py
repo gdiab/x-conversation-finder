@@ -45,6 +45,22 @@ PERSIST_FOUNDER_SKIP_PATCH_ID = "persist-founder-skip-v1"
 # Before, the timeout always expired the Review; old histories keep that.
 DECISION_AT_DEADLINE_PATCH_ID = "decision-wins-at-deadline-v1"
 
+# Update rejection types (issue #15). Validators raise ApplicationError with one
+# of these types; backend/api.py maps the type to an HTTP status and a "code"
+# the UI switches on, so no caller parses the message text. Validators do not
+# run when an accepted update replays, so these need no patch.
+NOT_READY_ERROR = "NotReady"  # the pending card is not stored yet; retry shortly
+BUSY_ERROR = "Busy"  # another edit, nudge or approval is in flight; retry after it
+POST_ANYWAY_REQUIRED_ERROR = "PostAnywayRequired"  # details: {"gate_state", "failing_sentences"}
+INVALID_STATE_ERROR = "InvalidState"  # not allowed in the Review's current status
+INVALID_REQUEST_ERROR = "InvalidRequest"  # bad input (empty text, malformed URL)
+POST_REMOVED_ERROR = "PostRemoved"  # approve's re-fetch found the target post gone
+
+
+def _rejection(message: str, error_type: str, *details) -> ApplicationError:
+    """An update rejection the API reports as a client error (issue #15)."""
+    return ApplicationError(message, *details, type=error_type, non_retryable=True)
+
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
         ReviewCard,
@@ -187,6 +203,10 @@ class ReviewWorkflow:
         # re-fetch would find no card to remove the text from, and the card
         # stored afterwards would hold it.
         self._card_ready = False
+        # issue #20: what a pending Review is doing before its card is stored
+        # ("researching", "planning", "drafting"); get_card reports it then.
+        # Plain state, no commands, so replaying old histories is unaffected.
+        self._stage = "researching"
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -545,11 +565,13 @@ class ReviewWorkflow:
         # Step 1b: Plan the reply (issue #5). Guarded by a patch so Review
         # workflows started before this step replay unchanged.
         if workflow.patched(REPLY_PLAN_PATCH_ID):
+            self._stage = "planning"
             evidence = await self._plan_reply(evidence, workflow_id, created_at)
             if evidence is None:
                 return "skipped"
-        
+
         # Step 2: Draft (with claim gate retry logic)
+        self._stage = "drafting"
         evidence = await self._draft_and_validate(evidence, workflow_id, created_at)
         if evidence is None:
             return "skipped"
@@ -724,9 +746,12 @@ class ReviewWorkflow:
         finally:
             self._approve_in_flight_count -= 1
         if not found:
-            raise ApplicationError(POST_REMOVED_SKIP_REASON, type="PostRemoved", non_retryable=True)
+            raise ApplicationError(POST_REMOVED_SKIP_REASON, type=POST_REMOVED_ERROR, non_retryable=True)
         if self.status != "pending":
             # The founder skipped, or the review expired, during the re-fetch
+            # Handler-body failures keep their pre-issue-#15 shape (they are
+            # recorded as update outcomes); the API reports an untyped one as
+            # 422 "rejected"
             raise ApplicationError(f"Cannot approve in status {self.status}", non_retryable=True)
 
     async def _refetch_target(self, key: str) -> bool:
@@ -807,27 +832,33 @@ class ReviewWorkflow:
         - B2: Validates gate results correspond to CURRENT text (via hash)
         - B3: Uses counter instead of bool for edit-in-flight check
         - S-3: Concurrency guard - rejects if edit is in flight
+        Rejections are typed for the API (issue #15, see NOT_READY_ERROR).
         """
         if self.status not in ["pending", "approved"]:
-            raise ValueError(f"Cannot approve in status {self.status}")
-        
+            raise _rejection(f"Cannot approve in status {self.status}", INVALID_STATE_ERROR)
+
         # issue #9: nothing to approve until the draft card is stored (a
         # Review starts as "pending" while it is still researching/drafting).
-        # Validators do not run when an accepted update replays.
+        # Validators do not run when an accepted update replays. issue #20: the
+        # card row is written inside store_card, and this flag is set only when
+        # the workflow handles that activity's completion, so for a moment the
+        # UI can show a card this rejects: NotReady tells it to retry.
         if not self._card_ready:
-            raise ValueError("Cannot approve before the draft card is ready")
-        
+            raise _rejection("Cannot approve before the draft card is ready", NOT_READY_ERROR)
+
         # S-3 + B3: Reject if any edit is currently in flight (count > 0)
         if self._edit_in_flight_count > 0:
-            raise ValueError("Cannot approve while edit gate is in progress. Retry after edit completes.")
-        
+            raise _rejection("Cannot approve while edit gate is in progress. Retry after edit completes.", BUSY_ERROR)
+
         # issue #5: likewise, do not approve a draft a nudge is about to replace
         if self._nudge_in_flight_count > 0:
-            raise ValueError("Cannot approve while a nudge is in progress. Retry after it completes.")
+            raise _rejection("Cannot approve while a nudge is in progress. Retry after it completes.", BUSY_ERROR)
 
         # issue #9: one approve at a time (its target re-fetch awaits an activity)
         if self._approve_in_flight_count > 0:
-            raise ValueError("Cannot approve while another approval is in progress. Retry after it completes.")
+            raise _rejection(
+                "Cannot approve while another approval is in progress. Retry after it completes.", BUSY_ERROR
+            )
 
         # QA R12: Hash check removed (dead code).
         # The edit Update atomically sets both draft.text and edited_text_hash from the same
@@ -839,16 +870,22 @@ class ReviewWorkflow:
         if self.edited_text_gate_state:
             # C: Require post_anyway=True for both failed and not_checked states
             if self.edited_text_gate_state in ["failed", "not_checked"] and not post_anyway:
+                # issue #15: the details carry what the UI's override prompt shows
+                failing = [r.sentence for r in (self.edited_text_gate_results or []) if not r.passed]
+                details = {"gate_state": self.edited_text_gate_state, "failing_sentences": failing}
                 if self.edited_text_gate_state == "failed":
-                    failing_count = sum(1 for r in self.edited_text_gate_results if not r.passed)
-                    raise ValueError(
-                        f"Edited text has {failing_count} failing sentence(s). "
-                        f"Set post_anyway=true to approve anyway."
+                    raise _rejection(
+                        f"Edited text has {len(failing)} failing sentence(s). "
+                        f"Set post_anyway=true to approve anyway.",
+                        POST_ANYWAY_REQUIRED_ERROR,
+                        details,
                     )
                 else:  # not_checked
-                    raise ValueError(
+                    raise _rejection(
                         "Edited text gate check failed (retries exhausted). "
-                        "Set post_anyway=true to approve anyway."
+                        "Set post_anyway=true to approve anyway.",
+                        POST_ANYWAY_REQUIRED_ERROR,
+                        details,
                     )
     
     @workflow.signal
@@ -971,16 +1008,16 @@ class ReviewWorkflow:
         """Validator for confirm_posted Update - checks state and URL format. S-4: Fix .value reference."""
         # Check state
         if not self.approved:
-            raise ValueError("Cannot confirm: draft not approved yet")
-        
+            raise _rejection("Cannot confirm: draft not approved yet", INVALID_STATE_ERROR)
+
         # S-4: status is already a string, not an enum
         if self.status != "approved":
-            raise ValueError(f"Cannot confirm in status {self.status}")
-        
+            raise _rejection(f"Cannot confirm in status {self.status}", INVALID_STATE_ERROR)
+
         # Validate URL format
         match = re.search(r'/status/(\d+)', reply_url)
         if not match:
-            raise ValueError(f"Invalid X post URL: {reply_url}")
+            raise _rejection(f"Invalid X post URL: {reply_url}", INVALID_REQUEST_ERROR)
     
     @workflow.update
     async def edit(self, new_text: str, client_request_id: str) -> str:
@@ -1094,26 +1131,29 @@ class ReviewWorkflow:
         # S-4: Use string comparison, not .value (status is already a string)
         if self.status == "approved":
             # S-1: Reject edits once approved
-            raise ValueError("Cannot edit after approval")
-        
+            raise _rejection("Cannot edit after approval", INVALID_STATE_ERROR)
+
         if self.status not in ["pending"]:
-            raise ValueError(f"Cannot edit in status {self.status}")
-        
-        if not self.evidence or not self.evidence.draft:
-            raise ValueError("No draft to edit")
-        
+            raise _rejection(f"Cannot edit in status {self.status}", INVALID_STATE_ERROR)
+
+        # issue #20: the draft exists before the card row is stored; an edit
+        # accepted then would write update_card to a row that does not exist
+        # yet, and the stored card would keep the unedited draft
+        if not self._card_ready or not self.evidence or not self.evidence.draft:
+            raise _rejection("Cannot edit before the draft card is ready", NOT_READY_ERROR)
+
         # issue #5: a nudge in flight would overwrite this edit (or be
         # overwritten by it) across its activity awaits
         if self._nudge_in_flight_count > 0:
-            raise ValueError("Cannot edit while a nudge is in progress. Retry after it completes.")
+            raise _rejection("Cannot edit while a nudge is in progress. Retry after it completes.", BUSY_ERROR)
 
         # issue #9: an edit during approve's re-fetch would change the draft
         # after the validator checked its gate state
         if self._approve_in_flight_count > 0:
-            raise ValueError("Cannot edit while an approval is in progress. Retry after it completes.")
+            raise _rejection("Cannot edit while an approval is in progress. Retry after it completes.", BUSY_ERROR)
 
         if not new_text or not new_text.strip():
-            raise ValueError("New text cannot be empty")
+            raise _rejection("New text cannot be empty", INVALID_REQUEST_ERROR)
     
     @workflow.update
     async def nudge(self, instruction: str, client_request_id: str) -> str:
@@ -1251,22 +1291,25 @@ class ReviewWorkflow:
         """Validator for nudge Update - checks state and input. S-4: Fix .value reference."""
         # S-4: status is already a string, not an enum
         if self.status not in ["pending", "approved"]:
-            raise ValueError(f"Cannot nudge in status {self.status}")
-        
-        if not self.evidence or not self.evidence.draft:
-            raise ValueError("No draft to nudge")
-        
+            raise _rejection(f"Cannot nudge in status {self.status}", INVALID_STATE_ERROR)
+
+        # issue #20: as for edit, the nudge's update_card needs the stored row
+        if not self._card_ready or not self.evidence or not self.evidence.draft:
+            raise _rejection("Cannot nudge before the draft card is ready", NOT_READY_ERROR)
+
         # issue #5: serialize draft changes; a nudge overlapping an edit or
         # another nudge could leave the card and the query on different drafts
         if self._edit_in_flight_count > 0 or self._nudge_in_flight_count > 0:
-            raise ValueError("Cannot nudge while another draft change is in progress. Retry after it completes.")
+            raise _rejection(
+                "Cannot nudge while another draft change is in progress. Retry after it completes.", BUSY_ERROR
+            )
 
         # issue #9: likewise during approve's target re-fetch
         if self._approve_in_flight_count > 0:
-            raise ValueError("Cannot nudge while an approval is in progress. Retry after it completes.")
-        
+            raise _rejection("Cannot nudge while an approval is in progress. Retry after it completes.", BUSY_ERROR)
+
         if not instruction or not instruction.strip():
-            raise ValueError("Instruction cannot be empty")
+            raise _rejection("Instruction cannot be empty", INVALID_REQUEST_ERROR)
     
     @workflow.query
     def get_card(self) -> dict:
@@ -1275,21 +1318,32 @@ class ReviewWorkflow:
         
         Returns a dict matching ReviewCard schema (see models/review.py).
         S-4: Fix .value references - status is already a string.
+
+        issue #20: until the pending card is stored, returns only
+        {"workflow_id", "status", "in_progress", "created_at", "skip_reason",
+        "evidence": None}, with status "researching", "planning" or "drafting"
+        while the Review is still pending ("in_progress": true), or the
+        Review's status if it ended before a card existed (a founder skip).
+        Before, building the card from evidence that did not exist yet failed
+        the query and the API reported "Review not found". The post is left
+        out: nothing has shown it yet, and a removal elsewhere may apply.
         """
-        # Early returns for workflows that haven't stored metadata yet
-        # S-4: status is already a string, not an enum
-        if not self.workflow_id or not self.created_at:
+        if (
+            not self.workflow_id
+            or not self.created_at
+            or self.evidence is None
+            or (self.status == "pending" and not self._card_ready)
+        ):
+            in_progress = self.status == "pending"
             return {
-                "status": self.status,
+                "workflow_id": self.workflow_id,
+                "status": self._stage if in_progress else self.status,
+                "in_progress": in_progress,
+                "created_at": self.created_at,
+                "skip_reason": self.skip_reason if self.skipped else None,
                 "evidence": None,
             }
-        
-        if not self.input:
-            return {
-                "status": self.status,
-                "evidence": None,
-            }
-        
+
         # Use _build_card helper to ensure consistency with ReviewCard structure
         card = self._build_card(self.workflow_id, self.input.post, self.created_at)
         card_dict = card.to_dict()

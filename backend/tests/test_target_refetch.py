@@ -38,6 +38,7 @@ from backend.activities.x_activities import XActivities
 from backend.adapters import FakeReplyAgent, FakeXClient
 from backend.budget import get_today_budget, set_kill_switch
 from backend.workflows.review import TARGET_REFETCH_PATCH_ID, ReviewWorkflow
+from backend.tests.review_waits import wait_for_card_ready
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TARGET_ID = "1001"  # conftest sample_post
@@ -149,7 +150,7 @@ async def _start(env, make_review_input, suffix):
         id=f"review:test:{review_input.post.id}_{suffix}",
         task_queue="test",
     )
-    await env.sleep(1)
+    await wait_for_card_ready(handle)
     card = await handle.query("get_card")
     assert card["status"] == "pending", card
     return review_input, handle
@@ -390,7 +391,7 @@ async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
                 ReviewWorkflow.run, other_input,
                 id=f"review:other:{other_input.post.id}_refetch_multi_b", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(other)
             assert _db_card(other.id)["post"]["text"] == review_input.post.text
 
             with pytest.raises(WorkflowUpdateFailedError):
@@ -422,7 +423,7 @@ async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
                 ReviewWorkflow.run, late_input,
                 id=f"review:late:{late_input.post.id}_refetch_multi_c", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(late)
             stored_late = _db_card(late.id)
             assert stored_late["post"]["text_removed"] is True
             for fragment in POST_FRAGMENTS:
@@ -453,10 +454,10 @@ async def test_approve_is_rejected_until_the_card_is_stored(make_review_input):
             with pytest.raises(WorkflowUpdateFailedError) as excinfo:
                 await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
             assert "before the draft card is ready" in str(excinfo.value.cause)
+            assert excinfo.value.cause.type == "NotReady"  # issue #20: a retryable "not ready yet"
             assert client.target_lookups == 0
             agent.release.set()
-            await env.sleep(1)
-            assert (await handle.query("get_card"))["status"] == "pending"
+            assert (await wait_for_card_ready(handle))["status"] == "pending"
             assert _db_card(handle.id)["post"]["text"] == review_input.post.text
 
 

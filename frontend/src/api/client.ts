@@ -212,21 +212,78 @@ export async function approveReview(
   });
   
   if (!response.ok) {
-    const errorText = await response.text();
-    // issue #9: 409 means the target post was removed and the review skipped
-    if (response.status === 409) {
-      throw new PostRemovedError(errorText);
-    }
-    throw new Error(`Failed to approve review: ${response.statusText}. ${errorText}`);
+    throw await reviewError(response, 'approve review');
+  }
+}
+
+/**
+ * Error codes of the review endpoints (issue #15, backend/api.py REJECTION_CODES).
+ * Switch on these, never on the message text.
+ */
+export type ReviewErrorCode =
+  | 'post_anyway_required' // edited text failed the re-gate; approve again with post_anyway
+  | 'not_ready' // the card is not stored yet (issue #20); try again in a moment
+  | 'busy' // another edit, nudge or approval is running; try again after it
+  | 'post_removed' // approve found the target post gone; the review is skipped
+  | 'invalid_state'
+  | 'invalid_request'
+  | 'rejected' // the workflow refused it (e.g. a nudged draft failed the gate)
+  | 'not_found'
+  | 'server_error';
+
+/** A failed review request, with the API's code and message (issue #15). */
+export class ReviewApiError extends Error {
+  readonly status: number;
+  readonly code: ReviewErrorCode | null;
+  readonly detail: string;
+  /** For post_anyway_required: the edited sentences that failed the gate. */
+  readonly failingSentences: string[];
+
+  constructor(message: string, status: number, code: ReviewErrorCode | null, detail: string, failingSentences: string[] = []) {
+    super(message);
+    this.name = 'ReviewApiError';
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+    this.failingSentences = failingSentences;
+  }
+
+  /** Not a failure: the request can be sent again shortly (not_ready, busy). */
+  get retryLater(): boolean {
+    return this.code === 'not_ready' || this.code === 'busy';
   }
 }
 
 /** Approve found the target post deleted or no longer visible on X; the review is now skipped (issue #9). */
-export class PostRemovedError extends Error {
-  constructor(detail: string) {
-    super(`Post removed: the post was deleted or is no longer visible on X, so this review was skipped. ${detail}`);
+export class PostRemovedError extends ReviewApiError {
+  constructor(detail: string, status: number = 409) {
+    super(
+      `Post removed: the post was deleted or is no longer visible on X, so this review was skipped. ${detail}`,
+      status,
+      'post_removed',
+      detail,
+    );
     this.name = 'PostRemovedError';
   }
+}
+
+/** Build the error for a failed review request from its JSON body {code, detail, ...}. */
+async function reviewError(response: Response, action: string): Promise<ReviewApiError> {
+  let body: { code?: unknown; detail?: unknown; failing_sentences?: unknown } = {};
+  try {
+    body = await response.json();
+  } catch {
+    // Not JSON (a proxy error page, an empty body): fall back to the status text
+  }
+  const code = typeof body.code === 'string' ? (body.code as ReviewErrorCode) : null;
+  const detail = typeof body.detail === 'string' && body.detail ? body.detail : response.statusText;
+  if (code === 'post_removed') {
+    return new PostRemovedError(detail, response.status);
+  }
+  const failing = Array.isArray(body.failing_sentences)
+    ? body.failing_sentences.filter((s): s is string => typeof s === 'string')
+    : [];
+  return new ReviewApiError(`Failed to ${action}: ${detail}`, response.status, code, detail, failing);
 }
 
 export async function skipReview(workflowId: string, reason: string, clientRequestId: string): Promise<void> {
@@ -240,7 +297,7 @@ export async function skipReview(workflowId: string, reason: string, clientReque
   });
   
   if (!response.ok) {
-    throw new Error(`Failed to skip review: ${response.statusText}`);
+    throw await reviewError(response, 'skip review');
   }
 }
 
@@ -255,7 +312,7 @@ export async function editReview(workflowId: string, newText: string, clientRequ
   });
   
   if (!response.ok) {
-    throw new Error(`Failed to edit review: ${response.statusText}`);
+    throw await reviewError(response, 'edit review');
   }
   
   const result = await response.json();
@@ -273,7 +330,7 @@ export async function nudgeReview(workflowId: string, instruction: string, clien
   });
   
   if (!response.ok) {
-    throw new Error(`Failed to nudge review: ${response.statusText}`);
+    throw await reviewError(response, 'nudge review');
   }
   
   const result = await response.json();
@@ -291,7 +348,7 @@ export async function confirmPostedReview(workflowId: string, replyUrl: string, 
   });
   
   if (!response.ok) {
-    throw new Error(`Failed to confirm posted: ${response.statusText}`);
+    throw await reviewError(response, 'confirm posted');
   }
 }
 

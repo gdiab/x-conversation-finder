@@ -16,6 +16,7 @@ from backend.activities import XActivities, ReplyActivities
 from backend.activities.store_activities import store_card, update_card, delete_post_text
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
+from backend.tests.review_waits import wait_for_card_ready
 
 
 @pytest.mark.asyncio
@@ -50,7 +51,7 @@ async def test_review_workflow_replay(make_review_input, x_activities, reply_act
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             # Step 1: Approve with reply URL
             import uuid
@@ -176,7 +177,7 @@ async def test_review_workflow_replay_with_skip(make_review_input, x_activities,
                 task_queue="test",
             )
             
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             
             # Skip
             import uuid
