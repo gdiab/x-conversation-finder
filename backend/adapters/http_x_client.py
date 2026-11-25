@@ -148,12 +148,6 @@ class HttpXClient(XClientPort):
         
         # Parse tweets
         for tweet in data["data"]:
-            # Issue #17: track the newest ID over every returned post, also
-            # one dropped below: X billed it, and the next poll's since_id
-            # must not fetch it again.
-            if newest_id is None or int(tweet["id"]) > int(newest_id):
-                newest_id = tweet["id"]
-            
             author = authors_by_id.get(tweet.get("author_id"))
             if not author:
                 # S-7: If author not in includes, skip this tweet rather than using placeholder
@@ -177,6 +171,11 @@ class HttpXClient(XClientPort):
                 url=f"https://x.com/{author.username}/status/{tweet['id']}",
             )
             posts.append(post)
+            
+            # Track newest ID (over converted posts only: a dropped post is
+            # fetched again by the next poll, and counted again, issue #17)
+            if newest_id is None or int(tweet["id"]) > int(newest_id):
+                newest_id = tweet["id"]
         
         # Issue #17: X bills every post object in `data`, including the ones
         # dropped above for a missing author.

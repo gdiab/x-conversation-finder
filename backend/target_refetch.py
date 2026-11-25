@@ -125,7 +125,16 @@ async def refetch_stored_card_target(
     if post is not None:
         return "found"
 
-    # Issue #17: X returned no post object for the gone post and billed nothing
+    _delete_post_text_sync(
+        DeletePostTextInput(
+            workflow_id=workflow_id,
+            idempotency_key=f"{workflow_id}:delete_text:eval:{run_key}",
+            post_id=card["post"]["id"],
+        )
+    )
+    # Issue #17: X returned no post object for the gone post and billed
+    # nothing. Released after the removal, so a failed release cannot keep
+    # the text; it then stays counted (the safe direction).
     release_x_reservation(
         reserved_reads=1,
         reservation_date=reservation_date,
@@ -133,12 +142,5 @@ async def refetch_stored_card_target(
         workflow_run_id=EVAL_REFETCH_RUN_ID,
         activity_id=call_id,
         cost_per_read=settings.x_post_read_cost,
-    )
-    _delete_post_text_sync(
-        DeletePostTextInput(
-            workflow_id=workflow_id,
-            idempotency_key=f"{workflow_id}:delete_text:eval:{run_key}",
-            post_id=card["post"]["id"],
-        )
     )
     return "removed"

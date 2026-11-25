@@ -209,8 +209,8 @@ call is counted per Temporal activity attempt:
 - X reads are counted per post object X returns in `data` (ADR-0005: Posts
   Read is billed per resource; issue #17). Search returns a `SearchResult`
   whose `billable_reads` includes posts the adapter drops because their author
-  is missing from `includes.users`, and whose `newest_id` covers them too, so
-  the next poll does not fetch them again.
+  is missing from `includes.users`. `newest_id` covers converted posts only, so
+  a dropped newer post is fetched (and counted) again by the next poll.
 - A reservation that is already closed refuses to authorize another request
   (`ReservationClosed`). `lookup_post` counts 1 read for an attempt that returns
   the post, or post data the adapter cannot convert (`MalformedLookupResponse`,

@@ -968,3 +968,31 @@ async def test_eval_refetch_unknown_card():
     client = TargetClient(["found"])
     assert await refetch_stored_card_target(client, "review:test:nope", "run1", review_is_running=_finished) == "no_card"
     assert client.target_lookups == 0
+
+
+@pytest.mark.asyncio
+async def test_eval_refetch_removes_text_even_if_the_release_fails(make_review_input, monkeypatch):
+    """Issue #17: the gone lookup's read is released after the removal, so a
+    failed release (e.g. a locked ledger) cannot keep the post text. The read
+    then stays counted, the safe direction."""
+    import backend.target_refetch as tr
+
+    workflow_id = await _stored_card(make_review_input, "eval_release_fails")
+
+    def failing_release(**kwargs):
+        raise RuntimeError("synthetic: ledger locked")
+
+    monkeypatch.setattr(tr, "release_x_reservation", failing_release)
+    client = TargetClient(["gone"])
+    reads_before = _x_reads()
+    with pytest.raises(RuntimeError, match="ledger locked"):
+        await tr.refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished)
+
+    stored = _db_card(workflow_id)
+    assert stored["post"]["text_removed"] is True
+    for fragment in POST_FRAGMENTS:
+        assert fragment not in json.dumps(stored)
+    assert _x_reads() - reads_before == 1
+    # The next eval run sees the removal and reads nothing
+    assert await tr.refetch_stored_card_target(client, workflow_id, "run2", review_is_running=_finished) == "removed"
+    assert client.target_lookups == 1

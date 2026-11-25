@@ -19,8 +19,8 @@ class SearchResult:
     post objects in its `data`, including posts the adapter could not convert
     and left out of `posts` (for example one whose author is missing from
     `includes.users`). X bills Posts Read per resource returned (ADR-0005).
-    newest_id is the newest post ID in `data`, converted or not, so the next
-    poll's since_id does not fetch (and pay for) a dropped post again.
+    newest_id is the newest ID among `posts`, so a dropped newer post is
+    fetched (and billed) again by the next poll rather than skipped for good.
     """
 
     posts: List[Post]

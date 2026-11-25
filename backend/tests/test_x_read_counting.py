@@ -136,8 +136,9 @@ async def test_http_search_counts_posts_dropped_for_a_missing_author(monkeypatch
 
     assert [p.id for p in result.posts] == ["9002"]
     assert result.billable_reads == 3
-    # The newest returned post, though dropped, so the next since_id skips it
-    assert result.newest_id == "9003"
+    # Unchanged cursor: the newest converted post, so the next poll can still
+    # pick up the dropped 9003 (and counts it again)
+    assert result.newest_id == "9002"
 
 
 @pytest.mark.asyncio
@@ -151,7 +152,7 @@ async def test_http_search_counts_a_post_without_author_id(monkeypatch):
 
     assert result.posts == []
     assert result.billable_reads == 1
-    assert result.newest_id == "9004"
+    assert result.newest_id is None
 
 
 @pytest.mark.asyncio
@@ -177,7 +178,7 @@ async def test_search_activity_counts_the_dropped_posts(monkeypatch):
     )
 
     assert [p.id for p in output.posts] == ["9002"]
-    assert output.newest_id == "9003"
+    assert output.newest_id == "9002"
     budget = get_today_budget()
     assert budget["x_reads"] == 3
     assert budget["x_cost_usd"] == pytest.approx(3 * get_settings().x_post_read_cost)
