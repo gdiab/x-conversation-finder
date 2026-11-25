@@ -927,3 +927,328 @@ def test_per_call_kind_costs_are_rounded_once_after_summing():
     summary = summarize([], harness.Counter(), cap)
 
     assert summary["calls"]["check"]["cost_usd"] == pytest.approx(4e-5)
+
+
+
+# ---------- issue #31: re-fetch each post from X before drafting ----------
+
+
+class LookupX:
+    """A fake X client for the re-fetch: per post id "found", "gone" (X says
+    the post is gone: lookup_post returns None) or an exception to raise.
+    Records every lookup."""
+
+    def __init__(self, outcomes):
+        self.outcomes = dict(outcomes)
+        self.lookups = []
+
+    async def lookup_post(self, post_id):
+        self.lookups.append(post_id)
+        outcome = self.outcomes[post_id]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if outcome == "gone":
+            return None
+        return harness.value_to_type(harness.Post, _post(post_id))
+
+
+async def _not_running(workflow_id):
+    return False
+
+
+def _app_db_path() -> Path:
+    from backend.config import get_settings
+
+    return Path(get_settings().get_resolved_database_url()[len("sqlite:///"):])
+
+
+def _app_db_with_cards(rows) -> Path:
+    """Store cards (workflow_id, post id) in the app's test database (the
+    re-fetch records removals there), with each post in stored_posts too."""
+    from backend.database import StoredPostDB, get_db
+
+    now = datetime.now(timezone.utc).isoformat()
+    db = get_db()
+    seen = set()
+    try:
+        for workflow_id, post_id in rows:
+            db.add(ReviewCardDB(
+                workflow_id=workflow_id, post_data=_post(post_id), evidence_data=_evidence(post_id, plan=True),
+                status="skipped", created_at=now, updated_at=now, edit_seq=0,
+            ))
+            if post_id not in seen:
+                seen.add(post_id)
+                db.add(StoredPostDB(post_id=post_id, post_data=_post(post_id), stored_at=now))
+        db.commit()
+    finally:
+        db.close()
+    return _app_db_path()
+
+
+def _stored_post(post_id: str) -> dict:
+    from backend.database import StoredPostDB, get_db
+
+    db = get_db()
+    try:
+        return dict(db.get(StoredPostDB, post_id).post_data)
+    finally:
+        db.close()
+
+
+def _stored_card(workflow_id: str) -> dict:
+    db = __import__("backend.database", fromlist=["get_db"]).get_db()
+    try:
+        return dict(db.get(ReviewCardDB, workflow_id).post_data)
+    finally:
+        db.close()
+
+
+def _x_reads() -> float:
+    from backend.budget import get_today_budget
+
+    return get_today_budget()["x_reads"]
+
+
+def _cap() -> SpendCap:
+    return SpendCap(cap_usd=1.0, input_cost_usd=1e-6, output_cost_usd=1e-6)
+
+
+def _refetcher(x, cap=None, is_running=_not_running, **kwargs) -> harness.Refetcher:
+    return harness.Refetcher(x, "test-run", is_running, cap, 0.005, **kwargs)
+
+
+TOPICS_31 = {f"review:t:{n}": TOPIC for n in range(3101, 3106)}
+
+
+@pytest.mark.asyncio
+async def test_each_post_is_looked_up_once_per_run_not_once_per_sample():
+    db = _app_db_with_cards([("review:t:3101", "3101"), ("review:u:3101", "3101"), ("review:t:3102", "3102")])
+    topics = {**TOPICS_31, "review:u:3101": TOPIC}
+    settings = {**SETTINGS, f"u:{TOPIC}": SETTINGS[f"t:{TOPIC}"]}
+    reviews, _ = load_stored_reviews(db, topics)
+    x = LookupX({"3101": "found", "3102": "found"})
+    cap = _cap()
+    refetch = _refetcher(x, cap)
+    reads_before = _x_reads()
+
+    records, excluded, stopped = await run_harness(
+        reviews, settings, ScriptedAgent(), CountingChecker(),
+        plans={}, max_attempts=2, samples=3, cap=cap, refetch=refetch,
+    )
+
+    # Two posts, three cards (one post under two accounts), three samples each
+    assert sorted(x.lookups) == ["3101", "3102"]
+    assert len(records) == 9 and not stopped and not excluded
+    assert _x_reads() - reads_before == 2  # the app's ledger counts each read once
+    summary = summarize(records, excluded, cap, refetch=refetch)
+    assert summary["refetch"] == "on"
+    assert summary["refetch_outcomes"] == {"found": 2}
+    assert summary["calls"]["x_lookup"] == {"calls": 2, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.01}
+    assert summary["cost_usd"] == pytest.approx(0.01)
+    # The lookups are not model calls of any post's run
+    assert all(r.model_calls == 0 for r in records)
+
+
+@pytest.mark.asyncio
+async def test_a_post_x_reports_gone_is_skipped_and_its_removal_recorded_through_the_app():
+    db = _app_db_with_cards([("review:t:3101", "3101"), ("review:t:3102", "3102")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    x = LookupX({"3101": "gone", "3102": "found"})
+    cap = _cap()
+    refetch = _refetcher(x, cap)
+    agent = ScriptedAgent()
+    plans = {"review:t:3101": dataclasses.asdict(PLAN)}  # an earlier run's cached plan
+    reads_before = _x_reads()
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, agent, CountingChecker(), plans=plans, max_attempts=2, cap=cap,
+        is_removed=lambda post_id: harness.removal_recorded(db, post_id), refetch=refetch,
+    )
+
+    assert [r.workflow_id for r in records] == ["review:t:3102"]
+    assert all(request.post.id == "3102" for request in agent.requests)  # 3101 never reached the model
+    assert dict(excluded) == {"removed_at_refetch": 1}
+    assert plans == {}  # the cached plan quoted the post
+    # Recorded through delete_post_text: the card and the stored post
+    card, stored = _stored_card("review:t:3101"), _stored_post("3101")
+    assert card["text_removed"] is True and stored["text_removed"] is True
+    assert POST_TEXT not in json.dumps(card) and POST_TEXT not in json.dumps(stored)
+    assert POST_TEXT in json.dumps(_stored_card("review:t:3102"))
+    # A gone post returned no post object: neither the ledger nor the cap bills it
+    assert _x_reads() - reads_before == 1
+    summary = summarize(records, excluded, cap, refetch=refetch)
+    assert summary["refetch_outcomes"] == {"found": 1, "removed": 1}
+    assert summary["calls"]["x_lookup"]["calls"] == 2
+    assert summary["calls"]["x_lookup"]["cost_usd"] == pytest.approx(0.005)
+    # A later run leaves the card out without asking X again
+    again, excluded_again = load_stored_reviews(db, TOPICS_31)
+    assert [r.workflow_id for r in again] == ["review:t:3102"]
+    assert excluded_again["post_text_removed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_skips_the_post_without_recording_a_removal():
+    import httpx
+
+    request = httpx.Request("GET", "https://api.x.com/2/tweets/3101")
+    db = _app_db_with_cards([("review:t:3101", "3101"), ("review:t:3102", "3102")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    x = LookupX({"3101": httpx.ConnectTimeout("synthetic", request=request), "3102": RuntimeError("synthetic")})
+    cap = _cap()
+    refetch = _refetcher(x, cap)
+    agent = ScriptedAgent()
+
+    records, excluded, stopped = await run_harness(
+        reviews, SETTINGS, agent, CountingChecker(), plans={}, max_attempts=2, cap=cap, refetch=refetch,
+    )
+
+    assert records == [] and agent.requests == [] and not stopped
+    assert dict(excluded) == {"lookup_failed": 2}
+    for workflow_id, post_id in (("review:t:3101", "3101"), ("review:t:3102", "3102")):
+        assert not _stored_card(workflow_id).get("text_removed")
+        assert _stored_post(post_id)["text"] == POST_TEXT
+    summary = summarize(records, excluded, cap, refetch=refetch)
+    assert summary["refetch_outcomes"] == {"failed": 2}
+    assert summary["refetch_failure_types"] == {"ConnectTimeout": 1, "RuntimeError": 1}
+    # Never connected: not billed; a failure after the request may have been: counted
+    assert summary["calls"]["x_lookup"]["cost_usd"] == pytest.approx(0.005)
+    assert "synthetic" not in summary_markdown(summary)
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_over_the_app_budget_fails_without_an_x_call():
+    from backend.budget import set_kill_switch
+
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    x = LookupX({"3101": "gone"})
+    refetch = _refetcher(x, _cap())
+    set_kill_switch(True)
+    try:
+        records, excluded, _ = await run_harness(
+            reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, refetch=refetch,
+        )
+    finally:
+        set_kill_switch(False)
+
+    assert x.lookups == [] and records == [] and dict(excluded) == {"lookup_failed": 1}
+    assert not _stored_card("review:t:3101").get("text_removed")
+    assert list(refetch.failures) == ["BudgetExceeded"]
+
+
+@pytest.mark.asyncio
+async def test_the_spend_cap_refuses_a_lookup_and_stops_the_run():
+    db = _app_db_with_cards([("review:t:3101", "3101"), ("review:t:3102", "3102")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    x = LookupX({"3101": "found", "3102": "found"})
+    cap = SpendCap(cap_usd=0.007, input_cost_usd=1e-6, output_cost_usd=1e-6)  # room for one read
+    reads_before = _x_reads()
+
+    records, _, stopped = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        cap=cap, refetch=_refetcher(x, cap),
+    )
+
+    assert stopped and x.lookups == ["3101"]
+    assert [r.workflow_id for r in records] == ["review:t:3101"]
+    assert cap.spent_usd == pytest.approx(0.005)
+    assert _x_reads() - reads_before == 1  # the refused lookup reserved nothing
+
+
+@pytest.mark.asyncio
+async def test_a_card_whose_review_still_runs_is_left_out_without_a_lookup():
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    x = LookupX({"3101": "gone"})
+
+    async def running(workflow_id):
+        return True
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        refetch=_refetcher(x, is_running=running),
+    )
+
+    assert records == [] and x.lookups == [] and dict(excluded) == {"review_running": 1}
+    assert not _stored_card("review:t:3101").get("text_removed")
+
+
+@pytest.mark.asyncio
+async def test_a_pending_wal_checkpoint_is_retried_and_the_post_counts_as_removed(monkeypatch):
+    import backend.database
+
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+    x = LookupX({"3101": "gone"})
+    results = iter([False, False, True])  # a reader holds an old snapshot twice
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: next(results))
+    refetch = _refetcher(x, checkpoint_wait_seconds=0)
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, refetch=refetch,
+    )
+
+    assert records == [] and dict(excluded) == {"removed_at_refetch": 1}
+    assert x.lookups == ["3101"]  # the retries found the card removed: no second read
+    assert refetch.checkpoint_pending == 0
+    assert _stored_card("review:t:3101")["text_removed"] is True
+
+    stuck = _refetcher(LookupX({}), checkpoint_attempts=2, checkpoint_wait_seconds=0)
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: False)
+    assert await stuck(reviews[0]) == "removed" and stuck.checkpoint_pending == 1
+
+
+@pytest.mark.asyncio
+async def test_without_refetch_no_x_call_is_made_and_the_summary_says_so(tmp_path, no_x):
+    reviews, excluded = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, excluded=excluded,
+    )
+
+    summary = summarize(records, excluded, None, refetch=False)
+    assert summary["refetch"] == "off" and "refetch_outcomes" not in summary
+    assert "refetch" not in summarize(records, excluded, None)  # a recount keeps the report's own
+
+
+def test_a_removal_recorded_only_on_the_stored_post_leaves_the_card_out(tmp_path):
+    db = _make_db(tmp_path / "cards.db")
+    engine = create_engine(f"sqlite:///{db}")
+    from backend.database import StoredPostDB
+
+    with sessionmaker(bind=engine)() as session:
+        session.add(StoredPostDB(post_id="2002", post_data=_post("2002", removed=True), stored_at="2026-11-25"))
+        session.commit()
+    engine.dispose()
+
+    reviews, excluded = load_stored_reviews(db, TOPICS)
+
+    assert [r.workflow_id for r in reviews] == ["review:t:2001"]
+    assert excluded["post_text_removed"] == 2
+    assert harness.removal_recorded(db, "2002") and not harness.removal_recorded(db, "2001")
+
+
+def _script():
+    script = Path(__file__).resolve().parents[2] / "scripts" / "redraft_harness.py"
+    sys.path.insert(0, str(script.parent))
+    try:
+        import redraft_harness
+    finally:
+        sys.path.remove(str(script.parent))
+    return redraft_harness
+
+
+@pytest.mark.asyncio
+async def test_the_script_refuses_a_refetch_it_cannot_do_as_the_app(tmp_path):
+    from backend.config import get_settings
+
+    redraft_harness = _script()
+    args = SimpleNamespace(label="t")
+    fake = get_settings()  # the tests' settings: the fake X client
+    with pytest.raises(SystemExit, match="real X client"):
+        await redraft_harness._refetcher(args, fake, None, _app_db_path())
+
+    real = fake.model_copy(update={"x_client_adapter": "real", "x_bearer_token": "synthetic-token"})
+    copy = _make_db(tmp_path / "copy.db")
+    with pytest.raises(SystemExit, match="not the app's database"):
+        await redraft_harness._refetcher(args, real, None, copy)
