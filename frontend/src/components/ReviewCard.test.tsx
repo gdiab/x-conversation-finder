@@ -402,3 +402,32 @@ describe('ReviewCard: edit and skip actions', () => {
     expect(skipMock).toHaveBeenLastCalledWith(card.workflow_id, 'off topic', expect.stringMatching(/^req_/));
   });
 });
+
+describe('ReviewCard: post removed (issue #9)', () => {
+  it('shows "Post removed" instead of the post text on a removed card', () => {
+    const card = makeCard({
+      status: 'skipped',
+      skip_reason: 'Post removed: the target post was deleted or is no longer visible on X',
+    });
+    card.post = { ...card.post, text: '[removed - post deleted]', text_removed: true };
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText(/Post removed: it was deleted or is no longer visible on X/)).toBeInTheDocument();
+    expect(screen.queryByText('[removed - post deleted]')).not.toBeInTheDocument();
+  });
+
+  it('reloads the queue without an error when approve finds the post removed', async () => {
+    const { PostRemovedError } = await import('../api/client');
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    approveMock.mockRejectedValueOnce(new PostRemovedError('removed'));
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.type(screen.getAllByPlaceholderText('Paste URL of your posted reply')[0], 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Post removed: the post was deleted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
+  });
+});

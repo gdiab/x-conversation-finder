@@ -12,6 +12,28 @@ from temporalio.exceptions import ApplicationError
 from backend.ports import XClientPort
 from backend.models import Post, Author
 
+# Issue #9: X API v2 problem types meaning the post is gone or no longer
+# visible to us (deleted, or its author went protected); the removal duty
+# applies to both. Shapes from the X API v2 docs, not yet seen live.
+POST_GONE_PROBLEM_TYPES = (
+    "https://api.twitter.com/2/problems/resource-not-found",
+    "https://api.twitter.com/2/problems/not-authorized-for-resource",
+)
+
+
+def _post_is_gone(body: dict, post_id: str) -> bool:
+    """True when a lookup body without data carries a post-gone error for this post."""
+    errors = body.get("errors")
+    if not isinstance(errors, list):
+        return False
+    for error in errors:
+        if not isinstance(error, dict) or error.get("type") not in POST_GONE_PROBLEM_TYPES:
+            continue
+        resource_id = error.get("resource_id", error.get("value"))
+        if resource_id is not None and str(resource_id) == str(post_id):
+            return True
+    return False
+
 
 class HttpXClient(XClientPort):
     """Real X API v2 client using bearer token authentication."""
@@ -184,7 +206,18 @@ class HttpXClient(XClientPort):
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
-                    return None
+                    # Issue #9: None removes the post text, so a 404 counts
+                    # only when its body names this post as gone (X answers a
+                    # deleted post with a problem body). Any other 404 fails
+                    # the lookup as the HTTP error it is (issue #8 releases the
+                    # read for a refused request).
+                    try:
+                        body = e.response.json()
+                    except Exception:
+                        body = None
+                    if isinstance(body, dict) and _post_is_gone(body, post_id):
+                        return None
+                    raise
                 # R4-SF4: Handle 429 rate limit with typed ApplicationError
                 if e.response.status_code == 429:
                     retry_after_str = e.response.headers.get("Retry-After", "60")
@@ -204,7 +237,15 @@ class HttpXClient(XClientPort):
             data = response.json()
         
         if "data" not in data:
-            return None
+            # Issue #9: None means "the post is gone" and makes the target
+            # re-fetch remove its text, so only an error naming this post as
+            # not found or not visible counts; any other body fails the lookup.
+            if _post_is_gone(data, post_id):
+                return None
+            raise ApplicationError(
+                f"X API lookup of post {post_id} returned neither the post nor a not-found error",
+                type="MalformedLookupResponse",
+            )
         
         tweet = data["data"]
         
@@ -220,9 +261,14 @@ class HttpXClient(XClientPort):
                 verified=user_data.get("verified", False),
             )
         else:
-            # R4-SF3: Real X API should always include author when expansions=author_id
-            # If missing, return None rather than using placeholder data
-            return None
+            # R4-SF3: Real X API should always include author when expansions=author_id.
+            # Never use placeholder data. Issue #9: and never return None here,
+            # since None means "not found" and makes the target re-fetch remove
+            # the post text; the post exists, so fail the lookup (retryable).
+            raise ApplicationError(
+                f"X API returned post {post_id} without its author (expansions=author_id)",
+                type="MalformedLookupResponse",
+            )
         
         metrics = tweet.get("public_metrics", {})
         

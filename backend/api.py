@@ -17,13 +17,14 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowUpdateFailedError
+from temporalio.exceptions import ApplicationError
 
 from backend.config import get_settings
 from backend.workflows import TopicWatchInput, ReviewInput
 from backend.workflows.topic_watch import TopicWatchWorkflow
 from backend.workflows.review import ReviewWorkflow
-from backend.activities.store_activities import get_all_cards
+from backend.activities.store_activities import apply_stored_removal, get_all_cards
 from backend.database import init_db
 from backend.budget import get_today_budget
 
@@ -219,7 +220,13 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         )
         
         return {"message": result}
-    
+
+    except WorkflowUpdateFailedError as e:
+        # issue #9: return the update's own reason, not "Workflow update failed",
+        # so the UI can tell "post removed" (409) from other failures
+        cause = e.cause
+        code = 409 if isinstance(cause, ApplicationError) and cause.type == "PostRemoved" else 500
+        raise HTTPException(status_code=code, detail=str(cause))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -291,7 +298,9 @@ async def get_review(workflow_id: str):
         handle = temporal_client.get_workflow_handle(workflow_id)
         result = await handle.query("get_card")
         
-        return result
+        # issue #9: a removal recorded outside this workflow (eval re-fetch,
+        # another account's Review of the post) applies to the query too
+        return apply_stored_removal(workflow_id, result)
     
     except Exception as e:
         raise HTTPException(status_code=404, detail="Review not found")

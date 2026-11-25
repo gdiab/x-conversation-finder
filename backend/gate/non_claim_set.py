@@ -28,6 +28,12 @@ import unicodedata
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
+# Issue #9: identifiers come from the model. Gate errors flow into stored skip
+# reasons and redraft steers, where the removal duty cannot find a post quote
+# hidden in them, so a model-supplied identifier is echoed or kept only when
+# it is a known one (a listed phrase, or a passage of the founder material).
+UNKNOWN_IDENTIFIER = "<unknown>"
+
 
 @dataclass
 class NonClaimPhrase:
@@ -77,6 +83,11 @@ def get_phrase_by_id(phrase_id: str) -> Optional[NonClaimPhrase]:
     Returns the phrase object, or None if the ID is not found.
     """
     return _PHRASE_BY_ID.get(phrase_id)
+
+
+def known_phrase_id(phrase_id) -> str:
+    """phrase_id itself if it is in the fixed phrase list, else UNKNOWN_IDENTIFIER."""
+    return phrase_id if isinstance(phrase_id, str) and get_phrase_by_id(phrase_id) else UNKNOWN_IDENTIFIER
 
 
 def get_phrase_text(phrase_id: str) -> Optional[str]:
@@ -334,19 +345,19 @@ def validate_draft_composition(segments: List[dict]) -> Optional[CompositionViol
             
             # Check for repeats
             if phrase_id in phrase_ids_seen:
-                return CompositionViolation(f"Phrase {phrase_id} repeats in draft")
+                return CompositionViolation(f"Phrase {known_phrase_id(phrase_id)} repeats in draft")
             phrase_ids_seen.add(phrase_id)
             
             # Look up category
             phrase = get_phrase_by_id(phrase_id)
             if not phrase:
-                return CompositionViolation(f"Unknown phrase_id: {phrase_id}")
+                return CompositionViolation("Unknown phrase_id (not in the fixed phrase list)")
             
             category = phrase.category
             if category != "opener":
                 has_non_opener = True
         else:
-            return CompositionViolation(f"Invalid segment kind: {kind}")
+            return CompositionViolation("Invalid segment kind (must be 'claim' or 'non_claim')")
         
         # Check order
         if categories_seen:

@@ -225,9 +225,13 @@ async def test_lookup_post_not_found():
         mock_client = AsyncMock()
         mock_client_class.return_value.__aenter__.return_value = mock_client
         
-        # Mock 404 response
+        # Mock 404 response naming the post as not found (issue #9)
         mock_response_obj = Mock()
         mock_response_obj.status_code = 404
+        mock_response_obj.json.return_value = {
+            "errors": [{"resource_id": "nonexistent_id", "title": "Not Found Error",
+                        "type": "https://api.twitter.com/2/problems/resource-not-found"}]
+        }
         mock_request = Mock()
         error = httpx.HTTPStatusError("Not Found", request=mock_request, response=mock_response_obj)
         mock_response_obj.raise_for_status.side_effect = error
@@ -236,6 +240,30 @@ async def test_lookup_post_not_found():
         post = await client.lookup_post("nonexistent_id")
     
     assert post is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [ValueError("not JSON"), {"title": "Not Found", "status": 404}, {}])
+async def test_lookup_post_bare_404_raises(body):
+    """Issue #9: a 404 that does not name the post (a wrong route, a proxy)
+    must not read as "post deleted", which would remove its text. It is
+    raised as the HTTP error, so issue #8 releases the refused read."""
+
+    client = HttpXClient("test_bearer_token_123")
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_response_obj = Mock()
+        mock_response_obj.status_code = 404
+        if isinstance(body, Exception):
+            mock_response_obj.json.side_effect = body
+        else:
+            mock_response_obj.json.return_value = body
+        error = httpx.HTTPStatusError("Not Found", request=Mock(), response=mock_response_obj)
+        mock_response_obj.raise_for_status.side_effect = error
+        mock_client.get.return_value = mock_response_obj
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.lookup_post("1234567890")
 
 
 @pytest.mark.asyncio
@@ -338,3 +366,101 @@ async def test_search_recent_tracks_newest_id():
     # Should track the highest ID (2000), not the most recent by timestamp
     assert newest_id == "2000"
     assert len(posts) == 3
+
+
+def _mock_lookup_response(mock_client_class, body):
+    mock_client = AsyncMock()
+    mock_client_class.return_value.__aenter__.return_value = mock_client
+    mock_response_obj = Mock()
+    mock_response_obj.raise_for_status.return_value = None
+    mock_response_obj.json.return_value = body
+    mock_client.get.return_value = mock_response_obj
+
+
+@pytest.mark.asyncio
+async def test_lookup_post_200_with_only_errors_is_not_found():
+    """Issue #9: X answers a lookup of a deleted post with 200 and an errors
+    array (no data); that reads as not found, which triggers the removal duty."""
+    client = HttpXClient("test_bearer_token_123")
+    body = {
+        "errors": [
+            {
+                "value": "1234567890",
+                "detail": "Could not find tweet with id: [1234567890].",
+                "title": "Not Found Error",
+                "resource_type": "tweet",
+                "parameter": "id",
+                "resource_id": "1234567890",
+                "type": "https://api.twitter.com/2/problems/resource-not-found",
+            }
+        ]
+    }
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        assert await client.lookup_post("1234567890") is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_post_without_author_raises_instead_of_not_found():
+    """Issue #9: a post returned without its author still exists, so the
+    lookup fails (retryable) rather than returning None, which would make the
+    target re-fetch remove the post text."""
+    from temporalio.exceptions import ApplicationError
+
+    client = HttpXClient("test_bearer_token_123")
+    body = {"data": {"id": "1234567890", "text": "Synthetic post", "author_id": "author_123"}}
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        with pytest.raises(ApplicationError) as excinfo:
+            await client.lookup_post("1234567890")
+    assert excinfo.value.type == "MalformedLookupResponse"
+    assert not excinfo.value.non_retryable
+
+
+@pytest.mark.asyncio
+async def test_lookup_post_not_authorized_is_gone():
+    """Issue #9: a post whose author went protected is no longer visible to
+    us; the removal duty treats it like a deleted post."""
+    client = HttpXClient("test_bearer_token_123")
+    body = {
+        "errors": [
+            {
+                "value": "1234567890",
+                "detail": "Sorry, you are not authorized to see the Tweet with id: [1234567890].",
+                "title": "Authorization Error",
+                "resource_type": "tweet",
+                "parameter": "id",
+                "resource_id": "1234567890",
+                "type": "https://api.twitter.com/2/problems/not-authorized-for-resource",
+            }
+        ]
+    }
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        assert await client.lookup_post("1234567890") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"errors": "not a list"},
+        {"errors": [{"title": "Invalid Request", "type": "https://api.twitter.com/2/problems/invalid-request"}]},
+        # A not-found error about a different resource (e.g. an expansion)
+        {"errors": [{"resource_id": "999", "type": "https://api.twitter.com/2/problems/resource-not-found"}]},
+        # A not-found error that does not say which resource
+        {"errors": [{"title": "Not Found Error", "type": "https://api.twitter.com/2/problems/resource-not-found"}]},
+    ],
+)
+async def test_lookup_post_other_bodies_without_data_raise(body):
+    """Issue #9: a 200 without data and without a matching post-gone error
+    must not read as not found (that would remove the post text)."""
+    from temporalio.exceptions import ApplicationError
+
+    client = HttpXClient("test_bearer_token_123")
+    with patch("httpx.AsyncClient") as mock_client_class:
+        _mock_lookup_response(mock_client_class, body)
+        with pytest.raises(ApplicationError) as excinfo:
+            await client.lookup_post("1234567890")
+    assert excinfo.value.type == "MalformedLookupResponse"

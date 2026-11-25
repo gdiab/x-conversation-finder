@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from backend.models import Evidence, Post, ReplyPlan
 from backend.planning import (
@@ -13,6 +14,7 @@ from backend.planning import (
 )
 from backend.ports import ReplyAgentPort
 from backend.budget import meter_inference
+from backend.activities.store_activities import card_post_text_removed
 from backend.gate.reply_fit import assess_reply_fit
 
 
@@ -162,6 +164,16 @@ class ReplyActivities:
             f"Drafting reply for post {input.evidence.post_id} "
             f"steer={input.steer} (key: {input.idempotency_key})"
         )
+        
+        # Issue #9: once this Review's stored card records that the post was
+        # removed (here or through another account's Review of it), its
+        # evidence may quote a deleted post: do not send it to the model.
+        if card_post_text_removed(activity.info().workflow_id):
+            raise ApplicationError(
+                "Post removed: the target post was deleted or is no longer visible on X; not redrafting",
+                type="PostRemoved",
+                non_retryable=True,
+            )
         
         # Budget (issue #8): metered per paid call of this attempt; see research_post.
         with meter_inference() as meter:

@@ -55,8 +55,11 @@ def test_db_isolation(tmp_path, monkeypatch, request):
     db_path = tmp_path / "test.db"
     db_url = f"sqlite:///{db_path}"
     
-    # Point config at tmp DB
+    # Point config at tmp DB. get_settings() is cached, so clear it too, or
+    # every test after the first would share the first test's DB (issue #9:
+    # post-level removal records made that sharing visible).
     monkeypatch.setenv("DATABASE_URL", db_url)
+    get_settings.cache_clear()
     
     # Initialize fresh DB (reset_db_engine already cleared the engine)
     init_db()
@@ -66,6 +69,7 @@ def test_db_isolation(tmp_path, monkeypatch, request):
     set_kill_switch(False)
     
     yield db_path
+    get_settings.cache_clear()
 
 
 @pytest.fixture

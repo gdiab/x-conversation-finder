@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 import asyncio
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm.attributes import flag_modified
 
 from backend.models import ReviewCard, Evidence
@@ -13,6 +14,126 @@ from backend.models.reply_plan import reply_plan_card_fields
 # Review workflow's get_card query uses the same value.
 POST_TEXT_REMOVED = "[removed - post deleted]"
 
+# Issue #9: skip reason for a pending Review whose target post returned 404 on
+# the re-fetch at approve time. The frontend shows "Post removed" for it.
+POST_REMOVED_SKIP_REASON = "Post removed: the target post was deleted or is no longer visible on X"
+
+
+def _redact_material(material: Dict[str, Any], passage_unverified: bool = False) -> Dict[str, Any]:
+    """A founder material without its model-written relevance note and source
+    label, and without its passage when that was never checked against the
+    brief (issue #9)."""
+    redacted = dict(material)
+    if passage_unverified and redacted.get("passage"):
+        redacted["passage"] = POST_TEXT_REMOVED
+    if redacted.get("relevance"):
+        redacted["relevance"] = POST_TEXT_REMOVED
+    if redacted.get("source") and redacted["source"] != "product_brief":
+        redacted["source"] = POST_TEXT_REMOVED
+    return redacted
+
+
+# Issue #9: gate-derived text the Review workflow builds from model output.
+# Cards stored before the gate stopped echoing model identifiers can carry a
+# post quote in these, so a removal redacts them by provenance (this prefix
+# and the [marker] failure rows are code-written; founder text is kept).
+GATE_SKIP_REASON_PREFIX = "Not enough evidence:"  # review.py _draft_and_validate
+GATE_STEER_PREFIX = "Previous draft failed claim gate."  # review.py _draft_and_validate
+GATE_DETAILS_REMOVED = "details removed with the post"
+
+
+def redact_skip_reason(reason: Optional[str]) -> Optional[str]:
+    """A skip reason without gate details built from model output (issue #9)."""
+    if isinstance(reason, str) and reason.startswith(GATE_SKIP_REASON_PREFIX):
+        return f"{GATE_SKIP_REASON_PREFIX} {GATE_DETAILS_REMOVED}"
+    return reason
+
+
+def _redact_segment(segment: Dict[str, Any], passages: Dict[str, str]) -> Dict[str, Any]:
+    """A stored segment keeping only known identifiers and code-inserted text:
+    a listed phrase's text, or a claim sentence found verbatim in its passage."""
+    from backend.gate.non_claim_set import UNKNOWN_IDENTIFIER, get_phrase_text, known_phrase_id
+
+    redacted = dict(segment)
+    if redacted.get("kind") not in (None, "claim", "non_claim"):
+        redacted["kind"] = UNKNOWN_IDENTIFIER
+    if redacted.get("phrase_id"):
+        redacted["phrase_id"] = known_phrase_id(redacted["phrase_id"])
+    source = redacted.get("source_passage_id")
+    if source and source not in passages:
+        redacted["source_passage_id"] = UNKNOWN_IDENTIFIER
+    text = redacted.get("text")
+    if text:
+        core = text.strip().rstrip(".!?")
+        phrase = get_phrase_text(redacted.get("phrase_id") or "") or ""
+        passage = passages.get(redacted.get("source_passage_id") or "", "")
+        inserted_by_code = (
+            (redacted.get("kind") == "non_claim" and phrase and core == phrase.strip().rstrip(".!?"))
+            or (redacted.get("kind") == "claim" and core and core in passage)
+        )
+        if not inserted_by_code:
+            redacted["text"] = None
+    # On older rejected segments the index is unchecked model output (it
+    # could be a number copied from the post): keep it only for a claim whose
+    # text is exactly that sentence of its passage.
+    if not _index_matches_text(redacted, passages):
+        redacted["sentence_index"] = None
+    return redacted
+
+
+def _index_matches_text(segment: Dict[str, Any], passages: Dict[str, str]) -> bool:
+    """Whether a claim segment's sentence_index names the sentence it holds."""
+    from backend.activities.claim_gate_activity import split_into_sentences
+
+    index, text = segment.get("sentence_index"), segment.get("text")
+    passage = passages.get(segment.get("source_passage_id") or "")
+    if segment.get("kind") != "claim" or not isinstance(index, int) or isinstance(index, bool):
+        return False
+    if not text or not passage:
+        return False
+    sentences = split_into_sentences(passage)
+    if not 0 <= index < len(sentences):
+        return False
+    return sentences[index].strip().rstrip(".!?") == text.strip().rstrip(".!?")
+
+
+def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
+    """A stored draft without model-derived gate details (issue #9).
+
+    The assembled draft text and segments inserted by code are kept; free
+    text or unknown identifiers in segments and gate-generated steers are
+    removed, and the claim-gate details are dropped as a whole (older cards
+    can hold echoed model values in any of them). Founder nudges and edits
+    are the founder's own text and stay.
+    """
+    passages = {
+        m.get("passage_id"): m.get("passage") or ""
+        for m in (materials if isinstance(materials, list) else [])
+        if isinstance(m, dict) and m.get("passage_id")
+    }
+    redacted = dict(draft)
+    if isinstance(redacted.get("segments"), list):
+        redacted["segments"] = [
+            _redact_segment(s, passages) if isinstance(s, dict) else s for s in redacted["segments"]
+        ]
+    if isinstance(redacted.get("steers_applied"), list):
+        redacted["steers_applied"] = [
+            f"{GATE_STEER_PREFIX} {GATE_DETAILS_REMOVED}"
+            if isinstance(s, str) and s.startswith(GATE_STEER_PREFIX) else s
+            for s in redacted["steers_applied"]
+        ]
+    gate = redacted.get("claim_gate")
+    if isinstance(gate, dict):
+        redacted["claim_gate"] = {
+            "passed": gate.get("passed"),
+            "segments": [],
+            "failed_sentences": [],
+            "reasoning": f"Claim gate {GATE_DETAILS_REMOVED}",
+            "claims": [],
+            "failed_claims": [],
+        }
+    return redacted
+
 
 def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return a copy of a card's evidence dict with every copy of the post text removed.
@@ -21,22 +142,33 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
     get_card query, so both views redact the same fields. Every free-text
     field a model wrote after reading the post can quote it:
     - why_it_fits, and each founder material's relevance note;
+    - issue #9: matched_topic and each founder material's source label, which
+      the research model also writes freely (the default source
+      "product_brief" is kept);
     - issue #4: reply_fit.brief_problem_span and reply_fit.rejected_span;
     - issue #5: reply_plan.target_point, reply_plan.mention_product_reason,
-      and reply_plan.reply_type when it is not one of the known values.
+      and reply_plan.reply_type when it is not one of the known values;
+    - issue #9: the draft's model-derived gate details (_redact_draft) and a
+      gate-failure skip reason (redact_skip_reason).
     Pure and deterministic (the workflow calls it from a query).
     """
     from backend.models.reply_plan import REPLY_TYPES
 
     evidence_data = dict(evidence_data or {})
-    if evidence_data.get("why_it_fits"):
-        evidence_data["why_it_fits"] = POST_TEXT_REMOVED
+    for key in ("why_it_fits", "matched_topic"):
+        if evidence_data.get(key):
+            evidence_data[key] = POST_TEXT_REMOVED
+    # Issue #4 checks each founder passage against the brief and records
+    # reply_fit. A card without reply_fit predates that check, so its
+    # passages are model output too (they could copy the post) and go, along
+    # with the draft text assembled from them.
+    passages_unverified = not evidence_data.get("reply_fit")
     materials = evidence_data.get("founder_materials")
     if isinstance(materials, list):
         evidence_data["founder_materials"] = [
-            {**m, "relevance": POST_TEXT_REMOVED} if isinstance(m, dict) and m.get("relevance") else m
-            for m in materials
+            _redact_material(m, passages_unverified) if isinstance(m, dict) else m for m in materials
         ]
+        materials = evidence_data["founder_materials"]
     reply_fit = evidence_data.get("reply_fit")
     if isinstance(reply_fit, dict):
         evidence_data["reply_fit"] = {
@@ -56,6 +188,13 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
         if redacted.get("reply_type") and redacted["reply_type"] not in REPLY_TYPES:
             redacted["reply_type"] = POST_TEXT_REMOVED
         evidence_data["reply_plan"] = redacted
+    if isinstance(evidence_data.get("draft"), dict):
+        draft = _redact_draft(evidence_data["draft"], evidence_data.get("founder_materials"))
+        if passages_unverified and draft.get("text"):
+            draft["text"] = POST_TEXT_REMOVED
+        evidence_data["draft"] = draft
+    if evidence_data.get("skip_reason"):
+        evidence_data["skip_reason"] = redact_skip_reason(evidence_data["skip_reason"])
     return evidence_data
 from backend.database import get_db, ReviewCardDB
 
@@ -110,6 +249,9 @@ class DeletePostTextInput:
     
     workflow_id: str
     idempotency_key: str
+    # issue #9: the removed post's id; when set, every stored card of this
+    # post (e.g. under another account) loses its copy of the text too
+    post_id: Optional[str] = None
 
 
 def _card_to_db(card: ReviewCard) -> ReviewCardDB:
@@ -167,6 +309,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                         "text": s.text,
                         "source_passage_id": s.source_passage_id,
                         "sentence_index": s.sentence_index,
+                        "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                     }
                     for s in card.evidence.draft.segments
                 ],
@@ -178,6 +321,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                             "text": s.text,
                             "source_passage_id": s.source_passage_id,
                             "sentence_index": s.sentence_index,
+                            "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                         }
                         for s in card.evidence.draft.claim_gate.segments
                     ],
@@ -248,11 +392,41 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
     )
 
 
+def _post_removal_recorded(db, post_id: str) -> bool:
+    """Whether any stored card of this post records a removal (issue #9)."""
+    return db.query(ReviewCardDB.workflow_id).filter(
+        ReviewCardDB.post_data["id"].as_string() == post_id,
+        ReviewCardDB.post_data["text_removed"].as_boolean() == True,  # noqa: E712
+    ).first() is not None
+
+
+def card_post_text_removed(workflow_id: str) -> bool:
+    """Whether this workflow's stored card records a removal (issue #9)."""
+    card = _get_card_sync(GetCardInput(workflow_id=workflow_id))
+    return bool(card and card["post"].get("text_removed"))
+
+
 def _store_card_sync(input: StoreCardInput) -> bool:
     """Synchronous DB work for store_card (B3)."""
     db = get_db()
     try:
+        # issue #9: hold SQLite's write lock from the removal check to the
+        # commit (as backend/budget.py does), so a removal cannot interleave
+        # with this write, e.g. a timed-out attempt's thread still running
+        db.execute(sql_text("BEGIN IMMEDIATE"))
         card_db = _card_to_db(input.card)
+        
+        # issue #9: a removal already recorded for this post (by another
+        # account's Review, or this card's own earlier removal) also applies to
+        # this write, so a late or retried store cannot put the text back
+        if _post_removal_recorded(db, card_db.post_data["id"]):
+            _remove_card_post_text(card_db)
+            # A late store (a timed-out attempt finishing after the removal)
+            # must not revert the removed card's later status either
+            existing = db.get(ReviewCardDB, card_db.workflow_id)
+            if existing is not None and (existing.post_data or {}).get("text_removed"):
+                card_db.status = existing.status
+                card_db.skip_reason = existing.skip_reason
         
         # Use INSERT...ON CONFLICT (B3)
         # SQLAlchemy's merge() provides upsert-like behavior
@@ -287,9 +461,13 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
     Synchronous DB work for update_card. B1: Works with typed fields instead of dict.
     
     QA R13: Checks edit_seq and ignores writes with lower seq than stored.
+    Issue #9: on a card that records a removal, the written evidence is
+    redacted again, so a late write (an in-flight redraft, or another
+    Review's stale evidence) cannot restore copies of the post.
     """
     db = get_db()
     try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))  # issue #9, see _store_card_sync
         card_db = db.query(ReviewCardDB).filter(
             ReviewCardDB.workflow_id == input.workflow_id
         ).first()
@@ -348,6 +526,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                             "text": s.text,
                             "source_passage_id": s.source_passage_id,
                             "sentence_index": s.sentence_index,
+                            "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                         }
                         for s in value.draft.segments
                     ],
@@ -359,6 +538,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                                 "text": s.text,
                                 "source_passage_id": s.source_passage_id,
                                 "sentence_index": s.sentence_index,
+                                "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                             }
                             for s in value.draft.claim_gate.segments
                         ],
@@ -400,6 +580,11 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                 }
             card_db.evidence_data = evidence_data
             flag_modified(card_db, "evidence_data")
+        
+        if (card_db.post_data or {}).get("text_removed"):
+            card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
+            flag_modified(card_db, "evidence_data")
+            card_db.skip_reason = redact_skip_reason(card_db.skip_reason)
         
         db.commit()
         return True
@@ -479,30 +664,72 @@ async def get_card(input: GetCardInput) -> Optional[Dict]:
     return result
 
 
+def _remove_card_post_text(card_db: ReviewCardDB) -> None:
+    """Replace a stored card's post text and every evidence copy of it."""
+    post_data = dict(card_db.post_data)
+    post_data["text"] = POST_TEXT_REMOVED
+    # issue #9: record the removal on the card (the UI shows "Post removed")
+    post_data["text_removed"] = True
+    card_db.post_data = post_data
+    flag_modified(card_db, "post_data")
+
+    card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
+    flag_modified(card_db, "evidence_data")
+    card_db.skip_reason = redact_skip_reason(card_db.skip_reason)
+
+
 def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
-    """Synchronous DB work for delete_post_text (B8)."""
+    """Synchronous DB work for delete_post_text (B8).
+
+    Returns whether the card for input.workflow_id exists. With post_id set
+    (issue #9), every other stored card of that post is redacted as well.
+    """
     db = get_db()
     try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))  # issue #9, see _store_card_sync
         card_db = db.query(ReviewCardDB).filter(
             ReviewCardDB.workflow_id == input.workflow_id
         ).first()
         
-        if not card_db:
-            return False
+        cards = [card_db] if card_db else []
+        if input.post_id:
+            cards += [
+                other
+                for other in db.query(ReviewCardDB).filter(
+                    ReviewCardDB.post_data["id"].as_string() == input.post_id,
+                    ReviewCardDB.workflow_id != input.workflow_id,
+                )
+            ]
         
         # Delete post text on 404 per X API compliance, keep structure
-        post_data = dict(card_db.post_data)
-        post_data["text"] = POST_TEXT_REMOVED
-        card_db.post_data = post_data
-        flag_modified(card_db, "post_data")
-
-        card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
-        flag_modified(card_db, "evidence_data")
+        for card in cards:
+            _remove_card_post_text(card)
         
         db.commit()
-        return True
+        return card_db is not None
     finally:
         db.close()
+
+
+def apply_stored_removal(workflow_id: str, card: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Redact a card read from elsewhere (the Review's get_card query) when the
+    stored card records a removal (issue #9).
+
+    A removal can happen outside the workflow (the eval re-fetch, or another
+    account's Review of the same post); the workflow's own state still holds
+    the text, so readers of the query must apply the stored removal.
+    """
+    if not card or not isinstance(card.get("post"), dict) or card["post"].get("text_removed"):
+        return card
+    stored = _get_card_sync(GetCardInput(workflow_id=workflow_id))
+    if not stored or not stored["post"].get("text_removed"):
+        return card
+    return {
+        **card,
+        "post": {**card["post"], "text": POST_TEXT_REMOVED, "text_removed": True},
+        "evidence": redact_post_text_copies(card.get("evidence")),
+        "skip_reason": redact_skip_reason(card.get("skip_reason")),
+    }
 
 
 @activity.defn(name="delete_post_text")

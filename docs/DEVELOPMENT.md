@@ -144,11 +144,30 @@ This runs all replay tests with fake adapters. No API keys needed.
 ### Activities
 
 - `search_recent`: Search X for recent posts
-- `lookup_post`: Get full post details
+- `lookup_post`: Get full post details; also re-fetches the target post when the founder approves (see "Post removal" below)
 - `research_post`: Analyze post and gather evidence; code then checks the proposed reply features, computes confidence and applies the skip rules (`backend/gate/reply_fit.py`), so a skipped post is never drafted
 - `plan_reply`: Plan the reply before drafting (reply type, target point in the post, whether to mention the product); code validates the plan, re-requests it once, then skips the post. Runs only for posts that passed the research-stage skip rules
 - `draft_reply`: Generate draft with claim gate, steered by the plan
 - `store_card` / `update_card`: Persist review cards
+
+### Post removal (ADR-0006, issue #9)
+
+Post text is kept only while the post exists; a 404 on a re-fetch deletes it. The target post is re-fetched with `GET /2/tweets/:id`:
+
+1. **When the founder approves.** The `approve` update calls `lookup_post` before approving. If the post is gone, `delete_post_text` removes the stored text and every model-written copy of it (`redact_post_text_copies`: why it fits, the problem span, the plan's target point, ...), marks the card `post.text_removed`, and the Review ends as skipped with "Post removed". The update fails with type `PostRemoved` (HTTP 409 from the API), and the UI reloads the card. During the re-fetch, edits, nudges and other approvals are rejected.
+2. **Before the eval replays a card.** Call `backend.target_refetch.refetch_stored_card_target(x_client, workflow_id, run_key, review_is_running=temporal_review_is_running(temporal_client))` and skip the card unless it returns `"found"`. It leaves a card whose Review workflow is still running alone and returns `"live"`: that workflow holds its own copy of the evidence and re-fetches at approve. Liveness comes from Temporal, not the stored status, because Reviews skipped before issue #9 ended with their card still "pending".
+
+If a skip or the review timeout arrives while approve's re-fetch is running, the workflow waits for the re-fetch (and any removal) to finish before it ends. A lookup counts as removed only when X's error body (on a 200 without the post, or on an HTTP 404) names this post as not found or not authorized; any other response fails the lookup and removes nothing. These response shapes come from the X API v2 docs and have not been seen live yet.
+
+A removal applies to every stored card of the post (the same post can have a card per account). The Review workflow's own state still holds the text when the removal happened elsewhere, so `GET /api/reviews/{id}` applies the stored removal to the `get_card` query result, `draft_reply` refuses to redraft (nudge) a card that records a removal, and `store_card` stores any later card of a removed post already redacted.
+
+Card writes (`store_card`, `update_card`, `delete_post_text`) take SQLite's write lock, so a removal cannot interleave with a write, and any write to a card of a removed post is stored redacted.
+
+Limit: Reviews of the same post under *other* accounts are covered only partly. Their stored cards are redacted, their nudges are refused, and their card writes are stored redacted. However, a Review that is still researching, planning or drafting the post sends it to the model, and one that approves later is not stopped by the recorded removal; it finds out at its own approve re-fetch. Today one account runs watches (ADR-0005), so this path needs a second account reviewing the same post.
+
+Each re-fetch reserves one X read through `backend/budget.py` (about $0.005, ADR-0005). Over budget it raises and removes nothing. A 404 on the founder's *reply* URL does not touch the target post's text.
+
+Pending cards are **not** re-checked on a schedule, so X cost stays proportional to approvals and eval runs. A deleted post's text can therefore stay on a card that is never approved (pending, skipped or expired) until the eval re-fetches it.
 
 ### Key Constraints (ADRs)
 
@@ -189,7 +208,10 @@ call is counted per Temporal activity attempt:
   the request to X's 10-100 range, and the reservation covers what is sent.
 - A reservation that is already closed refuses to authorize another request
   (`ReservationClosed`). `lookup_post` counts 1 read per attempt even when it returns None:
-  the HTTP adapter returns None for a 404 and for post data it cannot convert.
+  the HTTP adapter returns None only when X's error names the post as gone
+  (issue #9), and raises `MalformedLookupResponse` (also counted, X billed it)
+  for post data it cannot convert. A 404 that does not name the post is raised
+  as the HTTP error and released.
 - Output that hits the max output tokens (`finish_reason == "length"`) fails
   research, plan and draft without retry (`InferenceOutputTruncated`); the call
   stays counted.
