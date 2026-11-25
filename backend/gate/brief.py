@@ -81,7 +81,10 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     terms: List[str] = []
     headings: List[Tuple[int, str]] = []  # (level, text): the open heading path
     colon_lead: Optional[str] = None  # lead-in of the list or paragraph being read
-    lead_names_list = False  # the lead-in is a line that ends in a colon, not just the sentence before the list
+    # The colon line that names the list being read ("Key features"): the
+    # innermost one of a chain. Empty when the list has none (then colon_lead,
+    # if set, is just the sentence before the list).
+    list_name = ""
     pending_lead: Optional[str] = None  # a "...:" sentence that may introduce what follows
     pending_parent: Optional[str] = None  # the lead-in the pending lead-in itself stands under
     # The last sentence of the paragraph just read, with its own lead-in: if a
@@ -138,12 +141,16 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             add_unit(pending_lead, context(pending_parent))
             pending_lead = pending_parent = None
 
-    def take_pending_lead() -> None:
-        """The lead-in introduces what follows: it becomes its context."""
+    def take_pending_lead() -> str:
+        """The lead-in introduces what follows: it becomes its context.
+        Returns the lead-in itself, without the lead-ins it stands under."""
         nonlocal pending_lead, pending_parent, colon_lead
+        name = ""
         if pending_lead is not None:
-            colon_lead = " > ".join(part for part in (pending_parent, _clean_context(pending_lead)) if part)
+            name = _clean_context(pending_lead)
+            colon_lead = " > ".join(part for part in (pending_parent, name) if part)
             pending_lead = pending_parent = None
+        return name
 
     def open_heading(level: int, text: str) -> None:
         nonlocal colon_lead, intro
@@ -177,11 +184,10 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         elif item_match:
             flush_paragraph()
             if pending_lead is not None:
-                take_pending_lead()
+                list_name = take_pending_lead()
                 items.clear()
-                lead_names_list = True
             elif not items:
-                lead_names_list = False
+                list_name = ""
                 if intro is not None:
                     # The sentence right before a list introduces it, with or
                     # without a colon: a bold "Not supported yet" line, or "We
@@ -203,8 +209,10 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             # feature terms, and neither is a list introduced by "Plans:".
             if parents:
                 named_by = parents[-1]
-            elif lead_names_list:
-                named_by = colon_lead or ""
+            elif list_name:
+                # The innermost lead-in only: under "Features:" then "Plans:",
+                # the list is named "Plans"
+                named_by = list_name
             else:
                 named_by = headings[-1][1] if headings else ""
             if _FEATURE_WORD_RE.search(named_by):

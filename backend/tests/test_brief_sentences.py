@@ -280,6 +280,8 @@ def test_only_what_names_the_list_decides_whether_it_is_a_feature_list():
     intro_sentence = "# Features\nThese ship today.\n- Replay\n"  # a sentence is not a list name
     under_parent = "- Main features:\n  - Replay\n- Limits:\n  - Ten endpoints\n"
     other_lead_in = "# Features\nPlans:\n- Free tier\n"  # the list is named "Plans"
+    chained_lead_in = "Features:\nPlans:\n- Basic\n- Premium\n"  # the innermost lead-in names it
+    chained_feature_lead_in = "Not offered yet:\nPlanned features:\n- Audit logs\n"
     other_parent = "## Features\n- Limitations\n  - Manual setup\n"
     far_above = "# Feature overview\n## Not supported yet\n- Single sign-on\n"
 
@@ -287,6 +289,9 @@ def test_only_what_names_the_list_decides_whether_it_is_a_feature_list():
     assert brief_feature_terms(intro_sentence) == ["Replay"]
     assert brief_feature_terms(under_parent) == ["Replay"]
     assert brief_feature_terms(other_lead_in) == []
+    assert brief_feature_terms(chained_lead_in) == []
+    assert _texts(chained_lead_in)[0] == ("b1", "Features > Plans", "Basic")  # the context keeps the chain
+    assert brief_feature_terms(chained_feature_lead_in) == ["Audit logs"]
     # "Limitations" is a feature-list item; what is nested under it is not
     assert brief_feature_terms(other_parent) == ["Limitations"]
     assert brief_feature_terms(far_above) == []
