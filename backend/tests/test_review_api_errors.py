@@ -211,7 +211,7 @@ async def test_requests_during_research_are_not_ready_and_get_reports_the_stage(
             }
 
             for action, body in [
-                ("approve", {"posted_url": APPROVE_URL, "post_anyway": False, "draft_text": ""}),
+                ("approve", {"posted_url": APPROVE_URL, "post_anyway": False, "draft_text": "", "draft_gate_state": None}),
                 ("edit", {"new_text": PASSING_EDIT}),
                 ("nudge", {"instruction": "Make it shorter"}),
             ]:
@@ -291,7 +291,7 @@ async def test_edit_before_the_card_is_stored_is_rejected_then_saved(make_review
             for action, body in [
                 ("edit", {"new_text": PASSING_EDIT}),
                 ("nudge", {"instruction": "Make it shorter"}),
-                ("approve", {"posted_url": APPROVE_URL, "post_anyway": False, "draft_text": ""}),
+                ("approve", {"posted_url": APPROVE_URL, "post_anyway": False, "draft_text": "", "draft_gate_state": None}),
             ]:
                 response = await _post(http, workflow_id, action, **body)
                 assert response.status_code == 409, (action, response.text)
@@ -325,10 +325,14 @@ async def test_invalid_request_invalid_state_and_unknown_review(make_review_inpu
             assert (early.status_code, early.json()["code"]) == (409, "invalid_state")
 
             # The draft the founder saw is required: omitted or null is a malformed body
-            for body in ({}, {"draft_text": None}):
+            # (draft_gate_state too; it may be null for a draft never edited)
+            for body in ({}, {"draft_text": None, "draft_gate_state": None}, {"draft_text": shown}):
                 bad = await _post(http, workflow_id, "approve", posted_url=APPROVE_URL, **body)
                 assert (bad.status_code, bad.json()["code"]) == (422, "invalid_request"), body
-            assert (await _post(http, workflow_id, "approve", posted_url=APPROVE_URL, draft_text=shown)).status_code == 200
+            approved = await _post(
+                http, workflow_id, "approve", posted_url=APPROVE_URL, draft_text=shown, draft_gate_state=None,
+            )
+            assert approved.status_code == 200, approved.text
             bad_url = await _post(http, workflow_id, "confirm_posted", reply_url="https://x.com/me")
             assert (bad_url.status_code, bad_url.json()["code"]) == (400, "invalid_request")
             # A reply that is not a reply to the target: refused by the handler
@@ -339,7 +343,9 @@ async def test_invalid_request_invalid_state_and_unknown_review(make_review_inpu
             missing = "review:test:no_such_review"
             got = await http.get(f"/api/reviews/{missing}")
             assert (got.status_code, got.json()["code"]) == (404, "not_found")
-            approve_missing = await _post(http, missing, "approve", posted_url=APPROVE_URL, draft_text="")
+            approve_missing = await _post(
+                http, missing, "approve", posted_url=APPROVE_URL, draft_text="", draft_gate_state=None,
+            )
             assert (approve_missing.status_code, approve_missing.json()["code"]) == (404, "not_found")
 
 

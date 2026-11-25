@@ -185,7 +185,7 @@ The review endpoints (`approve`, `edit`, `nudge`, `confirm_posted`, `skip`, `GET
 | `not_found` | 404 | no such workflow, or it has ended (updates and signals) |
 | `server_error` | 500 | not the Review's decision: an activity failed, Temporal is unreachable or not connected |
 
-Approve requires `draft_text` (and takes `draft_gate_state`): the draft the caller shows. The UI sends both with every approve.
+Approve requires `draft_text` and `draft_gate_state` (null for a draft never edited): the draft the caller shows. The UI sends both with every approve. Known residual: a Review in which an edit was accepted before its card was stored, on code older than issue #20 (only a direct API call could do that), keeps the unedited draft on the stored card, so approving it from the UI returns `draft_changed` each time. Edit the draft once to bring the stored card and the workflow back in line.
 
 Approve, edit and nudge are rejected as `not_ready` until the pending card is stored, so no update writes to a card row that does not exist yet. Until a card row (pending or skipped) is stored, `GET /api/reviews/{id}` returns `{"status": "researching" | "planning" | "drafting", "in_progress": true, "evidence": null, ...}` instead of a 404 (`status` is `skipped` after a founder skip during research), with no post or evidence: a removal recorded by another Review of the post can be applied only against the stored row.
 

@@ -192,11 +192,12 @@ class ApproveRequest(BaseModel):
     post_anyway: bool = False  # Per ADR-0006 Amendment E
     # The draft the founder saw (issue #15 review): its text and its
     # edited-text gate state (null if never edited). A mismatch is 409
-    # draft_changed. Required, so no caller approves a draft unchecked.
-    # (The workflow argument stays optional: approvals recorded before it
-    # replay with three arguments, and validators do not run on replay.)
+    # draft_changed. Both required (draft_gate_state may be null), so no
+    # caller approves a draft unchecked. (The workflow argument stays
+    # optional: approvals recorded before it replay with three arguments,
+    # and validators do not run on replay.)
     draft_text: str
-    draft_gate_state: Optional[str] = None
+    draft_gate_state: Optional[str]
 
 
 class SkipRequest(BaseModel):
