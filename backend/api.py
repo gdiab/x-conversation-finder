@@ -36,7 +36,12 @@ from backend.workflows.review import (
     POST_REMOVED_ERROR,
     DRAFT_CHANGED_ERROR,
 )
-from backend.activities.store_activities import apply_stored_removal, get_all_cards
+from backend.activities.store_activities import (
+    POST_TEXT_REMOVED,
+    apply_stored_removal,
+    card_post_text_removed,
+    get_all_cards,
+)
 from backend.database import init_db
 from backend.budget import get_today_budget
 
@@ -417,6 +422,13 @@ async def nudge_review(workflow_id: str, request: NudgeRequest):
             "nudge",
             args=[request.instruction, request.client_request_id]
         )
+        
+        # issue #9 / #12: another Review of the post can record its removal
+        # while this redraft runs. The card write is stored redacted; the
+        # redraft returned here is model text that can quote the post, so it
+        # is withheld too (as GET /api/reviews/{id} applies a stored removal).
+        if card_post_text_removed(workflow_id):
+            result = POST_TEXT_REMOVED
         
         return {"message": "Nudged", "new_draft": result}
     

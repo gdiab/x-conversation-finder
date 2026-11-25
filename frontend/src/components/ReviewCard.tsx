@@ -58,13 +58,18 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   useEffect(closePostAnyway, [draftText, card.edited_text_gate_state]);
   // The edit box follows the card while it is closed, so it never opens on a
   // draft the card no longer has. When the post was removed (issue #9), the
-  // box is emptied and closed even while open: a written draft is model text
-  // that can quote the post, and it must not stay on screen (issue #12).
+  // edit box and the nudge field are emptied and closed even while open: a
+  // written draft is model text that can quote the post, and neither it nor
+  // a quote of it may stay on screen (issue #12).
   const textRemoved = card.post.text_removed === true;
   useEffect(() => {
     if (textRemoved) {
       setIsEditing(false);
       editRequestId.current = null;
+      // A nudge being typed may quote the draft: it goes with it
+      setIsNudging(false);
+      setNudgeInstruction('');
+      nudgeRequestId.current = null;
     }
     if (textRemoved || !isEditing) {
       setEditText(draftText ?? '');

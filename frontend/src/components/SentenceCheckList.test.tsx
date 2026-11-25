@@ -226,6 +226,26 @@ describe('ReviewCard: written draft (issue #12)', () => {
     expect(screen.getByDisplayValue('[removed - post deleted]')).toBeInTheDocument();
   });
 
+  it('empties and closes the nudge field when the post is removed while it is open', async () => {
+    const user = userEvent.setup();
+    const card = writtenCard();
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Drop the part about retries');
+
+    const removed = {
+      ...card,
+      post: { ...card.post, text: '[removed - post deleted]', text_removed: true },
+      evidence: makeEvidence({ draft_mode: 'written', draft: makeWrittenDraft({ text: '[removed - post deleted]', sentence_checks: [] }) }),
+    };
+    rerender(<ReviewCard card={removed} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByDisplayValue('Drop the part about retries')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Apply Nudge' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    expect(screen.getByPlaceholderText(/Make it shorter/)).toHaveValue('');
+  });
+
   it('opens the edit box on the current draft after the card changed', async () => {
     const user = userEvent.setup();
     const card = writtenCard();

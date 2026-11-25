@@ -78,6 +78,17 @@ def test_a_digit_in_the_product_name_is_not_a_number():
     assert TRIGGER_NUMBER in {h.trigger for h in find_triggers("Relay2 retries 3 times.", "Relay2", [], [])}
 
 
+@pytest.mark.parametrize("name,sentence", [
+    ("++", "I think ++ handles that."),
+    (chr(0x1F680), "Try " + chr(0x1F680) + " for that."),  # a name that is one emoji
+    ("@acme", "Ask @acme about it."),
+    (".NET", "Use .NET for that."),
+])
+def test_a_name_without_letters_or_with_symbols_still_fires(name, sentence):
+    """A name made of symbols has no words to match on; it is matched as written."""
+    assert _matches(sentence, TRIGGER_PRODUCT_NAME, name=name, aliases=[]) == [name]
+
+
 def test_clean_names_trims_and_drops_blanks_and_repeats():
     assert clean_names("  Acme   Relay ", [" Relay", "relay", "", "acme relay", "AR"]) == (
         "Acme Relay", ["Relay", "AR"]

@@ -288,6 +288,15 @@ def test_a_question_the_checker_flags_fails_even_when_supported():
     assert "must be a statement, not a question" in result.sentences[1].reason
 
 
+def test_a_question_in_another_script_that_the_checker_flags_fails_too():
+    text = f"{REACTION} Did you know it resends failed deliveries" + chr(0x061F)
+
+    result = _check(text, NOT_PRODUCT, SUPPORTED_B1)
+
+    assert not result.passed
+    assert "must be a statement, not a question" in result.sentences[1].reason
+
+
 def test_a_question_about_the_poster_is_fine():
     assert _check(f"{REACTION} {QUESTION}", NOT_PRODUCT, NOT_PRODUCT).passed
 
@@ -460,7 +469,10 @@ def test_other_terminators_end_a_sentence_with_a_space_after_them_too():
     assert len(urdu.sentences) == 3
 
 
-@pytest.mark.parametrize("mark", ["?", chr(0xFF1F), chr(0x2047), chr(0x2048)])
+@pytest.mark.parametrize("mark", [
+    "?", chr(0xFF1F), chr(0x2047), chr(0x2048),  # ASCII, fullwidth, doubled
+    chr(0x061F), chr(0x037E), chr(0x055E), chr(0x1367),  # Arabic, Greek, Armenian, Ethiopic
+])
 def test_a_question_mark_of_any_width_makes_a_triggered_sentence_a_question(mark):
     prepared = _prepare(f"Did you know Relay can retry a failed delivery up to five times{mark}")
 

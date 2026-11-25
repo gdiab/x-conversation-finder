@@ -243,9 +243,15 @@ def find_triggers(
     return hits
 
 
+# Question marks NFKC does not fold to "?": Greek (which looks like a
+# semicolon), Armenian, Arabic, Ethiopic and the reversed mark. A closed list.
+_OTHER_QUESTION_MARKS = frozenset(map(chr, (0x037E, 0x055E, 0x061F, 0x1367, 0x2E2E)))
+
+
 def is_question(sentence: str) -> bool:
-    """A question mark anywhere, in any width or doubled form (NFKC folds them to "?")."""
-    return "?" in unicodedata.normalize("NFKC", sentence)
+    """A question mark anywhere, in any width or doubled form (NFKC folds
+    those to "?") or of another script."""
+    return "?" in unicodedata.normalize("NFKC", sentence) or any(ch in _OTHER_QUESTION_MARKS for ch in sentence)
 
 
 _THOUSANDS_SEPARATOR_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
