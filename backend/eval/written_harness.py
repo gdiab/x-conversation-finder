@@ -29,7 +29,7 @@ import sqlite3
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from temporalio.converter import value_to_type
 
@@ -91,6 +91,7 @@ class StoredReview:
 EXCLUDED_REMOVED = "post_text_removed"
 EXCLUDED_NOT_DRAFTED = "not_drafted"  # skipped before drafting (research rules, confidence)
 EXCLUDED_PLAN_SKIPPED = "plan_skipped"  # a live Review skipped it at the plan stage
+EXCLUDED_NO_TOPIC = "no_review_topic"  # its Review's watch topic is unknown (not in the export)
 EXCLUDED_NO_SETTINGS = "no_watch_settings"  # no watch settings for its account and topic
 EXCLUDED_NO_PRODUCT_NAME = "no_product_name"  # its watch has none: a live Review stays assembled
 EXCLUDED_UNREADABLE = "unreadable"
@@ -125,7 +126,9 @@ def removal_recorded(db_path: Path, post_id: str) -> bool:
     return False
 
 
-def load_stored_reviews(db_path: Path) -> Tuple[List[StoredReview], Counter]:
+def load_stored_reviews(
+    db_path: Path, review_topics: Mapping[str, str]
+) -> Tuple[List[StoredReview], Counter]:
     """Read the cards that reached drafting, read-only. Returns the reviews
     and a count of the cards left out, by reason.
 
@@ -134,6 +137,11 @@ def load_stored_reviews(db_path: Path) -> Tuple[List[StoredReview], Counter]:
     A card with a plan that a live Review skipped (an invalid plan, or a
     plan-stage skip rule) is left out too. A card whose post text was
     removed is left out: its text must not be sent to a model.
+
+    `review_topics` maps each Review's workflow id to the topic of the watch
+    that started it (its ReviewInput.topic, exported from Temporal). The
+    card's own matched_topic is written by the research model and is not
+    used to pick settings; a card whose Review is not in the map is left out.
     """
     reviews: List[StoredReview] = []
     excluded: Counter = Counter()
@@ -171,7 +179,11 @@ def load_stored_reviews(db_path: Path) -> Tuple[List[StoredReview], Counter]:
         except Exception:
             excluded[EXCLUDED_UNREADABLE] += 1
             continue
-        reviews.append(StoredReview(workflow_id, evidence.matched_topic, post, evidence, _account_of(workflow_id)))
+        topic = review_topics.get(workflow_id)
+        if not topic:
+            excluded[EXCLUDED_NO_TOPIC] += 1
+            continue
+        reviews.append(StoredReview(workflow_id, topic, post, evidence, _account_of(workflow_id)))
     return reviews, excluded
 
 
@@ -314,9 +326,12 @@ class PostRecord:
     sample: int
     plan_source: str  # "stored" | "cached" | "planned" | "invalid"
     mention_product: Optional[bool]
-    outcome: str  # "passed_first" | "passed_redraft" | "skipped" | "plan_invalid" | "error"
+    outcome: str  # "passed_first" | "passed_redraft" | "skipped" | "plan_invalid" | "removed" | "error"
     attempts: List[AttemptRecord] = field(default_factory=list)
     error: str = ""
+    # What this run's model calls cost (plan, drafts, checks), from the spend cap
+    model_calls: int = 0
+    cost_usd: float = 0.0
 
 
 # Failure kinds, read from the check's reasons (backend/gate/written_check.py)
@@ -582,43 +597,46 @@ async def run_harness(
         if not clean_names(settings.product_name, settings.product_aliases)[0]:
             excluded[EXCLUDED_NO_PRODUCT_NAME] += 1
             continue
-        attempt_limit = settings.claim_gate_max_attempts or max_attempts
+        attempt_limit = (
+            max_attempts if settings.claim_gate_max_attempts is None else settings.claim_gate_max_attempts
+        )
         for sample in range(1, samples + 1):
             attempts: List[AttemptRecord] = []
+            source, mention = "", None
+            calls_before = len(cap.calls) if cap is not None else 0
+
+            def record(outcome: str, error: str = "") -> None:
+                new_calls = cap.calls[calls_before:] if cap is not None else []
+                records.append(PostRecord(
+                    review.workflow_id, review.topic, sample, source, mention, outcome, attempts, error,
+                    model_calls=len(new_calls), cost_usd=round(sum(c.cost_usd for c in new_calls), 6),
+                ))
+
             try:
                 _stop_if_removed(is_removed, review.post.id)
                 plan, source = await plan_for(review, agent, plans, cap, is_removed)
                 if plan is None:
-                    records.append(PostRecord(review.workflow_id, review.topic, sample, source, None, "plan_invalid"))
+                    record("plan_invalid")
                     break  # a plan that fails twice fails for every sample
+                mention = plan.mention_product
                 await run_written_path(
                     review, settings, plan, agent, checker,
                     max_attempts=attempt_limit, sample=sample, cap=cap, attempts=attempts,
                     is_removed=is_removed,
                 )
-                records.append(PostRecord(
-                    review.workflow_id, review.topic, sample, source, plan.mention_product,
-                    outcome_of(attempts), attempts,
-                ))
+                record(outcome_of(attempts))
             except PostRemovedDuringRun:
                 excluded[EXCLUDED_REMOVED] += 1
                 if attempts:
                     # Finished attempts were paid for; the run is not a result
-                    records.append(PostRecord(
-                        review.workflow_id, review.topic, sample, "", None, "removed", attempts,
-                    ))
+                    record("removed")
                 break
             except SpendCapReached as e:
                 # The attempts that finished are kept: their calls were paid
-                records.append(PostRecord(
-                    review.workflow_id, review.topic, sample, "", None, "error", attempts, error=str(e),
-                ))
+                record("error", str(e))
                 return records, excluded, True
             except Exception as e:  # one post's failure does not end the run
-                records.append(PostRecord(
-                    review.workflow_id, review.topic, sample, "", None, "error", attempts,
-                    error=f"{type(e).__name__}: {e}",
-                ))
+                record("error", f"{type(e).__name__}: {e}")
     return records, excluded, False
 
 
@@ -663,7 +681,8 @@ def summarize(
             sum(1 for r in drafted if r.attempts[0].passed) / first_checked, 3
         ) if first_checked else None,
         "drafts": drafts,
-        "checker_calls": checker_calls,
+        # Sent checker requests (also failed ones) when the cap counted them
+        "checker_calls": sum(1 for c in cap.calls if c.call == "check") if cap is not None else checker_calls,
         "first_draft_failure_kinds": dict(sorted(first_kinds.items())),
         "redraft_failure_kinds": dict(sorted(redraft_kinds.items())),
         "product_claim_sentences_per_draft": dict(sorted(claim_counts.items())),
@@ -686,19 +705,28 @@ def summarize(
     return summary
 
 
-_SAFE_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
-# A letter first, no spaces or colons (workflow ids have colons), short
-_MODEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]{0,63}$")
+# A name for the pasteable summary: a letter first, short, no spaces or
+# colons (workflow ids have colons), and no run of 6 or more digits (post
+# ids are long digit runs; a model date such as 2024-07-18 has none).
+_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]{0,63}$")
+_LONG_DIGITS_RE = re.compile(r"\d{6,}")
+
+
+def _name_like(value: str, max_len: int) -> bool:
+    return bool(
+        isinstance(value, str) and len(value) <= max_len
+        and _NAME_RE.match(value) and not _LONG_DIGITS_RE.search(value)
+    )
 
 
 def safe_label(label: str) -> bool:
     """A run label that can go into the pasteable summary: a short name."""
-    return bool(_SAFE_LABEL_RE.match(label))
+    return _name_like(label, 40) and "/" not in label
 
 
 def _model_label(model: str) -> str:
     """A model name as reported by the provider, if it looks like one."""
-    return model if _MODEL_RE.match(model or "") else "(unrecognized model name)"
+    return model if _name_like(model or "", 64) else "(unrecognized model name)"
 
 
 def summary_markdown(label: str, summary: Dict[str, Any]) -> str:

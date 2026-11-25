@@ -47,6 +47,8 @@ PLAN = ReplyPlan(
     mention_product=True,
     mention_product_reason="The brief covers retries.",
 )
+# The watch topic of each Review, as export-settings reads it from Temporal
+TOPICS = {f"review:t:{n}": TOPIC for n in range(2001, 2006)}
 UNSUPPORTED = "Retries are easy to skip. Relay makes every delivery effortless and instant."
 
 
@@ -165,10 +167,20 @@ def no_x(monkeypatch):
                 monkeypatch.setattr(cls, name, refuse)
 
 
+def test_settings_follow_the_reviews_watch_topic_not_the_model_written_one(tmp_path):
+    db = _make_db(tmp_path / "cards.db")
+
+    reviews, excluded = load_stored_reviews(db, {"review:t:2001": "deliveries"})
+
+    assert [(r.workflow_id, r.topic) for r in reviews] == [("review:t:2001", "deliveries")]
+    assert reviews[0].evidence.matched_topic == TOPIC  # what research wrote; not used
+    assert excluded["no_review_topic"] == 1  # review:t:2002 is not in the export
+
+
 def test_only_stored_reviews_that_reached_drafting_are_loaded(tmp_path):
     db = _make_db(tmp_path / "cards.db")
 
-    reviews, excluded = load_stored_reviews(db)
+    reviews, excluded = load_stored_reviews(db, TOPICS)
 
     assert [r.workflow_id for r in reviews] == ["review:t:2001", "review:t:2002"]
     assert dict(excluded) == {"post_text_removed": 1, "not_drafted": 1, "plan_skipped": 1}
@@ -180,7 +192,7 @@ def test_only_stored_reviews_that_reached_drafting_are_loaded(tmp_path):
 async def test_a_run_makes_no_x_call_and_leaves_the_database_unchanged(tmp_path, no_x):
     db = _make_db(tmp_path / "cards.db")
     before = _digest(db)
-    reviews, excluded = load_stored_reviews(db)
+    reviews, excluded = load_stored_reviews(db, TOPICS)
     plans = {}
 
     records, excluded, stopped = await run_harness(
@@ -208,14 +220,14 @@ def test_the_database_is_opened_read_only(tmp_path, monkeypatch):
         return real_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(harness.sqlite3, "connect", spy)
-    load_stored_reviews(db)
+    load_stored_reviews(db, TOPICS)
 
     assert opened and all(uri.endswith("?mode=ro") and flag for uri, flag in opened)
 
 
 @pytest.mark.asyncio
 async def test_a_failed_draft_is_redrafted_once_with_the_workflows_steer(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     agent, checker = ScriptedAgent(texts=[UNSUPPORTED]), CountingChecker()
 
     records, _, _ = await run_harness(reviews[1:], SETTINGS, agent, checker, plans={}, max_attempts=2)
@@ -235,7 +247,7 @@ async def test_a_failed_draft_is_redrafted_once_with_the_workflows_steer(tmp_pat
 
 @pytest.mark.asyncio
 async def test_two_failed_drafts_skip_and_an_identical_redraft_reuses_its_check(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     agent, checker = ScriptedAgent(texts=[UNSUPPORTED, UNSUPPORTED]), CountingChecker()
 
     records, _, _ = await run_harness(reviews[1:], SETTINGS, agent, checker, plans={}, max_attempts=2)
@@ -248,7 +260,7 @@ async def test_two_failed_drafts_skip_and_an_identical_redraft_reuses_its_check(
 
 @pytest.mark.asyncio
 async def test_two_product_sentences_are_reported_as_too_many_claims(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     two_claims = "Acme Relay delivers webhooks to your services. Relay can retry a failed delivery up to five times."
     agent = ScriptedAgent(texts=[two_claims, two_claims])
 
@@ -261,7 +273,7 @@ async def test_two_product_sentences_are_reported_as_too_many_claims(tmp_path, n
 
 @pytest.mark.asyncio
 async def test_cached_plans_are_reused_and_samples_repeat_the_written_path(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     plans = {"review:t:2001": dataclasses.asdict(PLAN)}
     agent = ScriptedAgent()
 
@@ -273,7 +285,7 @@ async def test_cached_plans_are_reused_and_samples_repeat_the_written_path(tmp_p
 
 @pytest.mark.asyncio
 async def test_a_review_without_watch_settings_is_left_out(tmp_path, no_x):
-    reviews, excluded = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, excluded = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
 
     records, excluded, _ = await run_harness(reviews, {}, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, excluded=excluded)
 
@@ -283,7 +295,7 @@ async def test_a_review_without_watch_settings_is_left_out(tmp_path, no_x):
 
 @pytest.mark.asyncio
 async def test_the_summary_and_its_markdown_carry_no_text(tmp_path, no_x):
-    reviews, excluded = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, excluded = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     records, excluded, stopped = await run_harness(
         reviews, SETTINGS, ScriptedAgent(texts=[UNSUPPORTED]), CountingChecker(),
         plans={}, max_attempts=2, excluded=excluded,
@@ -343,7 +355,7 @@ async def test_the_spend_cap_records_usage_and_refuses_a_call_that_could_pass_it
 
 @pytest.mark.asyncio
 async def test_the_spend_cap_stops_the_run_and_keeps_what_finished(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
 
     class CappedAgent(ScriptedAgent):
         async def draft_written(self, request, idempotency_key=None):
@@ -380,7 +392,7 @@ def test_the_script_refuses_an_output_path_git_would_track(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_plan_invalid_twice_is_cached_so_later_runs_leave_the_post_out(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
 
     class BadPlanner(ScriptedAgent):
         async def plan(self, post, evidence, idempotency_key, feedback=None):
@@ -401,7 +413,7 @@ async def test_a_plan_invalid_twice_is_cached_so_later_runs_leave_the_post_out(t
 
 @pytest.mark.asyncio
 async def test_settings_are_matched_by_account_and_topic(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     other_account = {f"someone-else:{TOPIC}": SETTINGS[f"t:{TOPIC}"]}
 
     records, excluded, _ = await run_harness(reviews, other_account, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2)
@@ -411,7 +423,7 @@ async def test_settings_are_matched_by_account_and_topic(tmp_path, no_x):
 
 @pytest.mark.asyncio
 async def test_a_watch_without_a_product_name_is_left_out(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     unnamed = {f"t:{TOPIC}": WatchSettings(RELAY_BRIEF, "  ")}
     agent = ScriptedAgent()
 
@@ -424,7 +436,7 @@ async def test_a_watch_without_a_product_name_is_left_out(tmp_path, no_x):
 @pytest.mark.asyncio
 async def test_a_removal_recorded_during_a_run_stops_that_posts_model_calls(tmp_path, no_x):
     db = _make_db(tmp_path / "cards.db")
-    reviews, _ = load_stored_reviews(db)
+    reviews, _ = load_stored_reviews(db, TOPICS)
     assert harness.removal_recorded(db, "2003") and not harness.removal_recorded(db, "2002")
     agent = ScriptedAgent()
 
@@ -440,7 +452,7 @@ async def test_a_removal_recorded_during_a_run_stops_that_posts_model_calls(tmp_
 
 @pytest.mark.asyncio
 async def test_finished_attempts_are_kept_when_the_redraft_fails(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
 
     class FailingRedraft(ScriptedAgent):
         async def draft_written(self, request, idempotency_key=None):
@@ -487,7 +499,7 @@ def test_the_summary_refuses_a_label_that_is_not_a_short_name():
 
 @pytest.mark.asyncio
 async def test_a_removal_recorded_mid_run_stops_the_next_model_call(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     agent, checker = ScriptedAgent(), CountingChecker()
     removed = {"now": False}
 
@@ -509,7 +521,7 @@ async def test_a_removal_recorded_mid_run_stops_the_next_model_call(tmp_path, no
 
 @pytest.mark.asyncio
 async def test_the_watchs_saved_attempt_limit_is_used(tmp_path, no_x):
-    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
     one_try = {f"t:{TOPIC}": dataclasses.replace(SETTINGS[f"t:{TOPIC}"], claim_gate_max_attempts=1)}
 
     records, _, _ = await run_harness(
@@ -575,3 +587,69 @@ def test_the_script_refuses_to_write_when_git_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(redraft_harness.subprocess, "run", unsafe)
     with pytest.raises(SystemExit):
         redraft_harness.ensure_ignored(tmp_path / "report.json")
+
+
+
+# ---------- review round 3 ----------
+
+
+@pytest.mark.asyncio
+async def test_each_run_records_its_calls_and_cost(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    client, _ = _stub_client(prompt_tokens=1000, completion_tokens=100)
+    cap = SpendCap(cap_usd=1.0, input_cost_usd=1e-6, output_cost_usd=1e-5)
+    wrapped = cap.wrap(client)
+
+    class PayingAgent(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            await wrapped.chat.completions.create(model="m", messages=[], max_completion_tokens=100)
+            return await super().draft_written(request, idempotency_key)
+
+    records, _, _ = await run_harness(
+        reviews[1:], SETTINGS, PayingAgent(texts=[UNSUPPORTED]), CountingChecker(),
+        plans={}, max_attempts=2, cap=cap,
+    )
+
+    (record,) = records
+    assert record.model_calls == 2  # the draft and the redraft (the fake checker is free)
+    assert record.cost_usd == pytest.approx(2 * (1000 * 1e-6 + 100 * 1e-5))
+    full = json.loads(report_json("before", records, summarize(records, harness.Counter(), cap)))
+    assert full["posts"][0]["cost_usd"] == record.cost_usd
+
+
+@pytest.mark.asyncio
+async def test_a_saved_attempt_limit_of_zero_is_kept(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    none_allowed = {f"t:{TOPIC}": dataclasses.replace(SETTINGS[f"t:{TOPIC}"], claim_gate_max_attempts=0)}
+    agent = ScriptedAgent()
+
+    records, _, _ = await run_harness(reviews[1:], none_allowed, agent, CountingChecker(), plans={}, max_attempts=2)
+
+    assert [r.outcome for r in records] == ["skipped"] and agent.requests == []
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_run_keeps_its_plan(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+
+    class FailingRedraft(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            if request.steer:
+                raise RuntimeError("synthetic provider error")
+            return await super().draft_written(request, idempotency_key)
+
+    records, _, _ = await run_harness(
+        reviews[1:], SETTINGS, FailingRedraft(texts=[UNSUPPORTED]), CountingChecker(), plans={}, max_attempts=2,
+    )
+
+    (record,) = records
+    assert (record.outcome, record.plan_source, record.mention_product) == ("error", "stored", True)
+
+
+def test_labels_and_model_names_with_ids_are_refused():
+    assert harness.safe_label("after2")
+    for label in ("2124917236280553696", "run-2124917236", "a/b", "x" * 41):
+        assert not harness.safe_label(label)
+    assert harness._model_label("gpt-4o-mini-2024-07-18") == "gpt-4o-mini-2024-07-18"
+    assert harness._model_label("openai/gpt-4o") == "openai/gpt-4o"
+    assert harness._model_label("post/1234567") == "(unrecognized model name)"

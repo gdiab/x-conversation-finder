@@ -200,8 +200,8 @@ def written_product_rule(name: str, mention_product: bool) -> str:
         "  is not, and never supports the opposite. Do not add a quality, benefit, outcome, number,\n"
         "  comparison, customer or integration that the cited sentences do not state (not \"streamlines\",\n"
         "  \"easily\", \"seamlessly\", \"efficiently\", \"saves time\" unless the brief says so). Do not\n"
-        "  drop or change a qualifier, limit, condition or modal (can, may, will, always, never),\n"
-        "  and do not move what the brief says about one feature to another. If a brief sentence\n"
+        "  drop or change a number, qualifier, limit, condition or modal (can, may, will, always,\n"
+        "  never), and do not move what the brief says about one feature to another. If a brief sentence\n"
         "  does not fit the post as it stands, say less, not something else. It must be a\n"
         "  statement, not a question."
     )

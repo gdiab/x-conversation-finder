@@ -196,6 +196,7 @@ def test_the_prompt_keeps_the_product_sentence_close_to_the_brief(sample_post):
     assert "is not, and never supports the opposite" in prompt
     assert "Do not add a quality, benefit, outcome, number,\n  comparison, customer or integration" in prompt
     assert '"streamlines"' in prompt
+    assert "drop or change a number, qualifier, limit, condition or modal" in prompt
     assert "say less, not something else" in prompt
     assert "It must be a\n  statement, not a question." in prompt
 

@@ -77,13 +77,22 @@ def _settings():
 
 
 async def export_settings(args) -> None:
-    """Write the product brief, name, aliases and key features of each
-    TopicWatch's current run, keyed by account and topic. Reads Temporal
-    only."""
+    """Write the product brief, name, aliases, key features and redraft
+    limit of each TopicWatch's current run, keyed by account and topic
+    ("watches"), and the watch topic of every Review ("review_topics", from
+    each Review's start input: a card's matched_topic is model-written).
+    Reads Temporal only."""
     from temporalio.client import Client
 
     from backend.eval.written_harness import settings_key
+    from backend.workflows.review import ReviewInput
     from backend.workflows.topic_watch import TopicWatchInput
+
+    async def start_input(handle, input_type):
+        history = await handle.fetch_history()
+        started = history.events[0].workflow_execution_started_event_attributes
+        (value,) = await client.data_converter.decode(started.input.payloads, [input_type])
+        return value
 
     out = Path(args.out)
     ensure_ignored(out)
@@ -92,12 +101,11 @@ async def export_settings(args) -> None:
     settings = get_settings()
     client = await Client.connect(settings.temporal_host, namespace=settings.temporal_namespace)
     result = json.loads(out.read_text()) if out.exists() else {}
+    watches = result.setdefault("watches", {})
+    review_topics = result.setdefault("review_topics", {})
     for workflow_id in args.workflow_id:
-        handle = client.get_workflow_handle(workflow_id)
-        history = await handle.fetch_history()
-        started = history.events[0].workflow_execution_started_event_attributes
-        (watch,) = await client.data_converter.decode(started.input.payloads, [TopicWatchInput])
-        result[settings_key(watch.account, watch.topic)] = {
+        watch = await start_input(client.get_workflow_handle(workflow_id), TopicWatchInput)
+        watches[settings_key(watch.account, watch.topic)] = {
             "product_brief": watch.product_brief,
             "product_name": watch.product_name,
             "product_aliases": list(watch.product_aliases or []),
@@ -106,6 +114,11 @@ async def export_settings(args) -> None:
             "claim_gate_max_attempts": watch.review_config.claim_gate_max_attempts,
         }
         print(f"{workflow_id}: topic {watch.topic!r}, product name {'set' if watch.product_name else 'missing'}")
+    async for execution in client.list_workflows("WorkflowType='Review'"):
+        handle = client.get_workflow_handle(execution.id, run_id=execution.run_id)
+        review = await start_input(handle, ReviewInput)
+        review_topics[execution.id] = review.topic
+    print(f"{len(review_topics)} Review topics")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2, ensure_ascii=False))
     print(f"wrote {out}")
@@ -138,9 +151,11 @@ async def run(args) -> None:
 
     settings = _settings()
     raw = json.loads(Path(args.settings).read_text())
-    by_key = {key: WatchSettings(**value) for key, value in raw.items()}
+    if not isinstance(raw.get("watches"), dict) or not isinstance(raw.get("review_topics"), dict):
+        sys.exit("--settings is not an export-settings file (it needs \"watches\" and \"review_topics\")")
+    by_key = {key: WatchSettings(**value) for key, value in raw["watches"].items()}
     db = Path(args.db)
-    reviews, excluded = load_stored_reviews(db)
+    reviews, excluded = load_stored_reviews(db, raw["review_topics"])
     if args.limit:
         reviews = reviews[: args.limit]
     plans = json.loads(plans_path.read_text()) if plans_path.exists() else {}
