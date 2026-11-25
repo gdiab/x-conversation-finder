@@ -425,6 +425,29 @@ async def test_edit_regate_does_not_keep_a_v1_fragment_verdict():
     assert not results[0].kept_segment
 
 
+async def test_edit_regate_accepts_a_selectable_duplicate_in_any_passage():
+    """Codex review r6: the same sentence after an unclear boundary in another passage."""
+    results = await verify_edited_text(EditedTextGateInput(
+        edited_text="We ship weekly.",
+        gated_segments=[],
+        founder_materials=[
+            material("Our API is fast. We ship weekly.", "passage_0"),
+            material("We are Acme Inc. We ship weekly.", "passage_1"),
+        ],
+        idempotency_key="issue10_duplicate",
+    ))
+    assert results[0].passed, results[0].reason
+    assert (results[0].source_passage_id, results[0].sentence_index) == ("passage_0", 1)
+
+
+def test_unversioned_guard_compares_exact_text():
+    """Codex thermo r6 (nit): normalization must not hide a changed sentence."""
+    passage = "We sell in the U.S.A. market today. Market today."
+    assert split_into_sentences_v1(passage)[1] == "market today."
+    ok, _, error = insert_claim_sentence(claim(1, version=None), {"passage_0": material(passage)})
+    assert not ok and "redraft" in error
+
+
 async def test_edit_regate_keeps_an_unversioned_whole_sentence_verdict():
     """In-flight cards gated before #10 keep claims that are still whole sentences."""
     passage = "Our API is fast. We ship weekly."
@@ -565,6 +588,13 @@ def test_whole_question_with_an_abbreviation_is_a_valid_target(post, question):
 def test_statement_before_a_question_is_outside_it(post, statement, question):
     assert [post[a:b].strip() for a, b in question_spans(post)] == [question]
     assert validate_reply_plan(plan(statement), post) != []
+
+
+def test_closing_guillemet_ends_a_statement_before_a_question():
+    """Codex thermo r6."""
+    post = "\u00abWe launched.\u00bb What do you think?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["What do you think?"]
+    assert validate_reply_plan(plan("\u00abWe launched.\u00bb"), post) != []
 
 
 def test_claim_splitter_stays_linear_on_many_initials():

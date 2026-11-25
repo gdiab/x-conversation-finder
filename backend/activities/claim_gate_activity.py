@@ -255,7 +255,7 @@ def _splitter_version_error(segment: Segment, passage: str, sentence: str) -> st
     if segment.splitter_version is None:
         legacy = split_into_sentences_v1(passage)
         idx = segment.sentence_index
-        if 0 <= idx < len(legacy) and normalize_text(legacy[idx]) == normalize_text(sentence):
+        if 0 <= idx < len(legacy) and legacy[idx] == sentence:
             return ""
     return (
         f"sentence_index was numbered under sentence splitter version "
@@ -343,7 +343,7 @@ class SentenceGateResult:
 
 
 def _verdict_reusable(
-    seg: Segment, passage_sentences: Dict[str, tuple], passage_splits: Dict[str, List[str]]
+    seg: Segment, passage_sentences: Dict[str, List[tuple]], passage_splits: Dict[str, List[str]]
 ) -> bool:
     """May the edit re-gate keep this gated segment's verdict (issue #10)?
 
@@ -357,11 +357,11 @@ def _verdict_reusable(
         return True
     if not seg.text:
         return False
-    match = passage_sentences.get(normalize_text(seg.text.rstrip('.!?')))
-    if match is None:
-        return False
-    passage_id, index, _ = match
-    return not claim_selectability_error(passage_splits[passage_id], index)
+    occurrences = passage_sentences.get(normalize_text(seg.text.rstrip('.!?')), [])
+    return any(
+        not claim_selectability_error(passage_splits[passage_id], index)
+        for passage_id, index, _ in occurrences
+    )
 
 
 @activity.defn(name="verify_edited_text")
@@ -401,7 +401,9 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
             # Normalize for comparison (B4: NFKC+casefold+whitespace)
             norm_sent = normalize_text(sent.rstrip('.!?'))
             # S2 (QA R14): Store original sentence for abbreviation and question checks
-            passage_sentences[norm_sent] = (passage_id, i, sent)
+            # issue #10: keep every occurrence; selectability depends on
+            # the neighbouring sentences, so duplicates can differ
+            passage_sentences.setdefault(norm_sent, []).append((passage_id, i, sent))
     
     # Split edited text into sentences
     sentences = split_into_sentences(input.edited_text)
@@ -476,7 +478,18 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
         # Check if it's a verbatim passage sentence
         # S2 (QA R14): Apply same checks as model path on passage-match branch
         if norm_sentence in passage_sentences:
-            passage_id, sent_idx, sent_text = passage_sentences[norm_sentence]
+            # Use an occurrence that passes the checks below if any does;
+            # otherwise the last one (the lookup kept only that before #10).
+            occurrences = passage_sentences[norm_sentence]
+            passage_id, sent_idx, sent_text = next(
+                (
+                    (pid, i, text)
+                    for pid, i, text in occurrences
+                    if text.rstrip().endswith('?') == is_question
+                    and not claim_selectability_error(passage_splits[pid], i)
+                ),
+                occurrences[-1],
+            )
             
             # S2: Check terminal punctuation type (question vs statement)
             # A question matches only a question. A passage question keeps its '?'.

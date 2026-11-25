@@ -30,10 +30,10 @@ _URL_RE = re.compile(r"https?://\S+?(?=[.,;:!?？)\]\"'”’]*(?:\s|$))", re.IG
 # Canals or railways?") is a boundary here, so a statement before a question
 # never counts as part of it (issue #10; backend.gate.sentence_boundary).
 _BOUNDARY_RE = re.compile(
-    r"[.!?？]+[\"'”’)\]]*(?=\s|$)|[!?？]+[\"'”’)\]]*(?=\w)|\n"
+    r"[.!?？]+[\"'”’)\]}»]*(?=\s|$)|[!?？]+[\"'”’)\]}»]*(?=\w)|\n"
 )
 _QUESTION_MARKS = ("?", "？")
-_CLOSERS = "\"'”’)]"
+_CLOSERS = "\"'”’)]}»"
 _NEXT_WORD_RE = re.compile(r"\s*(\S+)")
 _NON_SPACE_RE = re.compile(r"\S")
 
