@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -106,6 +106,36 @@ describe('App review queue', () => {
     listReviewsMock.mockRejectedValue(new Error('Failed to list reviews: Internal Server Error'));
     render(<App />);
     expect(await screen.findByText('Failed to list reviews: Internal Server Error')).toBeInTheDocument();
+  });
+
+  it('ignores a refresh response that a newer refresh superseded', async () => {
+    // The 30 s refresh and a card's reload after an edit can overlap; an
+    // older response must not put back the draft the newer one replaced.
+    vi.useFakeTimers();
+    try {
+      const byName = (username: string) => {
+        const card = makeCard({ workflow_id: `review:test:${username}` });
+        card.post = { ...card.post, author: { ...card.post.author, username } };
+        return { cards: [card], count: 1 };
+      };
+      listReviewsMock.mockResolvedValueOnce(byName('initial'));
+      render(<App />);
+      await act(async () => {});
+
+      let finishStale: (value: ReturnType<typeof byName>) => void = () => {};
+      listReviewsMock.mockReturnValueOnce(new Promise((resolve) => { finishStale = resolve; }));
+      await act(async () => { vi.advanceTimersByTime(30000); });
+      listReviewsMock.mockResolvedValueOnce(byName('fresh'));
+      await act(async () => { vi.advanceTimersByTime(30000); });
+      expect(screen.getByRole('heading', { name: 'Review: fresh' })).toBeInTheDocument();
+
+      await act(async () => finishStale(byName('stale')));
+
+      expect(screen.getByRole('heading', { name: 'Review: fresh' })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Review: stale' })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reloads when Refresh is clicked', async () => {

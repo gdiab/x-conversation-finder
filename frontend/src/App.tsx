@@ -2,7 +2,7 @@
  * Main App component.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ReviewCard } from './components/ReviewCard';
 import { StartWatchForm } from './components/StartWatchForm';
 import { listReviews } from './api/client';
@@ -18,19 +18,27 @@ function App() {
   const activeCards = cards.filter((c) => c.status !== 'skipped');
   const skippedCards = cards.filter((c) => c.status === 'skipped');
 
+  // The periodic refresh and an action's refresh can overlap; only the
+  // latest request may replace the cards, or an older response could put
+  // back a draft that was just edited (issue #15 review)
+  const latestLoad = useRef(0);
+
   const loadReviews = async () => {
+    const load = ++latestLoad.current;
     setLoading(true);
     setError(null);
     
     try {
       const result = await listReviews();
+      if (load !== latestLoad.current) return;
       setCards(result.cards.sort((a, b) => 
         b.evidence.confidence_score - a.evidence.confidence_score
       ));
     } catch (err) {
+      if (load !== latestLoad.current) return;
       setError(err instanceof Error ? err.message : 'Failed to load reviews');
     } finally {
-      setLoading(false);
+      if (load === latestLoad.current) setLoading(false);
     }
   };
 

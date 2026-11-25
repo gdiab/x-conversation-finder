@@ -14,6 +14,7 @@ from backend.models import Post, Author
 from backend.activities.store_activities import get_all_cards
 from backend.config import Settings
 from backend.database import init_db
+from backend.tests.review_waits import wait_for_card_ready
 
 
 @pytest.fixture
@@ -93,7 +94,7 @@ async def test_stored_status_is_plain_string_not_char_list(temp_db_for_status, m
             
             # Wait for workflow to create card
             from datetime import timedelta
-            await env.sleep(timedelta(seconds=1))
+            await wait_for_card_ready(handle)
             
             # Read card from database
             cards = get_all_cards()

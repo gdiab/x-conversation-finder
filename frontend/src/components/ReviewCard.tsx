@@ -2,15 +2,26 @@
  * ReviewCard component - shows a single review with evidence and draft.
  */
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { ReviewCard as ReviewCardType } from '../api/client';
-import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId, PostRemovedError } from '../api/client';
+import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId, PostRemovedError, ReviewApiError } from '../api/client';
 import { ReplyFitPanel } from './ReplyFitPanel';
 import { ReplyPlanPanel } from './ReplyPlanPanel';
 
 interface ReviewCardProps {
   card: ReviewCardType;
-  onUpdate: () => void;
+  // Reloads the queue. After an edit or nudge the card awaits it, so the
+  // actions stay disabled until the changed draft is shown.
+  onUpdate: () => void | Promise<void>;
+}
+
+// issue #20: shown instead of an error when the request can be sent again
+const NOT_READY_NOTICE = 'This review is still being prepared. Try again in a moment.';
+
+/** A "try again" notice for a not_ready/busy response, or null if the error is a real failure. */
+function retryNotice(err: unknown): string | null {
+  if (!(err instanceof ReviewApiError) || !err.retryLater) return null;
+  return err.code === 'not_ready' ? NOT_READY_NOTICE : err.detail;
 }
 
 export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
@@ -21,6 +32,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const [nudgeInstruction, setNudgeInstruction] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Not a failure: the request was refused for now (not_ready, busy) and can be retried
+  const [notice, setNotice] = useState<string | null>(null);
+  const [failingSentences, setFailingSentences] = useState<string[]>([]);
   const [isEditing, setIsEditing] = useState(false);
   const [isNudging, setIsNudging] = useState(false);
   const [showPostAnywayConfirm, setShowPostAnywayConfirm] = useState(false);
@@ -31,6 +45,21 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const editRequestId = useRef<string | null>(null);
   const nudgeRequestId = useRef<string | null>(null);
   const confirmRequestId = useRef<string | null>(null);
+
+  // The override acknowledges the failures of one draft. Once the draft or
+  // its gate result changes (an edit, a nudge, a reload), close the prompt:
+  // only a fresh post_anyway_required for the current draft reopens it.
+  const closePostAnyway = () => {
+    setShowPostAnywayConfirm(false);
+    setFailingSentences([]);
+  };
+  const draftText = card.evidence.draft?.text;
+  useEffect(closePostAnyway, [draftText, card.edited_text_gate_state]);
+  // The draft as currently shown, so a rejection that arrives after the card
+  // changed is not taken as a rejection of the new draft
+  const shownDraft = `${draftText ?? ''}\u0000${card.edited_text_gate_state ?? ''}`;
+  const shownDraftRef = useRef(shownDraft);
+  shownDraftRef.current = shownDraft;
 
   const handleApprove = async (postAnyway: boolean = false) => {
     if (!postedUrl.trim()) {
@@ -45,10 +74,16 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     
     setLoading(true);
     setError(null);
+    setNotice(null);
     setShowPostAnywayConfirm(false);
+    const draftAtRequest = shownDraftRef.current;
     
     try {
-      await approveReview(card.workflow_id, postedUrl, approveRequestId.current, postAnyway);
+      // No draft shown means nothing to approve; the server refuses '' as changed
+      await approveReview(card.workflow_id, postedUrl, approveRequestId.current, postAnyway, {
+        text: card.evidence.draft?.text ?? '',
+        gateState: card.edited_text_gate_state,
+      });
       approveRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
@@ -60,12 +95,29 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         onUpdate();
         return;
       }
-      const errorMsg = err instanceof Error ? err.message : 'Failed to approve';
-      // If error mentions post_anyway, show the confirm dialog
-      if (errorMsg.toLowerCase().includes('post_anyway') && !postAnyway) {
+      const wait = retryNotice(err);
+      if (wait) {
+        setNotice(wait);
+        return;
+      }
+      // The server's draft is not the one shown: reload and let the founder look again
+      if (err instanceof ReviewApiError && err.code === 'draft_changed') {
+        setNotice('The draft changed since it was shown. Review the current draft and approve again.');
+        onUpdate();
+        return;
+      }
+      // issue #15: the API says so with a code; the message text is for people
+      if (err instanceof ReviewApiError && err.code === 'post_anyway_required' && !postAnyway) {
+        if (shownDraftRef.current !== draftAtRequest) {
+          // The draft changed while the request ran: the failures listed are
+          // not the shown draft's. Ask for a fresh approve instead.
+          setNotice('The draft changed while approving. Review it and approve again.');
+          return;
+        }
+        setFailingSentences(err.failingSentences);
         setShowPostAnywayConfirm(true);
       }
-      setError(errorMsg);
+      setError(err instanceof Error ? err.message : 'Failed to approve');
     } finally {
       setLoading(false);
     }
@@ -79,6 +131,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     
     setLoading(true);
     setError(null);
+    setNotice(null);
     
     try {
       await skipReview(card.workflow_id, skipReason || 'Not relevant', skipRequestId.current);
@@ -104,14 +157,20 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     
     setLoading(true);
     setError(null);
+    setNotice(null);
     
     try {
       await editReview(card.workflow_id, editText, editRequestId.current);
       editRequestId.current = null; // Reset for next action
       setIsEditing(false);
-      onUpdate();
+      closePostAnyway();
+      // Keep the actions disabled until the edited draft is shown, so an
+      // approve (and its override prompt) never applies to an unseen draft
+      await onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to edit');
+      const wait = retryNotice(err);
+      if (wait) setNotice(wait);
+      else setError(err instanceof Error ? err.message : 'Failed to edit');
     } finally {
       setLoading(false);
     }
@@ -130,6 +189,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     
     setLoading(true);
     setError(null);
+    setNotice(null);
     
     try {
       const newDraft = await nudgeReview(card.workflow_id, nudgeInstruction, nudgeRequestId.current);
@@ -137,9 +197,15 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       setEditText(newDraft);
       setNudgeInstruction('');
       setIsNudging(false);
-      onUpdate();
+      closePostAnyway();
+      await onUpdate(); // as for edit: no approve before the new draft is shown
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to nudge');
+      const wait = retryNotice(err);
+      if (wait) setNotice(wait);
+      else setError(err instanceof Error ? err.message : 'Failed to nudge');
+      // issue #9: another Review of the post recorded its removal; reload to
+      // show the card without the post text
+      if (err instanceof PostRemovedError) onUpdate();
     } finally {
       setLoading(false);
     }
@@ -158,13 +224,16 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     
     setLoading(true);
     setError(null);
+    setNotice(null);
     
     try {
       await confirmPostedReview(card.workflow_id, replyUrl, confirmRequestId.current);
       confirmRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to confirm posted');
+      const wait = retryNotice(err);
+      if (wait) setNotice(wait);
+      else setError(err instanceof Error ? err.message : 'Failed to confirm posted');
     } finally {
       setLoading(false);
     }
@@ -683,6 +752,19 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         </div>
       )}
 
+      {/* Retry notice (issue #20): the request can be sent again, nothing failed */}
+      {notice && (
+        <div role="status" style={{
+          backgroundColor: '#e3f2fd',
+          color: '#0d47a1',
+          padding: '12px',
+          borderRadius: '4px',
+          marginBottom: '12px',
+        }}>
+          {notice}
+        </div>
+      )}
+
       {/* Error Display */}
       {error && (
         <div style={{
@@ -784,6 +866,13 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                   }
                   You can override this and post anyway by confirming below.
                 </div>
+                {failingSentences.length > 0 && (
+                  <ul style={{ fontSize: '13px', marginTop: 0, marginBottom: '12px' }}>
+                    {failingSentences.map((sentence, idx) => (
+                      <li key={idx}>Failing: "{sentence}"</li>
+                    ))}
+                  </ul>
+                )}
                 <button
                   onClick={() => handleApprove(true)}
                   disabled={loading}
@@ -799,7 +888,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                   Post Anyway (Override)
                 </button>
                 <button
-                  onClick={() => setShowPostAnywayConfirm(false)}
+                  onClick={closePostAnyway}
                   disabled={loading}
                   style={{ marginLeft: '8px' }}
                 >

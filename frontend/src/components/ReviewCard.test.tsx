@@ -1,8 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReviewCard } from './ReviewCard';
-import { approveReview, editReview, skipReview } from '../api/client';
+import { approveReview, editReview, nudgeReview, ReviewApiError, skipReview } from '../api/client';
 import {
   makeCard,
   makeDraft,
@@ -26,14 +26,18 @@ vi.mock('../api/client', async (importOriginal) => {
 const approveMock = vi.mocked(approveReview);
 const skipMock = vi.mocked(skipReview);
 const editMock = vi.mocked(editReview);
+const nudgeMock = vi.mocked(nudgeReview);
 
-// The workflow's validator text, as the API client wraps it in its error.
-// The card opens the override prompt only if the error contains "post_anyway".
-// api/client.test.ts checks the request body and that the response text reaches
-// the error; whether the live API puts the validator text in that response
-// needs an end-to-end check against a running backend.
-const POST_ANYWAY_ERROR =
-  'Failed to approve review: Bad Request. Edited text has 1 failing sentence(s). Set post_anyway=true to approve anyway.';
+// The workflow's validator text, as the API client puts it in its error.
+// The card opens the override prompt on the code post_anyway_required
+// (issue #15); api/client.test.ts builds this error from the API's JSON body,
+// and backend/tests/test_review_api_errors.py checks the API sends it.
+const POST_ANYWAY_DETAIL = 'Edited text has 1 failing sentence(s). Set post_anyway=true to approve anyway.';
+const POST_ANYWAY_ERROR = `Failed to approve review: ${POST_ANYWAY_DETAIL}`;
+
+function postAnywayError(detail = POST_ANYWAY_DETAIL, failing: string[] = ['Edited synthetic sentence.']) {
+  return new ReviewApiError(`Failed to approve review: ${detail}`, 409, 'post_anyway_required', detail, failing);
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -187,6 +191,8 @@ describe('ReviewCard: approve flow', () => {
       'https://x.example/me/status/9',
       expect.stringMatching(/^req_/),
       false,
+      // the draft the founder saw; the server checks it
+      { text: card.evidence.draft?.text ?? '', gateState: card.edited_text_gate_state },
     );
     expect(onUpdate).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
@@ -210,7 +216,7 @@ describe('ReviewCard: approve flow', () => {
         },
       ],
     });
-    approveMock.mockRejectedValueOnce(new Error(POST_ANYWAY_ERROR)).mockResolvedValueOnce();
+    approveMock.mockRejectedValueOnce(postAnywayError()).mockResolvedValueOnce();
     render(<ReviewCard card={card} onUpdate={onUpdate} />);
 
     await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
@@ -220,6 +226,7 @@ describe('ReviewCard: approve flow', () => {
     expect(screen.getByText(POST_ANYWAY_ERROR)).toBeInTheDocument();
     expect(screen.getByText(/Edited text requires acknowledgement/)).toBeInTheDocument();
     expect(screen.getByText(/The edited text contains claims that failed the claim gate\./)).toBeInTheDocument();
+    expect(screen.getByText('Failing: "Edited synthetic sentence."')).toBeInTheDocument();
     expect(onUpdate).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Post Anyway (Override)' }));
@@ -239,7 +246,7 @@ describe('ReviewCard: approve flow', () => {
     const user = userEvent.setup();
     const card = makeCard({ edited_text_gate_state: 'not_checked' });
     approveMock.mockRejectedValueOnce(
-      new Error('Failed to approve review: Bad Request. Edited text gate check failed (retries exhausted). Set post_anyway=true to approve anyway.'),
+      postAnywayError('Edited text gate check failed (retries exhausted). Set post_anyway=true to approve anyway.', []),
     );
     render(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
@@ -252,7 +259,7 @@ describe('ReviewCard: approve flow', () => {
 
   it('closes the override prompt on Cancel without calling the API again', async () => {
     const user = userEvent.setup();
-    approveMock.mockRejectedValueOnce(new Error(POST_ANYWAY_ERROR));
+    approveMock.mockRejectedValueOnce(postAnywayError());
     render(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
 
     await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
@@ -279,7 +286,7 @@ describe('ReviewCard: approve flow', () => {
   it('keeps showing the server error if the override attempt fails too', async () => {
     const user = userEvent.setup();
     approveMock
-      .mockRejectedValueOnce(new Error(POST_ANYWAY_ERROR))
+      .mockRejectedValueOnce(postAnywayError())
       .mockRejectedValueOnce(new Error('Failed to approve review: Conflict. already approved'));
     const onUpdate = vi.fn();
     render(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={onUpdate} />);
@@ -290,6 +297,158 @@ describe('ReviewCard: approve flow', () => {
 
     expect(screen.getByText('Failed to approve review: Conflict. already approved')).toBeInTheDocument();
     expect(onUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('ReviewCard: error codes (issues #15, #20)', () => {
+  it('does not open the override prompt for an error that only mentions post_anyway', async () => {
+    // Before issue #15 the card matched the substring; now only the code counts
+    const user = userEvent.setup();
+    approveMock.mockRejectedValueOnce(new Error('Failed to approve review: something about post_anyway'));
+    render(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+  });
+
+  it('treats not_ready as "try again", not a failure, and retries with the same request id', async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    approveMock
+      .mockRejectedValueOnce(
+        new ReviewApiError('Failed to approve review: not ready', 409, 'not_ready', 'Cannot approve before the draft card is ready'),
+      )
+      .mockResolvedValueOnce();
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(screen.getByRole('status')).toHaveTextContent('This review is still being prepared. Try again in a moment.');
+    expect(screen.queryByText(/Failed to approve review/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    const [first, second] = approveMock.mock.calls;
+    expect(second[2]).toBe(first[2]);
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('closes the override prompt when the draft changes, so it never acknowledges another draft', async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ edited_text_gate_state: 'failed' });
+    approveMock.mockRejectedValueOnce(postAnywayError());
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(screen.getByRole('button', { name: 'Post Anyway (Override)' })).toBeInTheDocument();
+
+    // The queue reloads with an edited draft (another tab, or this card's edit)
+    const edited = makeCard({ edited_text_gate_state: 'failed' });
+    edited.evidence = makeEvidence({ draft: makeDraft({ text: 'A different synthetic draft.' }) });
+    rerender(<ReviewCard card={edited} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Failing: "Edited synthetic sentence."')).not.toBeInTheDocument();
+  });
+
+  it('ignores a post_anyway_required that arrives after the draft changed', async () => {
+    const user = userEvent.setup();
+    let reject: (err: unknown) => void = () => {};
+    approveMock.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    const card = makeCard({ edited_text_gate_state: 'failed' });
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    const edited = makeCard({ edited_text_gate_state: 'failed' });
+    edited.evidence = makeEvidence({ draft: makeDraft({ text: 'A different synthetic draft.' }) });
+    rerender(<ReviewCard card={edited} onUpdate={vi.fn()} />);
+    await act(async () => reject(postAnywayError()));
+
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('The draft changed while approving. Review it and approve again.');
+  });
+
+  it('keeps Approve disabled after an edit until the reloaded card is shown', async () => {
+    const user = userEvent.setup();
+    let finishReload: () => void = () => {};
+    const onUpdate = vi.fn(() => new Promise<void>((resolve) => { finishReload = resolve; }));
+    editMock.mockResolvedValue('Edited synthetic text.');
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    await act(async () => finishReload());
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled();
+  });
+
+  it('closes the override prompt after a successful edit', async () => {
+    const user = userEvent.setup();
+    approveMock.mockRejectedValueOnce(postAnywayError());
+    editMock.mockResolvedValue('Edited synthetic text.');
+    render(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(editMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+  });
+
+  it('reloads and asks for another look when the server says the draft changed', async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    const detail = 'The draft changed since it was shown. Review the current draft and approve again.';
+    approveMock.mockRejectedValueOnce(new ReviewApiError(`Failed to approve review: ${detail}`, 409, 'draft_changed', detail));
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status')).toHaveTextContent(detail);
+    expect(screen.queryByText(/Failed to approve review/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+  });
+
+  it('shows a busy nudge as a notice with the server message', async () => {
+    const user = userEvent.setup();
+    const detail = 'Cannot nudge while another draft change is in progress. Retry after it completes.';
+    nudgeMock.mockRejectedValueOnce(new ReviewApiError(`Failed to nudge review: ${detail}`, 409, 'busy', detail));
+    render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Apply Nudge' }));
+
+    expect(screen.getByRole('status')).toHaveTextContent(detail);
+    expect(screen.queryByText(/Failed to nudge review/)).not.toBeInTheDocument();
+  });
+
+  it('shows a rejected nudge as an error', async () => {
+    const user = userEvent.setup();
+    const detail = 'Nudged draft rejected; the current draft is unchanged: synthetic reason';
+    nudgeMock.mockRejectedValueOnce(new ReviewApiError(`Failed to nudge review: ${detail}`, 422, 'rejected', detail));
+    render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Apply Nudge' }));
+
+    expect(screen.getByText(`Failed to nudge review: ${detail}`)).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 });
 

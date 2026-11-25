@@ -26,6 +26,7 @@ from backend.activities.store_activities import get_all_cards, store_card, updat
 from backend.adapters import FakeReplyAgent
 from backend.models import ReplyPlan
 from backend.workflows.review import REPLY_PLAN_PATCH_ID, ReviewWorkflow
+from backend.tests.review_waits import wait_for_card_ready
 
 FIXTURES = Path(__file__).parent / "fixtures"
 QUESTION = "How do you folks handle eventual consistency?"  # from conftest sample_post
@@ -84,7 +85,7 @@ async def test_plan_is_produced_stored_and_passed_to_draft(make_review_input, x_
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
 
             card = await handle.query("get_card")
             assert card["status"] == "pending"
@@ -133,7 +134,7 @@ async def test_invalid_plan_is_rerequested_once_with_errors(make_review_input, x
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
 
             card = await handle.query("get_card")
             assert card["status"] == "pending"
@@ -204,7 +205,7 @@ async def test_no_product_mention_gives_claimless_draft_that_passes_gate(make_re
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
 
             card = await handle.query("get_card")
             assert card["status"] == "pending"
@@ -317,7 +318,7 @@ async def test_draft_with_forbidden_claim_is_redrafted_with_reason(make_review_i
                 ReviewWorkflow.run, review_input,
                 id=f"review:test:{review_input.post.id}_plan_redraft", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
 
             card = await handle.query("get_card")
             assert card["status"] == "pending"
@@ -398,7 +399,7 @@ async def test_pre_plan_workflow_handles_nudge_edit_approve_without_plan(
                 ReviewWorkflow.run, review_input,
                 id=f"review:test:{review_input.post.id}_preplan_updates", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             card = await handle.query("get_card")
             assert card["status"] == "pending"
             assert card["evidence"]["reply_plan"] is None
@@ -428,10 +429,10 @@ async def test_delete_post_text_removes_plan_target_point(make_review_input, x_a
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
             workflow_id = f"review:test:{review_input.post.id}_plan_delete"
-            await env.client.start_workflow(
+            handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             assert _db_card(workflow_id)["evidence"]["reply_plan"]["target_point"] == QUESTION
 
     assert _delete_post_text_sync(DeletePostTextInput(workflow_id=workflow_id, idempotency_key="k"))
@@ -461,7 +462,7 @@ async def test_nudge_that_breaks_the_plan_is_rejected_and_draft_kept(make_review
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             before = await handle.query("get_card")
             assert before["evidence"]["draft"]["text"] == "Thanks! What are you using today?"
 
@@ -493,7 +494,7 @@ async def test_nudge_under_plan_is_gated_and_assembled(make_review_input, x_acti
                 ReviewWorkflow.run, review_input,
                 id=f"review:test:{review_input.post.id}_plan_nudge_ok", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             text = await handle.execute_update("nudge", args=["Make it shorter", str(uuid.uuid4())])
             card = await handle.query("get_card")
             assert card["evidence"]["draft"]["claim_gate"]["passed"] is True
@@ -526,7 +527,7 @@ async def test_nudge_activity_failure_under_plan_can_be_retried(make_review_inpu
                 ReviewWorkflow.run, review_input,
                 id=f"review:test:{review_input.post.id}_plan_nudge_flaky", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             request_id = str(uuid.uuid4())
             with pytest.raises(WorkflowUpdateFailedError):
                 await handle.execute_update("nudge", args=["Make it shorter", request_id])
@@ -572,7 +573,7 @@ async def test_reply_404_fails_confirmation_and_keeps_target_post(make_review_in
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             await handle.execute_update(
                 "approve", args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
             )
@@ -623,7 +624,7 @@ async def test_edit_and_approve_are_rejected_while_a_nudge_is_in_flight(make_rev
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
 
             nudge = await handle.start_update(
                 "nudge",
@@ -695,7 +696,7 @@ async def test_failed_confirmation_can_be_retried_with_same_request_id(make_revi
                 ReviewWorkflow.run, review_input,
                 id=f"review:test:{review_input.post.id}_confirm_retry", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             await handle.execute_update(
                 "approve", args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
             )
@@ -722,7 +723,7 @@ async def test_gated_nudge_clears_a_failed_edit_gate(make_review_input, x_activi
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             await handle.execute_update(
                 "edit", args=["I think ours is way cheaper.", str(uuid.uuid4())]
             )
@@ -792,7 +793,7 @@ async def test_legacy_reply_404_branch_still_deletes_and_redacts_query(make_revi
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             await handle.execute_update(
                 "approve", args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
             )
@@ -875,7 +876,7 @@ async def test_needs_written_drafts_switched_off_drafts_phrase_only(make_review_
                 ReviewWorkflow.run, review_input,
                 id=f"review:test:{review_input.post.id}_needs_written_off", task_queue="test",
             )
-            await env.sleep(1)
+            await wait_for_card_ready(handle)
             card = await handle.query("get_card")
             assert card["status"] == "pending"
             assert card["evidence"]["reply_plan_skip_rule"] is None
