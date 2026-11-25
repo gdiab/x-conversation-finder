@@ -17,6 +17,7 @@ asyncio.Event set inside a blocking activity.
 """
 
 import asyncio
+import dataclasses
 import pytest
 import uuid
 
@@ -42,14 +43,30 @@ from backend.database import get_db, ReviewCardDB
 # only if the awaited event never happens (a real failure, not load).
 WAIT_TIMEOUT_SEC = 60
 
+# Start-to-close timeout for a verify_edited_text attempt the test holds open
+# on purpose. With the fixture's 30 s, a long stall could expire the held
+# attempt and turn the edit into "not_checked" while the test still treats it
+# as in flight; an hour is never reached by a test.
+HELD_GATE_TIMEOUT_SEC = 3600
+
+
+def held_gate_input(make_review_input):
+    """ReviewInput for tests whose verify_edited_text blocks on a test event."""
+    review_input = make_review_input()
+    return make_review_input(config=dataclasses.replace(
+        review_input.config, activity_timeout_medium_sec=HELD_GATE_TIMEOUT_SEC,
+    ))
+
 
 class CardWrites:
     """Records each store_card/update_card call the worker has finished, by
     idempotency key, so a test can wait for a specific write.
 
-    The key is recorded only after the real activity returns True (the row
-    was committed), so the row is committed when wait_for() returns; a write
-    that found no row is not recorded and the wait times out. The pending card is stored after the
+    The key is recorded only after the real activity returns True; a write
+    that found no row returns False, is not recorded, and the wait times out.
+    True means the write committed, except that update_card also returns True
+    when it ignores a stale edit_seq. The tests wait only on the pending store
+    and the approval write, which carry no edit_seq. The pending card is stored after the
     workflow sets self.evidence, so once ":store:pending" is recorded the
     edit/approve validators see the draft.
     """
@@ -489,7 +506,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
                 *card_writes.activities(),
             ],
         ):
-            review_input = make_review_input()
+            review_input = held_gate_input(make_review_input)
             workflow_id = f"review:test:{review_input.post.id}_s3_concurrent"
             
             handle = await env.client.start_workflow(
@@ -754,7 +771,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
                 *card_writes.activities(),
             ],
         ):
-            review_input = make_review_input()
+            review_input = held_gate_input(make_review_input)
             workflow_id = f"review:test:{review_input.post.id}_b3_concurrent"
             
             handle = await env.client.start_workflow(
@@ -947,7 +964,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
                 *card_writes.activities(),
             ],
         ):
-            review_input = make_review_input()
+            review_input = held_gate_input(make_review_input)
             workflow_id = f"review:test:{review_input.post.id}_r12_lww"
             
             handle = await env.client.start_workflow(
@@ -1214,7 +1231,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
                 *card_writes.activities(),
             ],
         ):
-            review_input = make_review_input()
+            review_input = held_gate_input(make_review_input)
             workflow_id = f"review:test:{review_input.post.id}_s5_race"
             
             handle = await env.client.start_workflow(
