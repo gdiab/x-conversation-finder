@@ -255,11 +255,31 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
     )
 
 
+def _post_removal_recorded(db, post_id: str) -> bool:
+    """Whether any stored card of this post records a removal (issue #9)."""
+    return db.query(ReviewCardDB.workflow_id).filter(
+        ReviewCardDB.post_data["id"].as_string() == post_id,
+        ReviewCardDB.post_data["text_removed"].as_boolean() == True,  # noqa: E712
+    ).first() is not None
+
+
+def card_post_text_removed(workflow_id: str) -> bool:
+    """Whether this workflow's stored card records a removal (issue #9)."""
+    card = _get_card_sync(GetCardInput(workflow_id=workflow_id))
+    return bool(card and card["post"].get("text_removed"))
+
+
 def _store_card_sync(input: StoreCardInput) -> bool:
     """Synchronous DB work for store_card (B3)."""
     db = get_db()
     try:
         card_db = _card_to_db(input.card)
+        
+        # issue #9: a removal already recorded for this post (by another
+        # account's Review, or this card's own earlier removal) also applies to
+        # this write, so a late or retried store cannot put the text back
+        if _post_removal_recorded(db, card_db.post_data["id"]):
+            _remove_card_post_text(card_db)
         
         # Use INSERT...ON CONFLICT (B3)
         # SQLAlchemy's merge() provides upsert-like behavior

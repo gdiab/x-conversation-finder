@@ -714,7 +714,8 @@ class ReviewWorkflow:
                 post_id=self.input.post.id,
                 idempotency_key=f"{workflow_id}:refetch_target:{key}",
             ),
-            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+            # Longer than HttpXClient's 30 s request timeout
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
             result_type=Optional[Post],
         )

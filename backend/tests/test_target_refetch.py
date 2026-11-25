@@ -48,7 +48,16 @@ APPROVE_URL = "https://x.com/test/status/999"
 
 
 class QuotingAgent(FakeReplyAgent):
-    """Fake research whose why_it_fits quotes the post, as a model's may."""
+    """Fake research whose why_it_fits quotes the post, as a model's may.
+    Records the evidence each draft() call received."""
+
+    def __init__(self):
+        super().__init__()
+        self.drafted = []
+
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+        self.drafted.append(idempotency_key)
+        return await super().draft(evidence, steer, idempotency_key, plan)
 
     async def research(self, post, topic, product_brief, idempotency_key):
         evidence = await super().research(post, topic, product_brief, idempotency_key)
@@ -88,9 +97,9 @@ class TargetClient(FakeXClient):
         return await super().lookup_post(post_id)
 
 
-def _worker(env, x_client):
+def _worker(env, x_client, agent=None):
     x_acts = XActivities(x_client)
-    reply_acts = ReplyActivities(QuotingAgent())
+    reply_acts = ReplyActivities(agent or QuotingAgent())
     return Worker(
         env.client,
         task_queue="test",
@@ -357,13 +366,16 @@ async def test_skip_during_refetch_waits_for_the_removal(make_review_input):
 @pytest.mark.asyncio
 async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
     """Two accounts review the same post. A 404 at one account's approve
-    removes the text from both stored cards, and the other Review's query
-    (its workflow state still holds the text) is redacted on read."""
+    removes the text from both stored cards; the other Review's query (its
+    workflow state still holds the text) is redacted on read, a nudge there
+    sends nothing to the model, and a Review that stores its card only after
+    the removal stores it redacted."""
     from backend.activities.store_activities import apply_stored_removal
 
     client = TargetClient(["gone"])
+    agent = QuotingAgent()
     async with await WorkflowEnvironment.start_time_skipping() as env:
-        async with _worker(env, client):
+        async with _worker(env, client, agent):
             review_input, first = await _start(env, make_review_input, "refetch_multi_a")
             other_input = make_review_input(account="other")
             other = await env.client.start_workflow(
@@ -389,6 +401,24 @@ async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
             assert redacted["status"] == "pending"
             for fragment in POST_FRAGMENTS:
                 assert fragment not in json.dumps(redacted)
+
+            # A nudge on the other Review must not send its stale evidence on
+            drafts_before = len(agent.drafted)
+            with pytest.raises(WorkflowUpdateFailedError):
+                await other.execute_update("nudge", args=["Make it shorter", str(uuid.uuid4())])
+            assert len(agent.drafted) == drafts_before
+
+            # A Review whose card is stored after the removal stores it redacted
+            late_input = make_review_input(account="late")
+            late = await env.client.start_workflow(
+                ReviewWorkflow.run, late_input,
+                id=f"review:late:{late_input.post.id}_refetch_multi_c", task_queue="test",
+            )
+            await env.sleep(1)
+            stored_late = _db_card(late.id)
+            assert stored_late["post"]["text_removed"] is True
+            for fragment in POST_FRAGMENTS:
+                assert fragment not in json.dumps(stored_late)
 
 
 # ---------- the #5 fix still holds ----------
