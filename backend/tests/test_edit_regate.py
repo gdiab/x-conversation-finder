@@ -39,6 +39,8 @@ from backend.activities.store_activities import (
 from backend.activities.claim_gate_activity import claim_gate, verify_edited_text
 from backend.adapters import FakeXClient, FakeReplyAgent
 from backend.database import get_db, ReviewCardDB
+from backend.tests.review_waits import query_card
+from backend.tests.fake_gates import edited_text, gate_result
 
 # Hang guard only: every wait below ends on an event, and this bound is hit
 # only if the awaited event never happens (a real failure, not load).
@@ -222,7 +224,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_edit_pass"
+            workflow_id = f"review:test:{review_input.post_id}_edit_pass"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -234,7 +236,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Get original draft
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             original_text = card["evidence"]["draft"]["text"]
             
@@ -248,7 +250,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
             assert result_text == edited_text
             
             # Check card has edit gate results (all passing)
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_results"] is not None
             assert all(r["passed"] for r in card["edited_text_gate_results"])
             
@@ -305,7 +307,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_edit_fail"
+            workflow_id = f"review:test:{review_input.post_id}_edit_fail"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -325,7 +327,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
             )
             
             # Check card has edit gate results with failures
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_results"] is not None
             gate_results = card["edited_text_gate_results"]
             
@@ -373,7 +375,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
             await card_writes.wait_for_approved(workflow_id)
             
             # Check card recorded post_anyway
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["post_anyway"] is True
             assert card["post_anyway_failing_sentences"] is not None
             assert len(card["post_anyway_failing_sentences"]) > 0
@@ -412,7 +414,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_edit_exact"
+            workflow_id = f"review:test:{review_input.post_id}_edit_exact"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -424,7 +426,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
             await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Get original draft text
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             original_text = card["evidence"]["draft"]["text"]
             
             # Edit but keep the exact same text (no changes)
@@ -436,7 +438,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
             )
             
             # Check card has edit gate results
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             gate_results = card["edited_text_gate_results"]
             
             # All sentences should pass (reusing gate)
@@ -466,7 +468,7 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_edit_after_approve"
+            workflow_id = f"review:test:{review_input.post_id}_edit_after_approve"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -531,7 +533,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
         await gate_block_event.wait()
         activity.logger.info("Gate activity unblocked, proceeding")
         # Return empty list (all sentences passed) - we're testing concurrency, not gate logic
-        return []
+        return gate_result(input)
     
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -549,7 +551,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
             ],
         ):
             review_input = held_gate_input(make_review_input)
-            workflow_id = f"review:test:{review_input.post.id}_s3_concurrent"
+            workflow_id = f"review:test:{review_input.post_id}_s3_concurrent"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -577,7 +579,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
 
             # The workflow query shows the edit has not been committed yet
             # (B2: text and gate state change only after the gate returns)
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_state"] is None
             assert card["evidence"]["draft"]["text"] != edit_text
 
@@ -634,7 +636,7 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_replay"
+            workflow_id = f"review:test:{review_input.post_id}_replay"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -702,7 +704,7 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_b2_fix"
+            workflow_id = f"review:test:{review_input.post_id}_b2_fix"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -783,10 +785,10 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
     @activity_module.defn(name="verify_edited_text")
     async def verify_edited_text_blocking(input):
         """Gate that blocks each edit until the test releases it."""
-        marker = "FIRST" if "FIRST" in input["edited_text"] else "SECOND"
+        marker = "FIRST" if "FIRST" in edited_text(input) else "SECOND"
         gate_started[marker].set()
         await gate_release[marker].wait()
-        return []  # passing results
+        return gate_result(input)  # passing results
     
     async def assert_approve_rejected_in_flight():
         with pytest.raises(WorkflowUpdateFailedError) as exc_info:
@@ -817,7 +819,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
             ],
         ):
             review_input = held_gate_input(make_review_input)
-            workflow_id = f"review:test:{review_input.post.id}_b3_concurrent"
+            workflow_id = f"review:test:{review_input.post_id}_b3_concurrent"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -897,7 +899,7 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_c_error"
+            workflow_id = f"review:test:{review_input.post_id}_c_error"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -979,7 +981,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
     async def verify_edited_text_controlled(input):
         """Gate activity that blocks per-edit to control finish order."""
         from temporalio import activity
-        text = input["edited_text"]
+        text = edited_text(input)
         activity.logger.info(f"Gate for: {text[:20]}")
         
         if "FIRST" in text:
@@ -994,7 +996,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
             activity.logger.info("SECOND edit gate released")
         
         # Both pass
-        return []
+        return gate_result(input)
     
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -1012,7 +1014,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
             ],
         ):
             review_input = held_gate_input(make_review_input)
-            workflow_id = f"review:test:{review_input.post.id}_r12_lww"
+            workflow_id = f"review:test:{review_input.post_id}_r12_lww"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -1157,7 +1159,7 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_r15_four_segments"
+            workflow_id = f"review:test:{review_input.post_id}_r15_four_segments"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -1179,7 +1181,7 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
             assert result_text == edited_text
             
             # QA R15: Verify gate results show all 4 sentences failed with specific reason
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             gate_results = card["edited_text_gate_results"]
             
             # Should have 4 results (one per sentence)
@@ -1248,7 +1250,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
     async def verify_edited_text_controlled(input):
         """Gate activity that blocks per-edit to control finish order."""
         from temporalio import activity
-        text = input["edited_text"]
+        text = edited_text(input)
         activity.logger.info(f"Gate for: {text[:20]}")
         
         if "EDIT_A" in text:
@@ -1263,7 +1265,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
             activity.logger.info("EDIT_B gate released")
         
         # Both pass
-        return []
+        return gate_result(input)
     
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
@@ -1281,7 +1283,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
             ],
         ):
             review_input = held_gate_input(make_review_input)
-            workflow_id = f"review:test:{review_input.post.id}_s5_race"
+            workflow_id = f"review:test:{review_input.post_id}_s5_race"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,

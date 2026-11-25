@@ -18,7 +18,7 @@ from backend.activities.reply_activities import ReplyActivities
 from backend.activities.store_activities import store_card, update_card
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
-from backend.tests.review_waits import wait_for_card_ready
+from backend.tests.review_waits import wait_for_card_ready, query_card
 
 
 @pytest.mark.asyncio
@@ -42,7 +42,7 @@ async def test_review_workflow_approve(make_review_input, x_activities, reply_ac
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}"
+            workflow_id = f"review:test:{review_input.post_id}"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -53,9 +53,9 @@ async def test_review_workflow_approve(make_review_input, x_activities, reply_ac
             
             await wait_for_card_ready(handle)
             
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
-            assert card["evidence"]["post_id"] == review_input.post.id
+            assert card["evidence"]["post_id"] == review_input.post_id
             
             # Approve
             client_request_id = str(uuid.uuid4())
@@ -102,7 +102,7 @@ async def test_review_workflow_skip(make_review_input, x_activities, reply_activ
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_skip"
+            workflow_id = f"review:test:{review_input.post_id}_skip"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -144,7 +144,7 @@ async def test_review_workflow_nudge(make_review_input, x_activities, reply_acti
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_nudge"
+            workflow_id = f"review:test:{review_input.post_id}_nudge"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -207,7 +207,7 @@ async def test_review_workflow_timeout(make_review_input, x_activities, reply_ac
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_timeout"
+            workflow_id = f"review:test:{review_input.post_id}_timeout"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -245,7 +245,7 @@ async def test_review_workflow_low_confidence(make_review_input, x_activities, r
             # The sample post passes every skip rule and scores about 0.96 under
             # confidence rule v2, so only a threshold above that skips it.
             review_input = make_review_input(confidence_threshold=0.99)
-            workflow_id = f"review:test:{review_input.post.id}_low_conf"
+            workflow_id = f"review:test:{review_input.post_id}_low_conf"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -279,7 +279,7 @@ async def test_review_workflow_approved_not_confirmed(make_review_input, x_activ
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_not_confirmed"
+            workflow_id = f"review:test:{review_input.post_id}_not_confirmed"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -325,7 +325,7 @@ async def test_review_workflow_confirm_posted_invalid_url(make_review_input, x_a
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_invalid_url"
+            workflow_id = f"review:test:{review_input.post_id}_invalid_url"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -383,7 +383,7 @@ async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_ac
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_dup_approve"
+            workflow_id = f"review:test:{review_input.post_id}_dup_approve"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -412,7 +412,7 @@ async def test_review_workflow_duplicate_approve_ignored(make_review_input, x_ac
             await env.sleep(1)
             
             # Query the card to verify it's approved
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "approved"
 
 
@@ -530,7 +530,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_claim_fail"
+            workflow_id = f"review:test:{review_input.post_id}_claim_fail"
             
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
@@ -544,7 +544,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             assert result == "skipped"
             
             # Query the card to verify final status
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "skipped"
             # Skip reason includes gate failure details
             assert "not enough evidence" in card["skip_reason"].lower()
@@ -670,8 +670,11 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
                 x_activities.check_followup,
             ],
         ):
+            from dataclasses import replace
+            from backend.review_docs import load_post
             review_input = make_review_input()
-            review_input.post.id = "1002"  # Different post
+            # A different post (issue #23: stored, as a search would)
+            review_input = make_review_input(post=replace(load_post(review_input.post_id), id="1002"))
             workflow_id = f"review:test:1002_multi_fail"
             
             handle = await env.client.start_workflow(
@@ -686,7 +689,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             assert result == "skipped"
             
             # Query the card to verify final status (workflow memory)
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "skipped"
             
             # QA R15: Verify failed sentence with per-sentence failure reason

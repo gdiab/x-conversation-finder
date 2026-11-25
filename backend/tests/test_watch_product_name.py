@@ -135,6 +135,10 @@ async def test_starting_a_running_watch_says_its_product_name_was_not_changed(mo
 
 
 class _NudgeHandle:
+    async def query(self, name):
+        # A Review whose input carries the post: sent the text (issue #23)
+        return {"status": "pending"}
+
     async def execute_update(self, name, args):
         assert name in ("nudge", "edit")
         return "A redraft that quotes 'eventual consistency' from the post."

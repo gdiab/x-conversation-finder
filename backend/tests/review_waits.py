@@ -27,9 +27,41 @@ async def wait_for_card_ready(handle) -> dict:
     """
     async def _poll() -> dict:
         while True:
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             if not card.get("in_progress"):
                 return card
             await asyncio.sleep(0.05)
 
     return await asyncio.wait_for(_poll(), WAIT_TIMEOUT_SEC)
+
+
+def rejection_message(handle, error) -> str:
+    """An update rejection's message as the API reports it.
+
+    issue #23: a text-free nudge's rejection reasons quote the redraft, so
+    they are stored, not in the error; the API adds them
+    (backend.api.stored_nudge_rejection).
+    """
+    from backend.api import stored_nudge_rejection
+    from backend.workflows.review import NUDGE_REJECTED_ERROR
+
+    cause = getattr(error, "cause", error)
+    if getattr(cause, "type", None) == NUDGE_REJECTED_ERROR:
+        return stored_nudge_rejection(handle.id, cause) or str(cause)
+    return str(cause)
+
+
+async def query_card(handle) -> dict:
+    """The card as GET /api/reviews/{id} returns it.
+
+    issue #23: a Review started with only a post id answers get_card with
+    its state ("text_free": true); its content is on the stored card, and
+    the API merges the two (store_activities.text_free_card). A Review whose
+    input carries the post answers with the whole card, as before.
+    """
+    card = await handle.query("get_card")
+    if card.get("text_free"):
+        from backend.activities.store_activities import text_free_card
+
+        card = text_free_card(handle.id, card)
+    return card

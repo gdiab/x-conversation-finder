@@ -4,7 +4,7 @@ Database setup and models for SQLite persistence.
 Per B3: Worker and API are separate processes, so in-memory store doesn't work.
 """
 
-from sqlalchemy import create_engine, Column, String, Float, JSON, DateTime, Boolean, Integer, text
+from sqlalchemy import create_engine, event, Column, String, Float, JSON, DateTime, Boolean, Integer, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone
@@ -42,6 +42,49 @@ class ReviewCardDB(Base):
     post_anyway_failing_sentences = Column(JSON, nullable=True)
     # QA R13: Monotonic edit sequence to prevent stale card writes
     edit_seq = Column(Integer, nullable=True, default=0)
+
+
+class StoredPostDB(Base):
+    """A post found by a TopicWatch search (issue #23).
+
+    Workflows carry only the post id; the activities read the post from here,
+    so its text, author and metrics never enter Temporal history. A removal
+    (delete_post_text) replaces the text and records it, as on a card.
+    """
+
+    __tablename__ = "stored_posts"
+
+    post_id = Column(String, primary_key=True)
+    post_data = Column(JSON, nullable=False)
+    stored_at = Column(String, nullable=False)
+
+
+class ReviewDocDB(Base):
+    """A Review's working document (issue #23): its evidence, a draft
+    candidate, a check result or a founder's edit or nudge text.
+
+    The activities write and read these by (workflow_id, slot); the workflow
+    holds only the slot names, digests and counts. A removal deletes every
+    document of the post.
+    """
+
+    __tablename__ = "review_docs"
+
+    workflow_id = Column(String, primary_key=True)
+    slot = Column(String, primary_key=True)
+    post_id = Column(String, nullable=False, index=True)
+    data = Column(JSON, nullable=False)
+    updated_at = Column(String, nullable=False)
+    # The activity that wrote it: its id (Temporal numbers a workflow's
+    # activities in scheduling order) and attempt. A late attempt (a
+    # timed-out one whose thread finished after its retry) or an earlier
+    # step cannot overwrite what a later one wrote. None outside an activity.
+    # Ordering holds within one workflow run: a Review started again under
+    # the same workflow id (a restarted watch) is a new run, and its first
+    # activity clears the earlier run's documents.
+    writer_run = Column(String, nullable=True)
+    writer_seq = Column(Integer, nullable=True)
+    writer_attempt = Column(Integer, nullable=True)
 
 
 class BudgetLedgerDB(Base):
@@ -118,8 +161,47 @@ def get_engine():
             resolved_url,
             connect_args={"check_same_thread": False} if "sqlite" in resolved_url else {}
         )
+        if "sqlite" in resolved_url:
+            event.listen(_engine, "connect", _sqlite_secure_delete)
         Base.metadata.create_all(_engine)
     return _engine
+
+
+def _sqlite_secure_delete(dbapi_connection, connection_record) -> None:
+    """Issue #23: SQLite overwrites deleted content with zeros (removal duty,
+    ADR-0006). secure_delete is a per-connection setting, so every new
+    connection of the pool sets it."""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA secure_delete=ON")
+    finally:
+        cursor.close()
+
+
+# Issue #23: attempts of the checkpoint per removal attempt. A reader holding
+# an old snapshot (the API process) can keep the WAL from being reset; the
+# attempt waits for SQLite's busy timeout (5 s), and delete_post_text then
+# fails retryably, so Temporal retries the removal until it completes.
+WAL_CHECKPOINT_ATTEMPTS = 1
+
+
+def checkpoint_wal() -> bool:
+    """Copy the WAL into the database file and truncate the WAL to zero bytes
+    (issue #23: after a removal, the old pages must not survive in the -wal
+    file). Returns whether the checkpoint completed; a reader that keeps an
+    old snapshot can make it incomplete (delete_post_text then fails
+    retryably).
+    """
+    engine = get_engine()
+    if "sqlite" not in str(engine.url):
+        return True
+    for _ in range(WAL_CHECKPOINT_ATTEMPTS):
+        with engine.connect() as conn:
+            busy, _log, _checkpointed = conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)")).one()
+        if not busy:
+            return True
+    logger.warning("WAL checkpoint after a removal did not complete; a reader holds an old snapshot")
+    return False
 
 
 def get_session_factory():

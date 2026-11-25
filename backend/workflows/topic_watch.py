@@ -131,28 +131,38 @@ class TopicWatchWorkflow:
                         max_results=input.max_results,
                         idempotency_key=f"{input.account}:{input.topic}:{iteration}",
                         poll_interval_hours=poll_interval_hours,  # Item 3: pass for adapter validation
+                        # issue #23: the activity stores the posts and returns their ids
+                        store_posts=True,
                     ),
                     start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
                     retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
                     result_type=SearchRecentOutput,
                 )
                 
+                # issue #23: a result recorded before the change carries the
+                # posts themselves (and they were never stored): those
+                # Reviews get the post in their input, as before. A new
+                # result carries only ids. Chosen by the recorded result, so
+                # replay starts the same children.
+                found = [(p.id, p) for p in search_result.posts] or [
+                    (post_id, None) for post_id in search_result.post_ids
+                ]
                 workflow.logger.info(
-                    f"Search returned {len(search_result.posts)} posts, "
+                    f"Search returned {len(found)} posts, "
                     f"cost=${search_result.cost_usd:.4f}"
                 )
                 
                 new_posts = [
-                    p for p in search_result.posts
-                    if p.id not in seen_post_ids
+                    (post_id, post) for post_id, post in found
+                    if post_id not in seen_post_ids
                 ]
                 
                 workflow.logger.info(f"Found {len(new_posts)} new posts")
                 
-                for post in new_posts:
-                    review_id = f"review:{input.account}:{post.id}"
+                for post_id, post in new_posts:
+                    review_id = f"review:{input.account}:{post_id}"
                     
-                    workflow.logger.info(f"Starting Review for post {post.id}")
+                    workflow.logger.info(f"Starting Review for post {post_id}")
                     
                     try:
                         # Start child without awaiting (non-blocking)
@@ -161,6 +171,7 @@ class TopicWatchWorkflow:
                             ReviewWorkflow.run,
                             ReviewInput(
                                 post=post,
+                                post_id=post_id,
                                 topic=input.topic,
                                 product_brief=input.product_brief,
                                 account=input.account,
@@ -179,8 +190,8 @@ class TopicWatchWorkflow:
                     except workflow.exceptions.ChildWorkflowError as e:
                         workflow.logger.error(f"Failed to start Review: {e}")
                     
-                    if post.id not in seen_post_ids:
-                        seen_post_ids.append(post.id)
+                    if post_id not in seen_post_ids:
+                        seen_post_ids.append(post_id)
                 
                 if search_result.newest_id:
                     since_id = search_result.newest_id

@@ -13,12 +13,14 @@ referents (It/This/That/These/They/Its/Such/"The above") are not selectable.
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Union
 from temporalio import activity
 import re
 import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
+from backend.models.summaries import GateSummary
+from backend.review_docs import text_free_activity as _text_free_activity
 from backend.gate.non_claim_set import (
     UNKNOWN_IDENTIFIER,
     is_closed_set_non_claim,
@@ -58,6 +60,10 @@ class ClaimGateInput:
     segments: List[Segment]
     founder_materials: List[FounderMaterial]
     idempotency_key: str
+    # Issue #23: with slot set, gate the draft of the evidence stored in that
+    # Review document slot, record the result on it and return a GateSummary
+    post_id: str = ""
+    slot: str = ""
 
 
 def has_unresolved_referent(text: str) -> bool:
@@ -269,6 +275,13 @@ class EditedTextGateInput:
     gated_segments: List[Segment]  # Previously gated segments
     founder_materials: List[FounderMaterial]
     idempotency_key: str
+    # Issue #23: with text_slot set, read the founder's text from it and the
+    # gated segments and materials from evidence_slot; store the results in
+    # results_slot and return a GateSummary
+    post_id: str = ""
+    text_slot: str = ""
+    evidence_slot: str = ""
+    results_slot: str = ""
 
 
 @dataclass
@@ -307,7 +320,36 @@ def _verdict_reusable(
 
 
 @activity.defn(name="verify_edited_text")
-async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateResult]:
+@_text_free_activity(lambda input: bool(input.text_slot))
+async def verify_edited_text(input: EditedTextGateInput) -> Union[List[SentenceGateResult], GateSummary]:
+    """The edit re-gate activity; see _verify_edited_text. Issue #23: a
+    text-free input (text_slot set) reads and stores through the database."""
+    if not input.text_slot:
+        return await _verify_edited_text(input)
+    from backend import review_docs
+    from backend.models import Evidence
+
+    workflow_id = activity.info().workflow_id
+    what = "not checking the edit"
+    text = review_docs.load_doc(workflow_id, input.post_id, input.text_slot, str, what)
+    evidence = review_docs.load_doc(workflow_id, input.post_id, input.evidence_slot, Evidence, what)
+    results = await _verify_edited_text(EditedTextGateInput(
+        edited_text=text,
+        gated_segments=evidence.draft.segments if evidence.draft else [],
+        founder_materials=evidence.founder_materials,
+        idempotency_key=input.idempotency_key,
+    ))
+    review_docs.save_doc(workflow_id, input.post_id, input.results_slot, results)
+    failing = sum(1 for r in results if not r.passed)
+    return GateSummary(
+        passed=failing == 0,
+        result_count=len(results),
+        failing_count=failing,
+        text_sha256=review_docs.text_digest(text),
+    )
+
+
+async def _verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateResult]:
     """
     Verify edited free text using the strict claim gate.
     
@@ -552,7 +594,67 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
 
 
 @activity.defn(name="claim_gate")
-async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
+@_text_free_activity(lambda input: bool(input.slot))
+async def claim_gate(input: ClaimGateInput) -> Union[ClaimGateResult, GateSummary]:
+    """The claim gate activity; see _claim_gate. Issue #23: with input.slot
+    set, gate the stored draft and record the result on it, as the Review
+    workflow did with the result when it held the draft:
+    - a draft with segments: the gate's result, assembled text and segments;
+    - a draft without segments (only gated because it breaks the plan): a
+      "not run" result.
+    The failures (plan failures first, then the gate's) are stored for the
+    steer, the skip reason and a nudge rejection."""
+    if not input.slot:
+        return await _claim_gate(input)
+    from backend import review_docs
+    from backend.gate.failures import PLAN_FAILURE_MARKER, DraftFailures
+    from backend.models import Evidence
+
+    workflow_id = activity.info().workflow_id
+    # The draft as draft_reply stored it: a retry after this activity saved
+    # its result (worker restart) gates the same input, never its own output
+    evidence = review_docs.load_doc(
+        workflow_id, input.post_id, review_docs.drafted_slot(input.slot), Evidence, "not gating the draft"
+    )
+    draft = evidence.draft
+    plan_rows = (
+        [[PLAN_FAILURE_MARKER, r] for r in draft.plan_conformance_failures]
+        if evidence.reply_plan is not None else []
+    )
+    if draft.segments:
+        result = await _claim_gate(ClaimGateInput(
+            segments=draft.segments,
+            founder_materials=evidence.founder_materials,
+            idempotency_key=input.idempotency_key,
+        ))
+        draft.claim_gate = result
+        if result.draft_text:
+            draft.text = result.draft_text
+        draft.segments = result.segments
+        rows = plan_rows + [[sentence, reason] for sentence, reason in result.failed_sentences]
+    else:
+        result = ClaimGateResult(
+            passed=False,
+            segments=[],
+            failed_sentences=[],
+            reasoning="Claim gate not run: the draft has no segments",
+        )
+        draft.claim_gate = result
+        rows = plan_rows
+    review_docs.save_doc(workflow_id, input.post_id, input.slot, evidence)
+    review_docs.save_doc(
+        workflow_id, input.post_id, review_docs.failures_slot(input.slot),
+        DraftFailures(rows=rows, gate_reasoning=result.reasoning, gate_passed=result.passed),
+    )
+    return GateSummary(
+        passed=result.passed,
+        failure_count=len(rows),
+        plan_failure_count=len(plan_rows),
+        text_sha256=review_docs.text_digest(draft.text),
+    )
+
+
+async def _claim_gate(input: ClaimGateInput) -> ClaimGateResult:
     """
     Segment-based claim gate (Architect decision 3, 2026-11-21).
     

@@ -7,8 +7,8 @@ in workflow code, so the result is recorded in history and a later change to
 the rules cannot make an in-flight Review replay differently.
 """
 
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, replace
+from typing import Any, List, Optional, Union
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -17,8 +17,39 @@ from backend.activities.store_activities import card_post_text_removed, post_rem
 from backend.budget import meter_inference
 from backend.gate.brief import split_brief
 from backend.gate.written_check import judge, prepare_check
+from backend import review_docs
+from backend.gate.failures import PLAN_FAILURE_MARKER, DraftFailures
+from backend.models import ClaimGateResult, Evidence
+from backend.models.summaries import GateSummary
 from backend.models.written import WrittenCheckResult
 from backend.ports.claim_checker import ClaimCheckerPort
+
+
+def record_written_check(draft: Any, result: WrittenCheckResult) -> None:
+    """Put a written draft's check result on the draft (issue #12).
+
+    claim_gate mirrors the outcome, so everything that reads a draft's gate
+    verdict (the card, the skip path) works for both modes. The drafter's
+    own hints stay on the draft as provenance; the check never saw them.
+    replace(): the result is kept for reuse, unchanged.
+    """
+    hints = list(draft.written.drafter_hints) if draft.written else []
+    draft.sentence_checks = list(result.sentences)
+    draft.written = replace(result.info, drafter_hints=hints)
+    draft.plan_conformance_failures = list(result.plan_failures)
+    draft.claim_gate = ClaimGateResult(
+        passed=result.passed,
+        segments=[],
+        failed_sentences=[(sentence, reason) for sentence, reason in result.failures],
+        reasoning=result.reasoning,
+    )
+
+
+def written_failure_rows(result: WrittenCheckResult) -> List[List[str]]:
+    """The (sentence, reason) rows of a failed check, plan failures first."""
+    return [[PLAN_FAILURE_MARKER, r] for r in result.plan_failures] + [
+        [sentence, reason] for sentence, reason in result.failures
+    ]
 
 
 @dataclass
@@ -42,6 +73,15 @@ class CheckWrittenDraftInput:
     mention_product: Optional[bool] = None
     # The target post's id, for the removal lookup only; never sent to the checker
     post_id: str = ""
+    # --- Issue #23: text out of history. With source_slot set, the text is
+    # read from the Review's documents: the draft of the evidence in
+    # source_slot, or (source_is_founder_text) a founder's edit. The result
+    # is kept per (kind, text digest), first finished check wins, and
+    # recorded on the draft in record_slot when given. Returns a GateSummary.
+    source_slot: str = ""
+    source_is_founder_text: bool = False
+    kind: str = "draft"
+    record_slot: str = ""
 
 
 class WrittenCheckActivities:
@@ -51,7 +91,8 @@ class WrittenCheckActivities:
         self._claim_checker = claim_checker
 
     @activity.defn(name="check_written_draft")
-    async def check_written_draft(self, input: CheckWrittenDraftInput) -> WrittenCheckResult:
+    @review_docs.text_free_activity(lambda input: bool(input.source_slot))
+    async def check_written_draft(self, input: CheckWrittenDraftInput) -> Union[WrittenCheckResult, GateSummary]:
         """
         Check a written text's product claims against the brief.
 
@@ -72,6 +113,8 @@ class WrittenCheckActivities:
         the meter opened here, sized from its prompt, and reconciles it to the
         reported usage. Raises BudgetExceeded (non-retryable) at the cap.
         """
+        if input.source_slot:
+            return await self._check_text_free(input)
         activity.logger.info(
             f"Checking written text: {len(input.text)} chars (key: {input.idempotency_key})"
         )
@@ -117,3 +160,40 @@ class WrittenCheckActivities:
             f"Written check: {'PASS' if result.passed else 'FAIL'} - {result.reasoning}, {meter.summary()}"
         )
         return result
+
+    async def _check_text_free(self, input: CheckWrittenDraftInput) -> GateSummary:
+        """check_written_draft for a Review that keeps text out of its
+        history (issue #23); see CheckWrittenDraftInput."""
+        workflow_id = activity.info().workflow_id
+        what = "not checking"
+        if input.source_is_founder_text:
+            text = review_docs.load_doc(workflow_id, input.post_id, input.source_slot, str, what)
+        else:
+            evidence = review_docs.load_doc(workflow_id, input.post_id, input.source_slot, Evidence, what)
+            text = evidence.draft.text if evidence.draft else ""
+        digest = review_docs.text_digest(text)
+        cache = review_docs.check_slot(input.kind, digest)
+        result = review_docs.find_doc(workflow_id, input.post_id, cache, WrittenCheckResult)
+        if result is None:
+            checked = await self.check_written_draft(replace(input, text=text, source_slot=""))
+            # The first finished check of a text stands (another update may
+            # have checked the same text meanwhile)
+            result = review_docs.save_doc(workflow_id, input.post_id, cache, checked, first_wins=True)
+        rows = written_failure_rows(result)
+        if input.record_slot:
+            target = review_docs.load_doc(workflow_id, input.post_id, input.record_slot, Evidence, what)
+            if target.draft is not None:
+                record_written_check(target.draft, result)
+                review_docs.save_doc(workflow_id, input.post_id, input.record_slot, target)
+            review_docs.save_doc(
+                workflow_id, input.post_id, review_docs.failures_slot(input.record_slot),
+                DraftFailures(rows=rows, gate_reasoning=result.reasoning, gate_passed=result.passed),
+            )
+        return GateSummary(
+            passed=result.passed,
+            failure_count=len(rows),
+            plan_failure_count=len(result.plan_failures),
+            result_count=len(result.sentences),
+            failing_count=sum(1 for r in result.sentences if not r.passed),
+            text_sha256=digest,
+        )

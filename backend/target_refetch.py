@@ -96,6 +96,17 @@ async def refetch_stored_card_target(
     if card is None:
         return "no_card"
     if card["post"].get("text_removed"):
+        # issue #23: an earlier removal may have committed with its WAL
+        # checkpoint still pending; finish it before reporting "removed"
+        from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
+        from backend.database import checkpoint_wal
+        from temporalio.exceptions import ApplicationError
+
+        if not checkpoint_wal():
+            raise ApplicationError(
+                "Post text removed; the WAL checkpoint is pending (a reader holds an old snapshot)",
+                type=WAL_CHECKPOINT_PENDING_ERROR,
+            )
         return "removed"
     if await review_is_running(workflow_id):
         return "live"
@@ -125,13 +136,25 @@ async def refetch_stored_card_target(
     if post is not None:
         return "found"
 
-    _delete_post_text_sync(
-        DeletePostTextInput(
-            workflow_id=workflow_id,
-            idempotency_key=f"{workflow_id}:delete_text:eval:{run_key}",
-            post_id=card["post"]["id"],
+    from temporalio.exceptions import ApplicationError
+    from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
+
+    checkpoint_pending = None
+    try:
+        _delete_post_text_sync(
+            DeletePostTextInput(
+                workflow_id=workflow_id,
+                idempotency_key=f"{workflow_id}:delete_text:eval:{run_key}",
+                post_id=card["post"]["id"],
+            )
         )
-    )
+    except ApplicationError as e:
+        # issue #23: the removal committed; only the WAL checkpoint waits. The
+        # unbilled read is released below all the same, then the error is
+        # raised (a retry finds the card removed and finishes the checkpoint)
+        if e.type != WAL_CHECKPOINT_PENDING_ERROR:
+            raise
+        checkpoint_pending = e
     # Issue #17: X returned no post object for the gone post and billed
     # nothing. Released after the removal, so a failed release cannot keep
     # the text; it then stays counted (the safe direction).
@@ -143,4 +166,6 @@ async def refetch_stored_card_target(
         activity_id=call_id,
         cost_per_read=settings.x_post_read_cost,
     )
+    if checkpoint_pending is not None:
+        raise checkpoint_pending
     return "removed"

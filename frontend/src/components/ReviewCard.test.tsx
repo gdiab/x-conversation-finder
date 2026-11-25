@@ -450,6 +450,38 @@ describe('ReviewCard: error codes (issues #15, #20)', () => {
     expect(screen.getByText(`Failed to nudge review: ${detail}`)).toBeInTheDocument();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
+  it('shows no nudge rejection (it quotes the redraft) on a removed card (issue #23)', async () => {
+    const user = userEvent.setup();
+    const detail = 'Nudged draft rejected; the current draft is unchanged: synthetic quoted sentence';
+    nudgeMock.mockRejectedValueOnce(new ReviewApiError(`Failed to nudge review: ${detail}`, 422, 'rejected', detail));
+    const card = makeCard();
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Apply Nudge' }));
+    expect(screen.getByText(`Failed to nudge review: ${detail}`)).toBeInTheDocument();
+
+    rerender(<ReviewCard card={{ ...card, post: { ...card.post, text: '[removed - post deleted]', text_removed: true } }} onUpdate={vi.fn()} />);
+    expect(screen.queryByText(/synthetic quoted sentence/)).not.toBeInTheDocument();
+  });
+
+  it('shows no nudge rejection that arrives after the card was removed (issue #23)', async () => {
+    const user = userEvent.setup();
+    const detail = 'Nudged draft rejected; the current draft is unchanged: synthetic late sentence';
+    let reject: (e: Error) => void = () => {};
+    nudgeMock.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    const card = makeCard();
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Apply Nudge' }));
+    rerender(<ReviewCard card={{ ...card, post: { ...card.post, text: '[removed - post deleted]', text_removed: true } }} onUpdate={vi.fn()} />);
+    await act(async () => reject(new ReviewApiError(`Failed to nudge review: ${detail}`, 422, 'rejected', detail)));
+
+    expect(screen.queryByText(/synthetic late sentence/)).not.toBeInTheDocument();
+  });
 });
 
 describe('ReviewCard: edit gate results', () => {
@@ -588,5 +620,18 @@ describe('ReviewCard: post removed (issue #9)', () => {
     expect(onUpdate).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Post removed: the post was deleted/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();
+  });
+  it('reloads the card when an edit is refused because the post was removed (issue #23)', async () => {
+    const { PostRemovedError } = await import('../api/client');
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    editMock.mockRejectedValueOnce(new PostRemovedError('removed'));
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Save Edit' })).not.toBeInTheDocument();
   });
 });

@@ -30,6 +30,7 @@ from backend.activities.reply_activities import ReplyActivities
 from backend.activities.store_activities import (
     GATE_DETAILS_REMOVED,
     POST_TEXT_REMOVED,
+    POST_REMOVED_SKIP_REASON,
     delete_post_text,
     get_all_cards,
     redact_removed_card,
@@ -49,7 +50,7 @@ from backend.workflows.review import (
     ReviewWorkflow,
 )
 from backend.workflows.topic_watch import TopicWatchWorkflow
-from backend.tests.review_waits import wait_for_card_ready
+from backend.tests.review_waits import wait_for_card_ready, query_card, rejection_message
 from backend.tests.test_edit_regate import fetch_history_past_approve
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -153,7 +154,7 @@ def _worker(env, x_client=None, agent=None, checker=None, draft_mode="written", 
 async def _start(env, make_review_input, suffix, **overrides):
     overrides.setdefault("product_name", PRODUCT)
     review_input = make_review_input(**overrides)
-    workflow_id = f"review:test:{review_input.post.id}_{suffix}"
+    workflow_id = f"review:test:{review_input.post_id}_{suffix}"
     handle = await env.client.start_workflow(
         ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
     )
@@ -297,7 +298,7 @@ async def test_two_failed_checks_skip_the_post_with_the_reasons(make_review_inpu
             handle, workflow_id = await _start(env, make_review_input, "skip")
             assert await handle.result() == "skipped"
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "skipped"
             assert card["skip_reason"].startswith("Not enough evidence: Our product is quicker than")
             draft = card["evidence"]["draft"]
@@ -421,7 +422,7 @@ async def test_a_passing_edit_is_checked_and_approve_names_the_draft_shown(make_
 
             assert await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())]) == PASSING_EDIT
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["evidence"]["draft"]["text"] == PASSING_EDIT
             assert card["edited_text_gate_state"] == "passed"
             assert [(r["kind"], r["verdict"], r["passed"]) for r in card["edited_text_gate_results"]] == [
@@ -460,7 +461,7 @@ async def test_a_failing_edit_needs_post_anyway_which_is_recorded(make_review_in
 
             await handle.execute_update("edit", args=[FAILING_EDIT, str(uuid.uuid4())])
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_state"] == "failed"
             [result] = card["edited_text_gate_results"]
             assert (result["kind"], result["verdict"], result["passed"]) == ("claim", "unsupported", False)
@@ -472,14 +473,19 @@ async def test_a_failing_edit_needs_post_anyway_which_is_recorded(make_review_in
                 await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False, shown])
             cause = _rejection(refused.value)
             assert cause.type == POST_ANYWAY_REQUIRED_ERROR
-            assert cause.details[0] == {"gate_state": "failed", "failing_sentences": [FAILING_EDIT]}
+            # issue #23: the workflow holds no sentences; the API adds the stored ones
+            details = cause.details[0]
+            assert (details["gate_state"], details["failing_sentences"]) == ("failed", [])
+            assert set(details["results_ref"]) == {"check_slot"}  # a slot name, no text
+            from backend.api import stored_failing_sentences
+            assert stored_failing_sentences(workflow_id, details["results_ref"]) == [FAILING_EDIT]
 
             assert await handle.execute_update(
                 "approve", args=[APPROVE_URL, str(uuid.uuid4()), True, shown]
             ) == "Approved"
             await fetch_history_past_approve(handle)
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["post_anyway"] is True
             assert card["post_anyway_failing_sentences"] == [FAILING_EDIT]
             stored = _db_card(workflow_id)
@@ -504,7 +510,7 @@ async def test_a_key_feature_puts_the_drafters_and_the_founders_sentences_in_the
 
             await handle.execute_update("edit", args=[KEY_FEATURE_EDIT, str(uuid.uuid4())])
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             [result] = card["edited_text_gate_results"]
             assert result["triggers"] == [{"trigger": "feature_term", "match": "Automatic failover"}]
             assert (result["kind"], result["passed"]) == ("claim", False)
@@ -525,7 +531,7 @@ async def test_a_review_without_key_features_has_no_feature_terms(make_review_in
 
             await handle.execute_update("edit", args=[KEY_FEATURE_EDIT, str(uuid.uuid4())])
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             [result] = card["edited_text_gate_results"]
             assert result["triggers"] == []
 
@@ -541,7 +547,7 @@ async def test_an_edit_whose_check_cannot_run_is_not_checked(make_review_input):
 
             await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_state"] == "not_checked"
             assert card["evidence"]["draft"]["text"] == PASSING_EDIT
             with pytest.raises(WorkflowUpdateFailedError) as refused:
@@ -576,11 +582,11 @@ async def test_the_same_text_keeps_one_check_result_so_approve_names_what_was_se
             await wait_for_card_ready(handle)
 
             await handle.execute_update("edit", args=[FAILING_EDIT, str(uuid.uuid4())])
-            first = (await handle.query("get_card"))["edited_text_gate_results"]
+            first = (await query_card(handle))["edited_text_gate_results"]
             await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
             await handle.execute_update("edit", args=[FAILING_EDIT, str(uuid.uuid4())])  # the same text again
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_state"] == "failed"
             assert card["edited_text_gate_results"] == first  # not the checker's second opinion
             asked = [r.sentences for r in checker.requests]
@@ -591,7 +597,7 @@ async def test_the_same_text_keeps_one_check_result_so_approve_names_what_was_se
             calls = len(checker.requests)
             await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
             await handle.execute_update("edit", args=[FAKE_DRAFT, str(uuid.uuid4())])
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_state"] == "passed"
             assert [r["verdict"] for r in card["edited_text_gate_results"]] == [
                 "not_a_product_claim", "supported", "not_a_product_claim",
@@ -627,7 +633,7 @@ async def test_a_nudge_that_returns_the_same_text_keeps_the_check_the_founder_sa
             new_text = await handle.execute_update("nudge", args=["Say it again", str(uuid.uuid4())])
 
             assert new_text == before["text"] == FAKE_DRAFT
-            after = (await handle.query("get_card"))["evidence"]["draft"]
+            after = (await query_card(handle))["evidence"]["draft"]
             assert after["sentence_checks"] == before["sentence_checks"]
             assert after["sentence_checks"][1]["supporting"][0]["id"] == "b1"
             assert _db_card(workflow_id)["evidence"]["draft"]["sentence_checks"] == before["sentence_checks"]
@@ -669,12 +675,12 @@ async def test_an_edit_that_could_not_be_checked_is_checked_again(make_review_in
             await wait_for_card_ready(handle)
             checker.error = RuntimeError("synthetic: checker unavailable")
             await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
-            assert (await handle.query("get_card"))["edited_text_gate_state"] == "not_checked"
+            assert (await query_card(handle))["edited_text_gate_state"] == "not_checked"
 
             checker.error = None
             await handle.execute_update("edit", args=[PASSING_EDIT, str(uuid.uuid4())])
 
-            assert (await handle.query("get_card"))["edited_text_gate_state"] == "passed"
+            assert (await query_card(handle))["edited_text_gate_state"] == "passed"
 
 
 # ---------- nudges ----------
@@ -692,7 +698,7 @@ async def test_a_nudge_is_rewritten_checked_and_replaces_the_draft(make_review_i
             new_text = await handle.execute_update("nudge", args=["Make it shorter", str(uuid.uuid4())])
 
             assert new_text == f"{OPENER} {CLAIM}"
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["evidence"]["draft"]["text"] == new_text
             assert [c["verdict"] for c in card["evidence"]["draft"]["sentence_checks"]] == [
                 "not_a_product_claim", "supported",
@@ -722,10 +728,12 @@ async def test_a_nudged_draft_that_fails_the_check_is_rejected(make_review_input
             with pytest.raises(WorkflowUpdateFailedError) as refused:
                 await handle.execute_update("nudge", args=["Make it bolder", str(uuid.uuid4())])
 
-            message = _rejection(refused.value).message
+            # issue #23: the reasons are stored; the API adds them to the message
+            assert "brief" not in _rejection(refused.value).message
+            message = rejection_message(handle, refused.value)
             assert message.startswith("Nudged draft rejected; the current draft is unchanged:")
             assert "The brief does not support it" in message
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["evidence"]["draft"]["text"] == FAKE_DRAFT
             assert _db_card(workflow_id)["evidence"]["draft"]["text"] == FAKE_DRAFT
 
@@ -844,7 +852,7 @@ async def test_a_removal_at_approve_redacts_the_written_draft_and_its_edit(make_
             assert _rejection(refused.value).type == POST_REMOVED_ERROR
             assert await handle.result() == "skipped"
 
-            for card in (_db_card(workflow_id), await handle.query("get_card")):
+            for card in (_db_card(workflow_id), await query_card(handle)):
                 text = json.dumps(card)
                 for fragment in POST_FRAGMENTS:
                     assert fragment not in text
@@ -883,11 +891,14 @@ async def test_a_written_review_is_skipped_when_another_review_recorded_the_post
     _record_removal_by_another_review()
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, agent=agent, checker=checker):
-            handle, workflow_id = await _start(env, make_review_input, "removed_elsewhere")
+            # A Review whose input carries the post (recorded before issue
+            # #23) researches and plans, and draft_reply refuses; a text-free
+            # Review stops at research (the parametrized test above)
+            handle, workflow_id = await _start(env, make_review_input, "removed_elsewhere", legacy=True)
             assert await handle.result() == "skipped"
 
             assert agent.requests == [] and checker.requests == []
-            for card in (_db_card(workflow_id), await handle.query("get_card")):
+            for card in (_db_card(workflow_id), await query_card(handle)):
                 assert card["status"] == "skipped"
                 assert card["skip_reason"].startswith("Post removed")
                 assert card["post"]["text_removed"] is True and card["post"]["text"] == POST_TEXT_REMOVED
@@ -931,13 +942,33 @@ async def test_an_assembled_review_is_unchanged_by_the_post_wide_lookup(make_rev
     _record_removal_by_another_review()
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, draft_mode="assembled"):
-            handle, workflow_id = await _start(env, make_review_input, "removed_assembled")
+            handle, workflow_id = await _start(env, make_review_input, "removed_assembled", legacy=True)
             await wait_for_card_ready(handle)
 
             card = _db_card(workflow_id)
             assert card["status"] == "pending"
             assert card["post"]["text_removed"] is True
             assert "claim_gate" in _scheduled(await handle.fetch_history())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("draft_mode", ["assembled", "written"])
+async def test_a_text_free_review_of_a_removed_post_stops_before_any_model_call(make_review_input, draft_mode):
+    """issue #23: a Review started with only a post id reads the post from
+    the database, which refuses once the removal is recorded. It ends as
+    skipped "post removed" at research, in both modes, without a model call."""
+    _record_removal_by_another_review()
+    agent = WritingAgent()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent, draft_mode=draft_mode):
+            handle, workflow_id = await _start(env, make_review_input, f"removed_text_free_{draft_mode}")
+            assert await handle.result() == "skipped"
+            card = _db_card(workflow_id)
+            assert card["skip_reason"] == POST_REMOVED_SKIP_REASON
+            assert card["post"]["text_removed"] is True
+            assert card["evidence"]["draft"] is None
+            assert _scheduled(await handle.fetch_history()) == ["research_post", "store_card"]
+            assert agent.requests == [] and agent.assembled_calls == 0
 
 
 # ---------- replay safety ----------
