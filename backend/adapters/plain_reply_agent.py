@@ -39,14 +39,15 @@ def format_materials_for_prompt(materials: list[FounderMaterial]) -> str:
     Numbers are indices into split_into_sentences(passage), the same split the
     claim gate checks against. Sentences the gate never accepts as claims
     (claim_selectability_error: an unresolved referent at the start, an
-    abbreviation at the end, or an unclear sentence boundary inside) are left
+    abbreviation at the end, or an unclear sentence boundary) are left
     out, but the remaining sentences keep their original numbers.
     """
     blocks = []
     for m in materials:
         lines = [f"[{m.passage_id}] Source: {m.source}"]
-        for i, sentence in enumerate(split_into_sentences(m.passage)):
-            if claim_selectability_error(sentence):
+        sentences = split_into_sentences(m.passage)
+        for i, sentence in enumerate(sentences):
+            if claim_selectability_error(sentences, i):
                 continue
             lines.append(f"  {i}: {sentence}")
         if len(lines) == 1:

@@ -4,52 +4,44 @@ Both sentence splitters use these rules: the claim gate's splitter for founder
 passages and edited drafts (``split_into_sentences``, ADR-0006), and the reply
 plan's question-span splitter for post text (``backend/planning``).
 
-A word that ends in a single period ends the sentence (END) unless it is an
-abbreviation or a number. Then the next word decides: CONTINUE when the
-period clearly does not end the sentence, END when it clearly does, and
-AMBIGUOUS when it might do either.
+period_boundary classifies a word-final period by the word and the next word:
 
-==================  =========================  ========================  ==========
-word                next word lowercase        capitalized starter       other
-                                               (SENTENCE_STARTERS)       capitalized
-==================  =========================  ========================  ==========
-company suffix      CONTINUE                   END                       END
-(Inc. Ltd. Co. Corp., QA R14)
-prefix              CONTINUE                   AMBIGUOUS                 CONTINUE
-(Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e. approx.)
-initial (J. B.)     CONTINUE                   AMBIGUOUS                 AMBIGUOUS
-terminal            CONTINUE                   END                       AMBIGUOUS
-(etc. St. Ph.D. U.S. U.S.A. a.m.)
-number (2021. $5.)  CONTINUE                   END                       AMBIGUOUS
-list marker (1.)    CONTINUE                   AMBIGUOUS, or CONTINUE as the first word
-                                               of a sentence ("1. The product ...")
-==================  =========================  ========================  ==========
+- END: certainly ends the sentence. After an ordinary word (one that is not
+  in the lists below) and after a number before a capitalized word ("in 2021.
+  We", "99.9. Latency"): English has no mid-sentence "2021." outside list
+  markers.
+- CONTINUE: certainly does not. After any abbreviation, initial or number
+  before a lowercase word ("the U.S.A. market", "j. smith"); after a prefix
+  abbreviation (titles and Latin abbreviations, which do not end sentences)
+  before a capitalized word that is not a sentence starter ("Dr. Smith",
+  "e.g. Postgres"); after a list marker at the start of a sentence ("1. The
+  product ...").
+- LIKELY_END / LIKELY_CONTINUE: unclear. Every other abbreviation, initial or
+  list marker before a capitalized word. "U.S. We ship" is probably two
+  sentences, but "the U.S. The Netherlands, and France" is one; "J. Smith" is
+  probably one, but "Plan B. Customers pay" is two; company suffixes (QA R14)
+  are probably sentence ends. LIKELY_END after terminal abbreviations
+  (etc. U.S. Jr. ...) and company suffixes before a SENTENCE_STARTERS word or
+  any capitalized word respectively; LIKELY_CONTINUE otherwise.
 
-A single capital letter before a capitalized word reads both as a name
-initial ("J. Smith") and as a sentence end ("Plan B. Customers pay"), so it
-is AMBIGUOUS: such a founder sentence is not selectable, and post text splits
-there.
+Callers resolve the unclear cases in the safe direction for their use:
 
-A word counts as ending in a period when its last character before any
-closing quotes or brackets is one ('We ship in the U.S." Customers' is
-checked like 'U.S. Customers'); sentence_terminator gives that character.
+- The claim gate's splitter splits at END and LIKELY_END, so indices follow
+  the likely reading. A sentence that touches an unclear boundary, at its
+  start, its end or inside it, is not selectable as a claim
+  (sentence_has_unclear_boundary). A claim is then never a fragment of a
+  founder sentence and never two founder sentences counted as one.
+- The reply plan's question spans split at everything but CONTINUE, so a
+  statement before a question never counts as part of the question.
 
-A next word starting with a digit or symbol counts as lowercase, except after
-a terminal abbreviation, number or list marker, where it is AMBIGUOUS. The
-number rules keep the decimal fix (S-5): "99.99%" contains no word-final
-period and never splits.
+A word ends in a period when its last character before any closing quotes or
+brackets is one ('U.S." Customers' is checked like 'U.S. Customers');
+sentence_terminator gives that character. A period run ("..."), "!" and "?"
+always end a sentence. Decimals (S-5: "99.99%") contain no word-final period
+and never split.
 
-AMBIGUOUS is resolved by the caller, in the safe direction for its use:
-
-- The claim gate does not split there, and a sentence containing an
-  AMBIGUOUS boundary is not selectable as a claim (has_ambiguous_boundary).
-  A claim is then never a fragment of a founder sentence and never two
-  founder sentences counted as one.
-- The reply plan's question spans do split there, so a statement before a
-  question never counts as part of the question.
-
-A period run ("..."), "!" and "?" are handled by the callers and always end a
-sentence.
+Known limit: abbreviations missing from the lists below are ordinary words,
+so their period is END. The lists cover the common ones.
 
 Changing these rules changes split points, and so the sentence indices that
 claim segments reference. Bump SPLITTER_VERSION when a split changes; see
@@ -57,7 +49,7 @@ ADR-0006 (2026-11-21 amendment, item 2).
 """
 
 import re
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 # Version of the claim gate's sentence split. Drafting adapters stamp it on
 # claim segments; the claim gate refuses a segment numbered under another
@@ -66,18 +58,28 @@ SPLITTER_VERSION = 2
 
 END = "end"
 CONTINUE = "continue"
-AMBIGUOUS = "ambiguous"
-Boundary = Literal["end", "continue", "ambiguous"]
+LIKELY_END = "likely_end"
+LIKELY_CONTINUE = "likely_continue"
+UNCLEAR = (LIKELY_END, LIKELY_CONTINUE)
+Boundary = Literal["end", "continue", "likely_end", "likely_continue"]
 
 COMPANY_SUFFIXES = ("Inc.", "Ltd.", "Co.", "Corp.")
-PREFIX_ABBREVIATIONS = ("Dr.", "Mr.", "Mrs.", "Ms.", "Prof.", "vs.", "e.g.", "i.e.", "approx.")
-TERMINAL_ABBREVIATIONS = ("etc.", "St.", "Ph.D.")
+# Never end a sentence: titles before a name, and Latin abbreviations and
+# reference words that introduce what follows.
+PREFIX_ABBREVIATIONS = (
+    "Dr.", "Mr.", "Mrs.", "Ms.", "Prof.", "Mt.", "Gen.", "Col.", "Lt.", "Sgt.",
+    "Gov.", "Sen.", "Rep.", "Rev.", "Hon.",
+    "vs.", "e.g.", "i.e.", "approx.", "cf.", "Fig.", "Vol.", "pp.",
+)
+# Can end a sentence or sit inside one.
+TERMINAL_ABBREVIATIONS = (
+    "etc.", "St.", "Ph.D.", "Jr.", "Sr.", "Ave.", "Rd.", "Blvd.", "Dept.", "Univ.",
+    "Jan.", "Feb.", "Mar.", "Apr.", "Aug.", "Sep.", "Sept.", "Oct.", "Nov.", "Dec.",
+)
 
-# Capitalized words that clearly start a new sentence. Closed list: pronouns,
+# Capitalized words that usually start a new sentence. Closed list: pronouns,
 # determiners, connectives, question words, and the first word of every fixed
-# non-claim phrase (backend/gate/non_claim_set.py; a test enforces this), so a
-# claim ending in a number followed by a phrase splits in the assembled draft.
-# Words that are also common names ("Will", "May") are left out.
+# non-claim phrase (backend/gate/non_claim_set.py; a test enforces this).
 SENTENCE_STARTERS = frozenset(
     """
     i we you he she it they me us our ours my your their his her its
@@ -105,7 +107,7 @@ _COMPANY_RE = _named(COMPANY_SUFFIXES)
 _PREFIX_RE = _named(PREFIX_ABBREVIATIONS)
 _TERMINAL_RE = _named(TERMINAL_ABBREVIATIONS)
 _INITIALISM_RE = re.compile(r"(?:[A-Za-z]\.){2,}")
-_INITIAL_RE = re.compile(r"[A-Z]\.")
+_INITIAL_RE = re.compile(r"[A-Za-z]\.")
 _LIST_MARKER_RE = re.compile(r"\d{1,3}\.")
 _NUMBER_RE = re.compile(r".*\d\.")
 _LEADING_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
@@ -114,6 +116,13 @@ _LEADING_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
 def _core(word: str) -> str:
     """The word without leading opening or trailing closing quotes and brackets."""
     return word.lstrip(_OPENERS).rstrip(_CLOSERS)
+
+
+def sentence_terminator(word: str) -> str:
+    """The word's last character before closing quotes and brackets if it is
+    '.', '!' or '?'; otherwise the empty string."""
+    last = word.rstrip(_CLOSERS)[-1:]
+    return last if last in (".", "!", "?") else ""
 
 
 def abbreviation_kind(word: str) -> Optional[str]:
@@ -143,8 +152,7 @@ def abbreviation_kind(word: str) -> Optional[str]:
 def starts_new_sentence(next_word: str) -> bool:
     """True if next_word is a capitalized word from SENTENCE_STARTERS.
 
-    A word that is itself an initial ("I.", "A.") does not count, so "J. A.
-    Smith" stays whole.
+    A word that is itself an initial ("I.", "A.") does not count.
     """
     core = next_word.lstrip(_OPENERS)
     if re.match(r"[A-Za-z]\.", core):
@@ -156,54 +164,70 @@ def starts_new_sentence(next_word: str) -> bool:
 
 
 def period_boundary(word: str, next_word: Optional[str], *, sentence_start: bool = False) -> Boundary:
-    """Classify the period at the end of `word` as END, CONTINUE or AMBIGUOUS.
+    """Classify the period at the end of `word` (see the module docstring).
 
-    `word` is a whitespace-delimited word whose last character, before any
-    closing quotes or brackets, is a period. `next_word` is the following
-    whitespace-delimited word, or None at the end of the text.
-    `sentence_start` is True when `word` is the first word of its sentence.
+    `word` is a whitespace-delimited word whose terminator is a period.
+    `next_word` is the following whitespace-delimited word, or None at the end
+    of the text. `sentence_start` is True when `word` is the first word of its
+    sentence.
     """
     if next_word is None:
         return END
     kind = abbreviation_kind(word)
     if kind is None:
         return END
-    following = next_word.lstrip(_OPENERS)
-    first = following[:1]
-    if first.islower() or (not first.isalpha() and kind in ("company", "prefix", "initial")):
+    first = next_word.lstrip(_OPENERS)[:1]
+    if first.islower():
         return CONTINUE
     if not first.isalpha():
-        return AMBIGUOUS
-    if kind == "company":
+        # A digit or symbol: "approx. 10", "Inc. 3"; unclear after the others.
+        return CONTINUE if kind in ("company", "prefix", "initial") else LIKELY_CONTINUE
+    if kind == "number":
         return END
-    if kind == "initial":
-        return AMBIGUOUS
-    starter = starts_new_sentence(next_word)
-    if kind == "prefix":
-        return AMBIGUOUS if starter else CONTINUE
     if kind == "list_marker":
-        return CONTINUE if sentence_start else AMBIGUOUS
-    return END if starter else AMBIGUOUS
+        return CONTINUE if sentence_start else LIKELY_CONTINUE
+    if kind == "prefix":
+        return LIKELY_CONTINUE if starts_new_sentence(next_word) else CONTINUE
+    if kind == "company":
+        return LIKELY_END
+    if kind == "initial":
+        return LIKELY_CONTINUE
+    return LIKELY_END if starts_new_sentence(next_word) else LIKELY_CONTINUE
 
 
-def sentence_terminator(word: str) -> str:
-    """The word's last character before closing quotes and brackets if it is
-    '.', '!' or '?'; otherwise the empty string."""
-    last = word.rstrip(_CLOSERS)[-1:]
-    return last if last in (".", "!", "?") else ""
+def _boundary_after(sentence: str, next_sentence: str) -> Boundary:
+    """The boundary between two consecutive sentences of a split."""
+    words = sentence.split()
+    if not words or sentence_terminator(words[-1]) != ".":
+        return END
+    following = next_sentence.split()
+    return period_boundary(words[-1], following[0] if following else None, sentence_start=len(words) == 1)
 
 
-def has_ambiguous_boundary(sentence: str) -> bool:
-    """True if a period inside the sentence might end a sentence (AMBIGUOUS).
-
-    The claim gate's splitter does not split at an AMBIGUOUS period, so such a
-    sentence may be two founder sentences; it is not selectable as a claim.
-    """
+def has_unclear_boundary_inside(sentence: str) -> bool:
+    """True if a period inside the sentence might end a sentence."""
     words = sentence.split()
     return any(
-        sentence_terminator(word) == "." and period_boundary(word, words[i + 1], sentence_start=i == 0) == AMBIGUOUS
+        sentence_terminator(word) == "."
+        and period_boundary(word, words[i + 1], sentence_start=i == 0) in UNCLEAR
         for i, word in enumerate(words[:-1])
     )
+
+
+def sentence_has_unclear_boundary(sentences: List[str], index: int) -> bool:
+    """True if sentences[index] starts, ends or contains an unclear boundary.
+
+    `sentences` is one split of a passage. Such a sentence may be a fragment
+    of a founder sentence or two founder sentences, so it is not selectable.
+    """
+    sentence = sentences[index]
+    if has_unclear_boundary_inside(sentence):
+        return True
+    if index > 0 and _boundary_after(sentences[index - 1], sentence) in UNCLEAR:
+        return True
+    if index + 1 < len(sentences) and _boundary_after(sentence, sentences[index + 1]) in UNCLEAR:
+        return True
+    return False
 
 
 def ends_with_abbreviation(sentence: str) -> bool:

@@ -25,8 +25,9 @@ from backend.gate.sentence_boundary import (
     END,
     SPLITTER_VERSION,
     ends_with_abbreviation,
-    has_ambiguous_boundary,
+    LIKELY_END,
     period_boundary,
+    sentence_has_unclear_boundary,
     sentence_terminator,
 )
 from backend.gate.legacy_split_v1 import split_into_sentences_v1
@@ -35,9 +36,10 @@ REFERENT_REASON = "Sentence starts with an unresolved referent (it/this/that/the
 ABBREVIATION_REASON = "Sentence ends with an abbreviation (not selectable)"
 # No "abbreviation" in this text: the review card maps that word to the
 # ends-with-an-abbreviation explanation.
-AMBIGUOUS_BOUNDARY_REASON = (
-    "Sentence has an unclear sentence boundary inside (a period after U.S., etc., "
-    "an initial or a number, before a capitalized word), so it may be two sentences (not selectable)"
+UNCLEAR_BOUNDARY_REASON = (
+    "Sentence starts, ends or contains an unclear sentence boundary (a period after "
+    "U.S., Inc., an initial or a list number, before a capitalized word), so it may be "
+    "part of a longer sentence or two sentences (not selectable)"
 )
 
 
@@ -57,18 +59,18 @@ def split_into_sentences(text: str) -> List[str]:
     Deterministic rule: a word ending in '!' or '?' (before any closing quotes
     or brackets) ends a sentence when another word follows. A word ending in
     '.' ends one only where
-    backend.gate.sentence_boundary.period_boundary says END:
+    backend.gate.sentence_boundary.period_boundary says END or LIKELY_END:
     - QA R14: company suffixes (Inc. Ltd. Co. Corp.) end a sentence when the
-      next word is capitalized.
+      next word is capitalized (LIKELY_END).
     - QA R13: prefix abbreviations (Dr. Mr. Mrs. Ms. Prof. vs. e.g. i.e.
       approx.) never end a sentence before a lowercase word or a name
       ("Dr. Smith"); an initial (J.) never ends one before a lowercase word.
-    - Issue #10: etc., St., Ph.D., dotted initialisms (U.S.A.) and numbers
-      (2021.) end a sentence only when the next word clearly starts a new one.
-      Decimals (S-5: 99.99%) never split; a list marker ("1.") at the start of
-      a sentence stays with it.
-    An AMBIGUOUS period does not split; claim_selectability_error rejects the
-    resulting sentence, as it rejects one that ends in an abbreviation.
+    - Issue #10: etc., St., Ph.D. and dotted initialisms (U.S.A.) end a
+      sentence before a sentence-starter word (LIKELY_END); numbers (2021.)
+      before any capitalized word. Decimals (S-5: 99.99%) never split; a list
+      marker ("1.") at the start of a sentence stays with it.
+    claim_selectability_error rejects any sentence touching an unclear
+    (LIKELY_*) boundary, as it rejects one that ends in an abbreviation.
 
     Sentence indices are positions in this split (SPLITTER_VERSION). Changing
     a split point changes the indices claim segments reference; see ADR-0006
@@ -98,7 +100,7 @@ def split_into_sentences(text: str) -> List[str]:
         if next_word is None:
             # End of text: the remainder is added below.
             continue
-        if terminator == '.' and period_boundary(token, next_word, sentence_start=sentence_start) != END:
+        if terminator == '.' and period_boundary(token, next_word, sentence_start=sentence_start) not in (END, LIKELY_END):
             continue
         sentence = ''.join(current).strip()
         if sentence:
@@ -223,19 +225,21 @@ def has_unresolved_referent(text: str) -> bool:
     return False
 
 
-def claim_selectability_error(sentence: str) -> str:
-    """Why a passage sentence can never be quoted as a claim; empty if it can.
+def claim_selectability_error(sentences: List[str], index: int) -> str:
+    """Why sentences[index] can never be quoted as a claim; empty if it can.
 
-    The same checks on every path: model drafts (insert_claim_sentence), the
-    founder-edit re-gate's passage match, and the numbered list in the
-    drafting prompt.
+    `sentences` is split_into_sentences(passage): the unclear-boundary check
+    needs the neighbouring sentences. The same checks on every path: model
+    drafts (insert_claim_sentence), the founder-edit re-gate's passage match,
+    and the numbered list in the drafting prompt.
     """
+    sentence = sentences[index]
     if has_unresolved_referent(sentence):
         return REFERENT_REASON
     if ends_with_abbreviation(sentence):
         return ABBREVIATION_REASON
-    if has_ambiguous_boundary(sentence):
-        return AMBIGUOUS_BOUNDARY_REASON
+    if sentence_has_unclear_boundary(sentences, index):
+        return UNCLEAR_BOUNDARY_REASON
     return ""
 
 
@@ -299,12 +303,13 @@ def insert_claim_sentence(
         return False, "", version_error
     
     # (B) referent, QA R13 abbreviation ending, issue #10 unclear boundary
-    error = claim_selectability_error(sentence)
+    error = claim_selectability_error(sentences, segment.sentence_index)
     if error:
         return False, "", error
     
     # S1 (QA R14): Trim trailing punctuation for flow, but preserve '?' for questions
     # A question "Is it fast?" should be inserted as "Is it fast?", not "Is it fast."
+    # A terminator inside closing quotes ('"We ship today."') is kept verbatim.
     if sentence.rstrip().endswith('?'):
         # Keep the question mark
         sentence = sentence.rstrip()
@@ -337,7 +342,9 @@ class SentenceGateResult:
     phrase_id: Optional[str] = None  # QA R13: Fixed phrase ID for non_claims
 
 
-def _verdict_reusable(seg: Segment, passage_sentences: Dict[str, tuple]) -> bool:
+def _verdict_reusable(
+    seg: Segment, passage_sentences: Dict[str, tuple], passage_splits: Dict[str, List[str]]
+) -> bool:
     """May the edit re-gate keep this gated segment's verdict (issue #10)?
 
     A claim gated under another sentence split may be a fragment of a founder
@@ -351,7 +358,10 @@ def _verdict_reusable(seg: Segment, passage_sentences: Dict[str, tuple]) -> bool
     if not seg.text:
         return False
     match = passage_sentences.get(normalize_text(seg.text.rstrip('.!?')))
-    return match is not None and not claim_selectability_error(match[2])
+    if match is None:
+        return False
+    passage_id, index, _ = match
+    return not claim_selectability_error(passage_splits[passage_id], index)
 
 
 @activity.defn(name="verify_edited_text")
@@ -383,8 +393,10 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
     
     # Build passage sentence lookup for verbatim matching
     passage_sentences = {}
+    passage_splits = {}  # issue #10: selectability needs neighbouring sentences
     for passage_id, material in materials_by_id.items():
         sentences = split_into_sentences(material.passage)
+        passage_splits[passage_id] = sentences
         for i, sent in enumerate(sentences):
             # Normalize for comparison (B4: NFKC+casefold+whitespace)
             norm_sent = normalize_text(sent.rstrip('.!?'))
@@ -431,7 +443,7 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
         # QA R13: Also check sentence type - questions match only questions, statements match statements
         matched_seg = None
         for seg in input.gated_segments:
-            if not _verdict_reusable(seg, passage_sentences):
+            if not _verdict_reusable(seg, passage_sentences, passage_splits):
                 continue
             if seg.text:
                 # Check if the segment is a question
@@ -482,7 +494,7 @@ async def verify_edited_text(input: EditedTextGateInput) -> List[SentenceGateRes
             
             # S2: Apply the model path's selectability rules (referent,
             # abbreviation ending, issue #10 unclear boundary)
-            error = claim_selectability_error(sent_text)
+            error = claim_selectability_error(passage_splits[passage_id], sent_idx)
             if error:
                 results.append(SentenceGateResult(
                     sentence=sentence,
@@ -737,7 +749,8 @@ async def claim_gate(input: ClaimGateInput) -> ClaimGateResult:
         if seg.text:
             text = seg.text
             # Add period if text doesn't end with sentence-ending punctuation
-            if text and not text.rstrip()[-1:] in '.!?':
+            # (issue #10: also before closing quotes, '"We ship today."')
+            if text and not sentence_terminator(text.rstrip()):
                 text = text + '.'
             draft_parts.append(text)
     

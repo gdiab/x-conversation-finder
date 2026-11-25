@@ -67,6 +67,8 @@ cd backend
 python -m backend.worker
 ```
 
+To upgrade the worker, stop the running worker before starting the new one. Do not run two worker versions on the task queue at once: an older worker can gate a draft numbered by a newer sentence split (ADR-0006, 2026-11-21 amendment, item 2).
+
 ### Terminal 3: Backend API
 
 ```bash

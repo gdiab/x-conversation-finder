@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from backend.activities.claim_gate_activity import (
-    AMBIGUOUS_BOUNDARY_REASON,
+    UNCLEAR_BOUNDARY_REASON,
     ClaimGateInput,
     EditedTextGateInput,
     claim_gate,
@@ -26,13 +26,14 @@ from backend.adapters.plain_reply_agent import format_materials_for_prompt
 from backend.gate.legacy_split_v1 import split_into_sentences_v1
 from backend.gate.non_claim_set import NON_CLAIM_PHRASES
 from backend.gate.sentence_boundary import (
-    AMBIGUOUS,
     CONTINUE,
     END,
+    LIKELY_CONTINUE,
+    LIKELY_END,
     SPLITTER_VERSION,
     abbreviation_kind,
-    has_ambiguous_boundary,
     period_boundary,
+    sentence_has_unclear_boundary,
     starts_new_sentence,
 )
 from backend.models import FounderMaterial, ReplyPlan, Segment
@@ -50,103 +51,94 @@ def claim(index: int, version=SPLITTER_VERSION) -> Segment:
 # ---------- golden splits ----------
 #
 # Sentence indices are positions in these splits, and claim segments store
-# them. A change to any expected list here changes the indices that drafts
+# them. A change to any expected split here changes the indices that drafts
 # reference: bump SPLITTER_VERSION and read ADR-0006 (2026-11-21 amendment,
-# item 2) before updating one. The third value says whether every sentence
-# in the split is selectable as far as the boundary rules go.
+# item 2) before updating one. The third value lists the sentences that
+# start, end or contain an unclear boundary, which are not selectable.
 
 GOLDEN_SPLITS = [
     # Initialisms inside a sentence (the issue's example).
-    ("Is the U.S.A. market ready?", ["Is the U.S.A. market ready?"]),
-    ("We sell in the U.S. market today.", ["We sell in the U.S. market today."]),
-    ("Our U.K. team ships on Fridays.", ["Our U.K. team ships on Fridays."]),
-    ("Standups start at 9 a.m. sharp.", ["Standups start at 9 a.m. sharp."]),
-    # An initialism before a clear sentence start splits; before another
-    # capitalized word it is ambiguous: no split, and not selectable.
-    ("We sell in the U.S. We ship weekly.", ["We sell in the U.S.", "We ship weekly."]),
-    ("We ship in the U.S. Customers pay monthly.", ["We ship in the U.S. Customers pay monthly."]),
-    ("Is it live in the U.S.? Yes.", ["Is it live in the U.S.?", "Yes."]),
-    ("We operate in the U.S.A.", ["We operate in the U.S.A."]),
-    # e.g. and i.e. mid-sentence never split, even before a capitalized word.
-    ("Use a queue, e.g. Postgres or Redis.", ["Use a queue, e.g. Postgres or Redis."]),
-    ("Pick one store, i.e. Postgres.", ["Pick one store, i.e. Postgres."]),
-    ("Foo vs. It is shipped.", ["Foo vs. It is shipped."]),
-    ("We use e.g. We ship weekly.", ["We use e.g. We ship weekly."]),
-    # Titles never split (QA R13).
-    ("Ask Dr. Smith about it.", ["Ask Dr. Smith about it."]),
-    # etc. and St. can end a sentence.
-    ("We support Slack, Teams, etc. We add more monthly.", ["We support Slack, Teams, etc.", "We add more monthly."]),
-    ("We support Slack, Teams, etc. and more.", ["We support Slack, Teams, etc. and more."]),
-    ("We support Slack, Teams, etc. Pricing is flat.", ["We support Slack, Teams, etc. Pricing is flat."]),
-    ("Our office is on Main St. We host meetups.", ["Our office is on Main St.", "We host meetups."]),
-    ("We met at St. Louis Station.", ["We met at St. Louis Station."]),  # "Main St. Louis ..." reads both ways
-    # Single-letter initials before a capitalized word are ambiguous (name
-    # initial or sentence end); before a lowercase word they continue.
-    ("Built by J. Smith last year.", ["Built by J. Smith last year."]),
-    ("Built by J. A. Smith last year.", ["Built by J. A. Smith last year."]),
-    ("We chose Plan B. Customers need help.", ["We chose Plan B. Customers need help."]),
-    ("Pick option B. or C.", ["Pick option B. or C."]),
-    ("Built by J. The artist Smith in 2021.", ["Built by J. The artist Smith in 2021."]),
-    ("We offer Plan B. It costs less.", ["We offer Plan B. It costs less."]),
-    # Ph.D. (QA R11 test) splits before a clear sentence start.
-    ("Founded by Jo Lee, Ph.D. The company is small.", ["Founded by Jo Lee, Ph.D.", "The company is small."]),
-    # Decimals and numbers (S-5).
+    ("Is the U.S.A. market ready?", ["Is the U.S.A. market ready?"], []),
+    ("We sell in the U.S. market today.", ["We sell in the U.S. market today."], []),
+    ("Our U.K. team ships on Fridays.", ["Our U.K. team ships on Fridays."], []),
+    ("Standups start at 9 a.m. sharp.", ["Standups start at 9 a.m. sharp."], []),
+    ("We operate in the U.S.A.", ["We operate in the U.S.A."], []),
+    ("Is it live in the U.S.? Yes.", ["Is it live in the U.S.?", "Yes."], []),
+    # An initialism before a capitalized word is unclear: split before a
+    # sentence starter, joined otherwise; either way not selectable.
+    ("We sell in the U.S. We ship weekly.", ["We sell in the U.S.", "We ship weekly."], [0, 1]),
+    ("We ship to the U.S. The Netherlands, and France.", ["We ship to the U.S.", "The Netherlands, and France."], [0, 1]),
+    ("We ship in the U.S. Customers pay monthly.", ["We ship in the U.S. Customers pay monthly."], [0]),
+    ("We ship in the U.S.” Customers pay monthly.", ["We ship in the U.S.” Customers pay monthly."], [0]),
+    # Prefix abbreviations (titles, Latin) never end a sentence.
+    ("Ask Dr. Smith about it.", ["Ask Dr. Smith about it."], []),
+    ("We met at Mt. Everest base camp.", ["We met at Mt. Everest base camp."], []),
+    ("Use a queue, e.g. Postgres or Redis.", ["Use a queue, e.g. Postgres or Redis."], []),
+    ("Pick one store, i.e. Postgres.", ["Pick one store, i.e. Postgres."], []),
+    ("Foo vs. It is shipped.", ["Foo vs. It is shipped."], [0]),
+    ("We use e.g. We ship weekly.", ["We use e.g. We ship weekly."], [0]),
+    # etc., St., Jr. and months can end a sentence.
+    ("We support Slack, Teams, etc. and more.", ["We support Slack, Teams, etc. and more."], []),
+    ("We support Slack, Teams, etc. We add more monthly.", ["We support Slack, Teams, etc.", "We add more monthly."], [0, 1]),
+    ("We support Slack, Teams, etc. Pricing is flat.", ["We support Slack, Teams, etc. Pricing is flat."], [0]),
+    ("Our office is on Main St. We host meetups.", ["Our office is on Main St.", "We host meetups."], [0, 1]),
+    ("We launched in Jan. and grew fast.", ["We launched in Jan. and grew fast."], []),
+    # Single-letter initials, either case.
+    ("Built by J. Smith last year.", ["Built by J. Smith last year."], [0]),
+    ("Built by j. smith in 2021.", ["Built by j. smith in 2021."], []),
+    ("Built by J. The artist Smith in 2021.", ["Built by J. The artist Smith in 2021."], [0]),
+    ("We chose Plan B. Customers need help.", ["We chose Plan B. Customers need help."], [0]),
+    ("Pick option B. or C.", ["Pick option B. or C."], []),
+    # Ph.D. (QA R11 test).
+    ("Founded by Jo Lee, Ph.D. The company is small.", ["Founded by Jo Lee, Ph.D.", "The company is small."], [0, 1]),
+    # Numbers (S-5 decimals): a number before a capitalized word ends the sentence.
     (
         "Our product has 99.99% uptime. It handles 1.5 million requests per second. Great performance.",
         ["Our product has 99.99% uptime.", "It handles 1.5 million requests per second.", "Great performance."],
+        [],
     ),
-    ("Uptime was 99.9. We fixed that.", ["Uptime was 99.9.", "We fixed that."]),
-    ("We launched in 2021. We now serve teams.", ["We launched in 2021.", "We now serve teams."]),
-    ("We launched in 2021. Customers followed.", ["We launched in 2021. Customers followed."]),
-    # List markers stay with their item.
-    ("1. The product supports SSO.", ["1. The product supports SSO."]),
-    ("Steps: 1. Install the CLI.", ["Steps: 1. Install the CLI."]),
-    ("We have 12. The rest are pending.", ["We have 12. The rest are pending."]),
-    # Company suffixes (QA R14) are unchanged.
-    ("We are Acme Inc. Our product supports SSO.", ["We are Acme Inc.", "Our product supports SSO."]),
-    ("We are Acme Inc. and others.", ["We are Acme Inc. and others."]),
-    ("We are Acme Corp. Pricing is flat.", ["We are Acme Corp.", "Pricing is flat."]),
+    ("Uptime was 99.9. We fixed that.", ["Uptime was 99.9.", "We fixed that."], []),
+    ("We launched in 2021. We now serve teams.", ["We launched in 2021.", "We now serve teams."], []),
+    ("We launched in 2021. Customers followed.", ["We launched in 2021.", "Customers followed."], []),
+    # List markers stay with their item; a mid-sentence one is unclear.
+    ("1. The product supports SSO.", ["1. The product supports SSO."], []),
+    ("1. The product supports SSO. 2. The API is fast.", ["1. The product supports SSO.", "2. The API is fast."], []),
+    ("Steps: 1. Install the CLI.", ["Steps: 1. Install the CLI."], [0]),
+    ("We have 12. The rest are pending.", ["We have 12. The rest are pending."], [0]),
+    # Company suffixes (QA R14) split before a capitalized word; unclear.
+    ("We are Acme Inc. Our product supports SSO.", ["We are Acme Inc.", "Our product supports SSO."], [0, 1]),
+    ("We are Acme Inc. and others.", ["We are Acme Inc. and others."], []),
+    ("We are Acme Corp. Pricing is flat.", ["We are Acme Corp.", "Pricing is flat."], [0, 1]),
     # Terminators before closing quotes and brackets.
-    ('We said "ship it." Customers agreed.', ['We said "ship it."', "Customers agreed."]),
-    ("We ship in the U.S.\u201d Customers pay monthly.", ["We ship in the U.S.\u201d Customers pay monthly."]),
-    ("Fast setup (really!) Clear pricing.", ["Fast setup (really!)", "Clear pricing."]),
+    ('We said "ship it." Customers agreed.', ['We said "ship it."', "Customers agreed."], []),
+    ("Fast setup (really!) Clear pricing.", ["Fast setup (really!)", "Clear pricing."], []),
     # Ordinary sentence ends.
-    ("Fast setup. Clear pricing! Any questions?", ["Fast setup.", "Clear pricing!", "Any questions?"]),
-    ("Wait... Then it worked.", ["Wait...", "Then it worked."]),
-]
-
-# Sentences from GOLDEN_SPLITS with a period inside that might end a sentence.
-AMBIGUOUS_SENTENCES = [
-    "We ship in the U.S. Customers pay monthly.",
-    "We use e.g. We ship weekly.",
-    "Foo vs. It is shipped.",
-    "We support Slack, Teams, etc. Pricing is flat.",
-    "We met at St. Louis Station.",
-    "Built by J. Smith last year.",
-    "Built by J. A. Smith last year.",
-    "Built by J. The artist Smith in 2021.",
-    "We offer Plan B. It costs less.",
-    "We chose Plan B. Customers need help.",
-    "We ship in the U.S.\u201d Customers pay monthly.",
-    "We launched in 2021. Customers followed.",
-    "Steps: 1. Install the CLI.",
-    "We have 12. The rest are pending.",
+    ("Fast setup. Clear pricing! Any questions?", ["Fast setup.", "Clear pricing!", "Any questions?"], []),
+    ("Wait... Then it worked.", ["Wait...", "Then it worked."], []),
 ]
 
 
-@pytest.mark.parametrize("text,expected", GOLDEN_SPLITS)
-def test_golden_splits(text, expected):
+@pytest.mark.parametrize("text,expected,unclear", GOLDEN_SPLITS)
+def test_golden_splits(text, expected, unclear):
     assert split_into_sentences(text) == expected
 
 
-@pytest.mark.parametrize("text,expected", GOLDEN_SPLITS)
-def test_only_listed_sentences_have_an_ambiguous_boundary(text, expected):
-    for sentence in expected:
-        assert has_ambiguous_boundary(sentence) == (sentence in AMBIGUOUS_SENTENCES), sentence
+@pytest.mark.parametrize("text,expected,unclear", GOLDEN_SPLITS)
+def test_golden_unclear_sentences(text, expected, unclear):
+    sentences = split_into_sentences(text)
+    assert [i for i in range(len(sentences)) if sentence_has_unclear_boundary(sentences, i)] == unclear
+
+
+@pytest.mark.parametrize("text,expected,unclear", GOLDEN_SPLITS)
+def test_unclear_sentences_are_not_selectable(text, expected, unclear):
+    sentences = split_into_sentences(text)
+    for i in unclear:
+        error = claim_selectability_error(sentences, i)
+        assert error, sentences[i]
 
 
 def test_split_is_deterministic():
-    text = " ".join(t for t, _ in GOLDEN_SPLITS)
+    text = " ".join(t for t, _, _ in GOLDEN_SPLITS)
     first = split_into_sentences(text)
     assert all(split_into_sentences(text) == first for _ in range(5))
 
@@ -185,9 +177,12 @@ def test_workflow_code_never_splits_sentences():
         ("u.s.", "terminal"),
         ("etc.", "terminal"),
         ("Ph.D.", "terminal"),
+        ("Jr.", "terminal"),
         ("(U.S.)", "terminal"),
         ("J.", "initial"),
+        ("j.", "initial"),
         ("Dr.", "prefix"),
+        ("Mt.", "prefix"),
         ("e.g.", "prefix"),
         ("Inc.", "company"),
         ("1.", "list_marker"),
@@ -196,7 +191,6 @@ def test_workflow_code_never_splits_sentences():
         ("$5.", "number"),
         ("99.9.", "number"),
         ("done.", None),
-        ("j.", None),  # single lowercase letter: an ordinary word
         ("Zinc.", None),
         ("wait...", None),
         ("U.S.?", None),
@@ -212,25 +206,26 @@ def test_abbreviation_kind(word, kind):
         ("U.S.", None, END),
         ("Dr.", None, END),
         ("done.", "Customers", END),
-        ("U.S.", "We", END),
-        ("U.S.", "It's", END),
-        ("U.S.", "It’s", END),
         ("U.S.", "market", CONTINUE),
-        ("U.S.", "Customers", AMBIGUOUS),
-        ("U.S.", "$5", AMBIGUOUS),
+        ("U.S.", "We", LIKELY_END),
+        ("U.S.", "It’s", LIKELY_END),
+        ("U.S.", "The", LIKELY_END),
+        ("U.S.", "Customers", LIKELY_CONTINUE),
+        ("U.S.", "$5", LIKELY_CONTINUE),
+        ('U.S."', "Customers", LIKELY_CONTINUE),
         ("2021.", "We", END),
-        ("2021.", "Customers", AMBIGUOUS),
+        ("2021.", "Customers", END),
+        ("2021.", "we", CONTINUE),
         ("Dr.", "Smith", CONTINUE),
-        ("Dr.", "We", AMBIGUOUS),
+        ("Dr.", "We", LIKELY_CONTINUE),
         ("approx.", "10", CONTINUE),
-        ("J.", "Smith", AMBIGUOUS),  # "J. Smith" or "Plan B. Customers"
-        ("J.", "smith", CONTINUE),
-        ("J.", "The", AMBIGUOUS),
-        ('U.S."', "Customers", AMBIGUOUS),
-        ("Inc.", "Customers", END),
+        ("J.", "Smith", LIKELY_CONTINUE),
+        ("J.", "The", LIKELY_CONTINUE),
+        ("j.", "smith", CONTINUE),
+        ("Inc.", "Customers", LIKELY_END),
         ("Inc.", "and", CONTINUE),
         ("Inc.", "3", CONTINUE),
-        ("12.", "The", AMBIGUOUS),
+        ("12.", "The", LIKELY_CONTINUE),
     ],
 )
 def test_period_boundary(word, next_word, expected):
@@ -239,11 +234,11 @@ def test_period_boundary(word, next_word, expected):
 
 def test_list_marker_at_sentence_start_continues():
     assert period_boundary("1.", "The", sentence_start=True) == CONTINUE
-    assert period_boundary("1.", "The", sentence_start=False) == AMBIGUOUS
+    assert period_boundary("1.", "The", sentence_start=False) == LIKELY_CONTINUE
 
 
 def test_every_fixed_phrase_starts_a_new_sentence():
-    """A claim ending in a number, then any fixed phrase, splits in the assembled draft."""
+    """Fixed phrases begin with sentence starters (the starter list names them)."""
     for phrase in NON_CLAIM_PHRASES:
         assert starts_new_sentence(phrase.text.split()[0]), phrase.id
 
@@ -267,28 +262,26 @@ def test_sentence_with_a_mid_sentence_abbreviation_is_selectable():
         "We launched in 2021.",
         "Our team has 12.",
         "1. The product supports SSO.",
+        "Built by j. smith in 2021.",
         "Use a queue, e.g. Postgres or Redis.",
     ]:
-        assert claim_selectability_error(sentence) == "", sentence
+        assert claim_selectability_error([sentence], 0) == "", sentence
 
 
-@pytest.mark.parametrize("sentence", AMBIGUOUS_SENTENCES)
-def test_sentence_with_an_ambiguous_boundary_is_not_selectable(sentence):
-    assert claim_selectability_error(sentence) == AMBIGUOUS_BOUNDARY_REASON
-
-
-def test_ambiguous_reason_does_not_trigger_the_abbreviation_explanation():
+def test_unclear_reason_does_not_trigger_the_abbreviation_explanation():
     """ReviewCard.tsx shows any reason containing 'abbreviation' as ends-with-an-abbreviation."""
-    assert "abbreviation" not in AMBIGUOUS_BOUNDARY_REASON.lower()
+    assert "abbreviation" not in UNCLEAR_BOUNDARY_REASON.lower()
 
 
-def test_insert_rejects_a_sentence_ending_in_an_initialism():
-    materials = {"passage_0": material("We sell in the U.S. We ship weekly.")}
+def test_insert_rejects_both_sides_of_an_unclear_split():
+    """Codex thermo r3: "The Netherlands, and France." is a fragment, not a claim."""
+    materials = {"passage_0": material("We ship to the U.S. The Netherlands, and France. Our API is fast.")}
     ok, _, error = insert_claim_sentence(claim(0), materials)
-    assert not ok
-    assert "abbreviation" in error.lower()
-    ok, text, _ = insert_claim_sentence(claim(1), materials)
-    assert ok and text == "We ship weekly"
+    assert not ok and "abbreviation" in error.lower()
+    ok, _, error = insert_claim_sentence(claim(1), materials)
+    assert not ok and error == UNCLEAR_BOUNDARY_REASON
+    ok, text, _ = insert_claim_sentence(claim(2), materials)
+    assert ok and text == "Our API is fast"
 
 
 def test_insert_keeps_a_mid_sentence_initialism_whole():
@@ -305,21 +298,20 @@ def test_insert_keeps_a_mid_sentence_initialism_whole():
         "Built by J. The artist Smith in 2021.",  # no partial span after an initial
         "We ship in the U.S. Customers pay monthly.",  # no two sentences as one claim
         "We use e.g. We ship weekly.",
+        "We ship in the U.S.” Customers pay monthly.",
     ],
 )
-def test_insert_rejects_a_sentence_with_an_ambiguous_boundary(passage):
+def test_insert_rejects_a_sentence_with_an_unclear_boundary(passage):
     materials = {"passage_0": material(passage)}
     assert len(split_into_sentences(passage)) == 1
     ok, _, error = insert_claim_sentence(claim(0), materials)
     assert not ok
-    assert error == AMBIGUOUS_BOUNDARY_REASON
+    assert error == UNCLEAR_BOUNDARY_REASON
 
 
 def test_list_marker_is_never_a_claim_by_itself():
     """Codex review r1: "1." must not split off and be quoted as the claim "1"."""
     materials = {"passage_0": material("1. The product supports SSO. 2. The API is fast.")}
-    sentences = split_into_sentences(materials["passage_0"].passage)
-    assert sentences == ["1. The product supports SSO.", "2. The API is fast."]
     ok, text, _ = insert_claim_sentence(claim(0), materials)
     assert ok and text == "1. The product supports SSO"
 
@@ -387,7 +379,7 @@ async def test_claim_gate_rejects_two_sentences_hidden_by_a_closing_quote():
         idempotency_key="issue10_closer",
     ))
     assert not result.passed
-    assert result.failed_sentences[0][1] == AMBIGUOUS_BOUNDARY_REASON
+    assert result.failed_sentences[0][1] == UNCLEAR_BOUNDARY_REASON
 
 
 async def test_edit_regate_splits_after_a_quoted_sentence_end():
@@ -486,7 +478,7 @@ async def test_edit_regate_rejects_a_passage_sentence_ending_in_an_initialism():
     "passage",
     ["We ship in the U.S. Customers pay monthly.", "Built by J. The artist Smith in 2021."],
 )
-async def test_edit_regate_rejects_a_passage_sentence_with_an_ambiguous_boundary(passage):
+async def test_edit_regate_rejects_a_passage_sentence_with_an_unclear_boundary(passage):
     """Two founder sentences cannot pass the edit path as one claim."""
     results = await verify_edited_text(EditedTextGateInput(
         edited_text=f"Thanks for sharing. {passage}",
@@ -496,7 +488,18 @@ async def test_edit_regate_rejects_a_passage_sentence_with_an_ambiguous_boundary
     ))
     assert len(results) == 2
     assert not results[1].passed
-    assert results[1].reason == AMBIGUOUS_BOUNDARY_REASON
+    assert results[1].reason == UNCLEAR_BOUNDARY_REASON
+
+
+async def test_claim_gate_assembles_a_quoted_sentence_without_extra_punctuation():
+    """Codex review r3: a terminator before a closing quote needs no added period."""
+    result = await claim_gate(ClaimGateInput(
+        segments=[claim(0), Segment(kind="non_claim", phrase_id="q.current_tool")],
+        founder_materials=[material('Our motto is "We ship today." We ship weekly.')],
+        idempotency_key="issue10_quoted",
+    ))
+    assert result.passed, result.failed_sentences
+    assert result.draft_text == 'Our motto is "We ship today." What are you using today?'
 
 
 # ---------- reply plan question spans ----------
