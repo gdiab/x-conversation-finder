@@ -39,6 +39,10 @@ class HttpXClient(XClientPort):
             "Content-Type": "application/json",
         }
     
+    def billable_max_results(self, max_results: int) -> int:
+        """X's recent search takes 10-100 results; the request is clamped."""
+        return max(10, min(max_results, 100))
+    
     async def search_recent(
         self,
         query: str,
@@ -60,7 +64,7 @@ class HttpXClient(XClientPort):
             httpx.HTTPError: On API errors
         """
         # X API requires 10-100 range (S-7)
-        clamped_max = max(10, min(max_results, 100))
+        clamped_max = self.billable_max_results(max_results)
         
         params = {
             "query": query,

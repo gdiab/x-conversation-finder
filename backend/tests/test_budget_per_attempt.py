@@ -33,8 +33,9 @@ from backend.budget import (
     InferenceMeter,
     prompt_token_bound,
     get_today_budget,
+    ReservationClosed,
+    meter_inference,
     reconcile_inference_tokens,
-    release_inference_reservation,
     reserve_inference_budget,
     reserve_x_budget,
     set_kill_switch,
@@ -244,39 +245,23 @@ async def test_timeout_keeps_the_attempt_counted_and_retry_adds_a_call(sample_po
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [400, 429])
-async def test_rejected_request_releases_the_attempt(status, sample_post):
+@pytest.mark.parametrize("status", [400, 429, 408, 500, 503])
+async def test_error_status_keeps_the_attempt_counted_and_retry_adds_a_call(status, sample_post):
+    """OPENAI_BASE_URL may be a gateway, so no status proves the request was
+    free: the failed attempt stays counted, and the retry is counted too."""
     agent, _ = _agent([_status_error(status), PLAN_JSON])
-    activities = ReplyActivities(agent)
-    fn, arg = _activity_call("plan_reply", activities, sample_post)
-
-    with pytest.raises(openai.APIStatusError):
-        await _env(attempt=1).run(fn, arg)
-    budget = get_today_budget()
-    assert budget["inference_calls"] == 0
-    assert budget["inference_cost_usd"] == pytest.approx(0.0)
-
-    await _env(attempt=2).run(fn, arg)
-    budget = get_today_budget()
-    assert budget["inference_calls"] == 1
-    assert budget["inference_cost_usd"] == pytest.approx(_actual_cost())
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", [408, 500, 503])
-async def test_ambiguous_error_status_keeps_the_attempt_counted(status, sample_post):
-    """A 5xx (or 408) may come after the provider did the work: stay counted."""
-    agent, _ = _agent([_status_error(status)])
     fn, arg = _activity_call("plan_reply", ReplyActivities(agent), sample_post)
 
     with pytest.raises(openai.APIStatusError):
         await _env(attempt=1).run(fn, arg)
-
     (reservation,) = _reservations("inference")
     assert reservation.reconciled == 0
+    assert get_today_budget()["inference_cost_usd"] == pytest.approx(reservation.cost_usd)
+
+    await _env(attempt=2).run(fn, arg)
     budget = get_today_budget()
-    assert budget["inference_calls"] == 1
-    assert budget["inference_cost_usd"] == pytest.approx(reservation.cost_usd)
+    assert budget["inference_calls"] == 2
+    assert budget["inference_cost_usd"] == pytest.approx(reservation.cost_usd + _actual_cost())
 
 
 @pytest.mark.asyncio
@@ -453,20 +438,43 @@ def test_inference_reservations_are_per_attempt_and_call():
     assert len(_reservations("inference")) == 3
 
 
-def test_release_refunds_the_call_and_is_idempotent():
+def test_closed_reservation_refuses_to_authorize_another_request():
     ids = dict(workflow_id="wf", workflow_run_id="run", activity_id="3", attempt=2, call_index=1)
     cost, day = reserve_inference_budget(100, 50, **ids)
-    assert get_today_budget()["inference_cost_usd"] == pytest.approx(cost)
+    reconcile_inference_tokens(100, 50, 80, 40, day, **ids)
+    reconcile_inference_tokens(100, 50, 80, 40, day, **ids)  # idempotent
 
-    release_inference_reservation(100, 50, day, **ids)
-    release_inference_reservation(100, 50, day, **ids)
-    reconcile_inference_tokens(100, 50, 100, 50, day, **ids)  # same key: no-op after release
-
+    with pytest.raises(ReservationClosed):
+        reserve_inference_budget(100, 50, **ids)
     budget = get_today_budget()
-    assert budget["inference_calls"] == 0
-    assert budget["inference_cost_usd"] == pytest.approx(0.0)
-    (reservation,) = _reservations("inference")
-    assert reservation.reconciled == 1
+    assert budget["inference_calls"] == 1
+    assert budget["inference_cost_usd"] == pytest.approx(_actual_cost(80, 40))
+
+
+@pytest.mark.asyncio
+async def test_meters_do_not_nest():
+    async def nested():
+        with meter_inference():
+            with meter_inference():
+                pass
+
+    with pytest.raises(RuntimeError, match="does not nest"):
+        await _env(attempt=1).run(nested)
+
+
+@pytest.mark.asyncio
+async def test_injected_openai_client_is_metered_and_has_no_sdk_retries(sample_post):
+    client = openai.AsyncOpenAI(api_key="synthetic", base_url="https://api.openai.invalid/v1", max_retries=5)
+    agent = PlainReplyAgent(openai_client=client)
+    assert agent.client.max_retries == 0
+
+    async def must_not_send(**kwargs):
+        raise AssertionError("request sent")
+
+    agent.client.chat.completions.create = must_not_send
+    with pytest.raises(ApplicationError) as info:
+        await agent.plan(sample_post, _evidence(), "k")  # outside a metered attempt
+    assert info.value.type == "UnmeteredInferenceCall"
 
 
 @pytest.mark.asyncio
@@ -631,3 +639,37 @@ async def test_lookup_returning_none_stays_counted(monkeypatch):
     assert budget["x_cost_usd"] == pytest.approx(get_settings().x_post_read_cost)
     (recon,) = _reconciliations("x_reads")
     assert recon.actual_amount == 1
+
+
+@pytest.mark.asyncio
+async def test_http_search_reserves_what_the_request_can_be_billed_for(monkeypatch):
+    """max_results=2 is sent to X as 10 (X's minimum), so 10 reads are reserved."""
+    from backend.adapters.http_x_client import HttpXClient
+
+    sent = []
+
+    def handler(request):
+        sent.append(int(request.url.params["max_results"]))
+        return httpx.Response(429, headers={"Retry-After": "1"}, request=request)
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *a, **kw: real_async_client(*a, transport=httpx.MockTransport(handler), **kw),
+    )
+    reserved = []
+    import backend.activities.x_activities as xa
+    real_reserve = xa.reserve_x_budget
+
+    def spy(*args, **kwargs):
+        reserved.append(kwargs["reads_needed"])
+        return real_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(xa, "reserve_x_budget", spy)
+    activities = XActivities(HttpXClient(bearer_token="synthetic-token"))
+    with pytest.raises(ApplicationError):
+        await _env(attempt=1).run(
+            activities.search_recent, SearchRecentInput(query="synthetic", max_results=2, idempotency_key="k")
+        )
+    assert sent == [10]
+    assert reserved == [10]

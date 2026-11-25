@@ -14,9 +14,11 @@ Issue #8: every paid attempt is counted.
   previous attempt's. Inference keys also carry a call index, one per paid call.
 - An open reservation from an attempt that sent its request stays counted at the
   reserved amount: the call may have been billed.
-- An attempt whose request the provider rejected with a 4xx status (including
-  429) is released (reconciled to zero): the request was refused, so no posts or
-  completion were returned. 5xx, timeouts and crashes stay counted.
+- An X attempt that X refused with a 4xx status (including 429) is released
+  (reconciled to zero): X bills per post returned, and the X endpoint is fixed
+  in code, so a 4xx comes from X itself. Inference errors are never released:
+  openai_base_url can point at a gateway whose status says nothing about
+  upstream billing. 5xx, timeouts and crashes stay counted.
 - Inference reservations are sized from an upper bound on the prompt's tokens
   plus the call's max output tokens (prompt_token_bound, InferenceMeter), not
   from fixed estimates.
@@ -61,6 +63,26 @@ def _resolve_attempt(attempt: Optional[int]) -> int:
     if activity.in_activity():
         return activity.info().attempt
     return 1
+
+
+class ReservationClosed(ApplicationError):
+    """A reservation that was already reconciled (or released) was asked to
+    authorize another request. Each paid request needs its own reservation."""
+
+    def __init__(self, reservation_key: str):
+        super().__init__(
+            f"Reservation {reservation_key} is closed; a new paid request needs a new "
+            "attempt or call index",
+            non_retryable=True,
+            type="ReservationClosed",
+        )
+
+
+def _refuse_closed_reservation(existing) -> None:
+    """Reuse is only for the same request reserving again while still open.
+    A closed reservation must not authorize a new paid request uncounted."""
+    if existing.reconciled:
+        raise ReservationClosed(existing.reservation_key)
 
 
 def _reservation_key(
@@ -159,6 +181,7 @@ def reserve_x_budget(
             ).first()
             
             if existing:
+                _refuse_closed_reservation(existing)
                 db.commit()
                 return existing.cost_usd, existing.reservation_date
         
@@ -226,7 +249,7 @@ def reserve_x_budget(
         db.commit()
         return cost, today
         
-    except BudgetExceeded:
+    except (BudgetExceeded, ReservationClosed):
         db.rollback()
         raise
     except Exception as e:
@@ -293,6 +316,7 @@ def reserve_inference_budget(
             ).first()
             
             if existing:
+                _refuse_closed_reservation(existing)
                 db.commit()
                 return existing.cost_usd, existing.reservation_date
         
@@ -343,7 +367,7 @@ def reserve_inference_budget(
         db.commit()
         return cost, today
         
-    except BudgetExceeded:
+    except (BudgetExceeded, ReservationClosed):
         db.rollback()
         raise
     except Exception as e:
@@ -490,8 +514,7 @@ def release_x_reservation(
 ) -> float:
     """Release an X reservation whose request returned no posts (issue #8).
 
-    For an attempt that returned no posts: X rejected the request with a 4xx
-    status, or a lookup found no post. X bills per post returned. Reconciles the
+    For an attempt X refused with a 4xx status. X bills per post returned. Reconciles the
     reservation to zero reads. Do not call it for 5xx, timeouts or connection
     errors, where the request may have been served; those stay counted.
     """
@@ -533,29 +556,7 @@ def reconcile_inference_tokens(
     """
     return _close_inference_reservation(
         reserved_input, reserved_output, actual_input, actual_output, reservation_date,
-        workflow_id, workflow_run_id, activity_id, attempt, call_index, released=False,
-    )
-
-
-def release_inference_reservation(
-    reserved_input: int,
-    reserved_output: int,
-    reservation_date: str,
-    workflow_id: str,
-    workflow_run_id: str,
-    activity_id: str,
-    attempt: Optional[int] = None,
-    call_index: int = 1,
-) -> float:
-    """Release an inference reservation whose call returned no completion (issue #8).
-
-    For a call the provider rejected with a 4xx status. Refunds the whole
-    reservation and takes the call off the day's inference_calls count.
-    Idempotent with reconcile_inference_tokens (same key). Returns 0.0.
-    """
-    return _close_inference_reservation(
-        reserved_input, reserved_output, 0, 0, reservation_date,
-        workflow_id, workflow_run_id, activity_id, attempt, call_index, released=True,
+        workflow_id, workflow_run_id, activity_id, attempt, call_index,
     )
 
 
@@ -570,7 +571,6 @@ def _close_inference_reservation(
     activity_id: str,
     attempt: Optional[int],
     call_index: int,
-    released: bool,
 ) -> float:
     settings = get_settings()
     attempt = _resolve_attempt(attempt)
@@ -638,9 +638,6 @@ def _close_inference_reservation(
             )
         
         ledger.inference_cost_usd = max(0.0, new_cost)
-        if released:
-            # The call was counted when reserved; it returned no completion.
-            ledger.inference_calls = max(0, (ledger.inference_calls or 0) - 1)
         ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
         # Record reconciliation for idempotency
@@ -707,9 +704,9 @@ def prompt_token_bound(messages: Sequence[dict]) -> int:
 class InferenceCall:
     """One paid inference call's reservation, and how it was closed.
 
-    status: "open" (reserved; stays counted at the reserved amount),
-    "settled" (reconciled to the provider's usage), "released" (no
-    completion, refunded) or "kept" (no usage reported, reservation kept).
+    status: "open" (reserved; stays counted at the reserved amount, also when
+    the request failed), "settled" (reconciled to the provider's usage) or
+    "kept" (no usable usage reported, reservation kept).
     """
 
     meter: "InferenceMeter"
@@ -751,25 +748,6 @@ class InferenceCall:
         self.status = "settled"
         return self.cost_usd
 
-    def release(self) -> None:
-        """Refund the reservation: the provider rejected the request (4xx), so
-        no completion was returned or billed."""
-        if self.status != "open":
-            return
-        m = self.meter
-        release_inference_reservation(
-            reserved_input=self.reserved_input,
-            reserved_output=self.reserved_output,
-            reservation_date=self.reservation_date,
-            workflow_id=m.workflow_id,
-            workflow_run_id=m.workflow_run_id,
-            activity_id=m.activity_id,
-            attempt=m.attempt,
-            call_index=self.call_index,
-        )
-        self.status = "released"
-        self.cost_usd = 0.0
-
 
 @dataclass
 class InferenceMeter:
@@ -777,9 +755,10 @@ class InferenceMeter:
 
     The adapter that makes a paid call reserves through the current meter
     right before sending the request, with the prompt estimate and the max
-    output tokens it sends, then settles or releases the call. Each call gets
+    output tokens it sends, then settles the call. Each call gets
     its own reservation key (attempt + call index), so a retried attempt or a
     second call in one attempt is counted, never folded into an earlier one.
+    A call that fails keeps its reservation counted.
     """
 
     workflow_id: str
@@ -839,7 +818,12 @@ def current_inference_meter() -> Optional[InferenceMeter]:
 @contextmanager
 def meter_inference() -> Iterator[InferenceMeter]:
     """Meter the paid inference calls made inside this block for the current
-    activity attempt. Must run inside a Temporal activity."""
+    activity attempt. Must run inside a Temporal activity, once per attempt
+    block: call indices restart in each meter, so meters do not nest (a second
+    sequential meter in one attempt would collide on call 1 and is refused by
+    ReservationClosed once the first call is closed)."""
+    if _current_meter.get() is not None:
+        raise RuntimeError("meter_inference() does not nest")
     info = activity.info()
     meter = InferenceMeter(
         workflow_id=info.workflow_id,

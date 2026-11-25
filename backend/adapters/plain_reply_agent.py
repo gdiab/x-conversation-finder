@@ -8,7 +8,7 @@ This is the baseline for ADR-0006 evaluation.
 import json
 from typing import Any, List, Optional
 
-from openai import APIStatusError, AsyncOpenAI
+from openai import AsyncOpenAI
 from temporalio.exceptions import ApplicationError
 
 from backend.budget import current_inference_meter, prompt_token_bound
@@ -166,13 +166,6 @@ def _parse_plan(result: object) -> dict:
 # --- end reply plan ---
 
 
-def _provider_rejected(status_code: Optional[int]) -> bool:
-    """A 4xx (except 408 Request Timeout) means the provider refused the request
-    before generating: nothing returned, nothing billed. 408 and 5xx are
-    ambiguous, so their reservations stay counted."""
-    return isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 408
-
-
 class PlainReplyAgent(ReplyAgentPort):
     """Plain LLM adapter - baseline implementation."""
     
@@ -182,16 +175,17 @@ class PlainReplyAgent(ReplyAgentPort):
         require_budget_meter: Optional[bool] = None,
     ):
         """openai_client: inject a client (tests use stubs); None builds the real one.
+        An injected AsyncOpenAI client gets its SDK retries switched off too.
 
         require_budget_meter: refuse a call made outside a metered activity
         attempt (backend.budget.meter_inference), so a paid request can never
-        skip the daily cap and kill switch. Defaults to True when the adapter
-        builds its own (real, paid) client, False for an injected client.
+        skip the daily cap and kill switch. True unless a caller opts out
+        explicitly (adapter unit tests with stub clients).
         """
         settings = get_settings()
-        self._require_budget_meter = (
-            openai_client is None if require_budget_meter is None else require_budget_meter
-        )
+        self._require_budget_meter = True if require_budget_meter is None else require_budget_meter
+        if isinstance(openai_client, AsyncOpenAI):
+            openai_client = openai_client.with_options(max_retries=0)
         self.client = openai_client or AsyncOpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
@@ -213,10 +207,10 @@ class PlainReplyAgent(ReplyAgentPort):
         Issue #8: inside a metered activity attempt (backend.budget.meter_inference)
         the call is reserved right before the request, sized from an upper bound
         on the prompt's tokens and the max output tokens sent with it, then
-        reconciled to the reported usage. A 4xx status (including 429) means the
-        provider rejected the request: no completion, so the reservation is
-        released. Anything else (5xx, timeout, connection error, cancellation)
-        keeps it counted: the request may have been billed.
+        reconciled to the reported usage. A failed request (any error status,
+        timeout, connection error, cancellation) keeps its reservation counted:
+        openai_base_url may be a gateway, so a status does not prove that no
+        upstream work was billed.
         """
         max_output_tokens = self._max_output_tokens[call]
         meter = current_inference_meter()
@@ -230,20 +224,15 @@ class PlainReplyAgent(ReplyAgentPort):
         reservation = (
             meter.reserve(prompt_token_bound(messages), max_output_tokens) if meter else None
         )
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_completion_tokens=max_output_tokens,
-                # Without JSON mode, models wrap long answers in ```json fences,
-                # which json.loads rejects.
-                response_format={"type": "json_object"},
-            )
-        except APIStatusError as e:
-            if reservation and _provider_rejected(e.status_code):
-                reservation.release()
-            raise
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_completion_tokens=max_output_tokens,
+            # Without JSON mode, models wrap long answers in ```json fences,
+            # which json.loads rejects.
+            response_format={"type": "json_object"},
+        )
         if reservation:
             usage = getattr(response, "usage", None)
             reservation.settle(

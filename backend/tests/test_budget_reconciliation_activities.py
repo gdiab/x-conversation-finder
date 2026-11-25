@@ -425,7 +425,8 @@ async def test_same_attempt_reuses_reservation():
     backend/tests/test_budget_per_attempt.py.
     
     Covers both paths:
-    1. After reconcile: reserve -> reconcile -> reserve again -> reconcile (idempotent)
+    1. After reconcile: reserve -> reconcile -> reserve again (refused,
+       ReservationClosed) -> reconcile again (idempotent no-op)
     2. After failure: reserve -> fail -> reserve again -> reconcile
     """
     settings = get_settings()
@@ -474,16 +475,20 @@ async def test_same_attempt_reuses_reservation():
     finally:
         db.close()
     
-    # Attempt 2: reserve (retry) - should reuse existing reservation
-    cost2, date2 = reserve_x_budget(
-        reads_needed=10,
-        cost_per_read=settings.x_post_read_cost,
-        workflow_id="test_wf_retry_path1",
-        workflow_run_id="run-id-path1",  # Same run_id
-        activity_id="test_act_retry_path1",  # Same activity_id
-    )
+    # Same attempt reserving again after its reservation closed: refused
+    # (issue #8: a closed reservation must not authorize another paid request)
+    from backend.budget import ReservationClosed
+    with pytest.raises(ReservationClosed):
+        reserve_x_budget(
+            reads_needed=10,
+            cost_per_read=settings.x_post_read_cost,
+            workflow_id="test_wf_retry_path1",
+            workflow_run_id="run-id-path1",  # Same run_id
+            activity_id="test_act_retry_path1",  # Same activity_id
+        )
+    date2 = date1
     
-    # Attempt 2: reconcile (should be idempotent no-op)
+    # Reconciling again is an idempotent no-op
     second_cost = reconcile_x_reads(
         reserved_reads=10,
         actual_reads=4,

@@ -164,13 +164,19 @@ call is counted per Temporal activity attempt:
   the meter with `meter_inference()`; an adapter that makes a paid call reserves
   through `current_inference_meter()`. Each call is then reconciled to the
   reported usage; missing or partial usage keeps the full reservation.
-- `PlainReplyAgent` with its own (real) client refuses a call made outside a
-  metered activity attempt (`UnmeteredInferenceCall`). Injected clients (test
-  stubs) are not metered unless the test opens a meter.
-- A 4xx status (including 429, except 408) releases the reservation: the
-  provider refused the request, so no completion or posts were returned. 408,
-  5xx, timeouts, connection errors and crashes leave it counted at the reserved
-  amount. `lookup_post` counts 1 read per attempt even when it returns None:
+- `PlainReplyAgent` refuses a call made outside a metered activity attempt
+  (`UnmeteredInferenceCall`); adapter unit tests with stub clients opt out with
+  `require_budget_meter=False`. An injected `AsyncOpenAI` client gets
+  `max_retries=0` too.
+- A failed inference request stays counted at its reservation, whatever the
+  error: `OPENAI_BASE_URL` may be a gateway, so a status proves nothing about
+  upstream billing. An X request that X refused with a 4xx status (including
+  429, except 408) is released: X bills per post returned and the X base URL is
+  fixed in code. 408, 5xx, timeouts, connection errors and crashes stay counted.
+- X search reserves `billable_max_results(max_results)`: the HTTP adapter clamps
+  the request to X's 10-100 range, and the reservation covers what is sent.
+- A reservation that is already closed refuses to authorize another request
+  (`ReservationClosed`). `lookup_post` counts 1 read per attempt even when it returns None:
   the HTTP adapter returns None for a 404 and for post data it cannot convert.
 - Output that hits the max output tokens (`finish_reason == "length"`) fails
   research and draft without retry (`InferenceOutputTruncated`); the call stays

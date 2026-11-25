@@ -27,6 +27,15 @@ class XClientPort(ABC):
         """
         pass
     
+    def billable_max_results(self, max_results: int) -> int:
+        """The most posts a search_recent(max_results=...) call can be billed for.
+
+        The activity reserves this many reads before the call (issue #8). An
+        adapter that changes the requested count (the HTTP adapter clamps to
+        X's 10-100 range) must override it.
+        """
+        return max_results
+    
     @abstractmethod
     async def lookup_post(self, post_id: str) -> Optional[Post]:
         """

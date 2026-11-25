@@ -17,7 +17,8 @@ def x_rejected_request(exc: BaseException) -> bool:
     """True when the X API refused the request with a 4xx status (issue #8).
 
     X bills per post returned, and a refused request returns none, so the
-    attempt's reservation is released. The HTTP adapter raises
+    attempt's reservation is released. The HTTP adapter's base URL is fixed to
+    the X API, so a 4xx comes from X itself, not from a gateway. The HTTP adapter raises
     httpx.HTTPStatusError, or a RateLimitError ApplicationError for 429.
     408, 5xx, timeouts and connection errors return False: the request may
     have been served, so the reservation stays counted.
@@ -120,9 +121,12 @@ class XActivities:
         
         # Reserve budget atomically (NB3: reserve-then-commit)
         # This raises BudgetExceeded if cap would be exceeded
+        # Issue #8: reserve what the request can be billed for, which the HTTP
+        # adapter clamps to X's 10-100 range, not the raw max_results.
+        reserved_reads = self._x_client.billable_max_results(input.max_results)
         try:
             reserved_cost, reservation_date = reserve_x_budget(
-                reads_needed=input.max_results,
+                reads_needed=reserved_reads,
                 cost_per_read=settings.x_post_read_cost,
                 workflow_id=activity.info().workflow_id,
                 workflow_run_id=activity.info().workflow_run_id,
@@ -141,7 +145,7 @@ class XActivities:
         except Exception as e:
             if x_rejected_request(e):
                 release_x_reservation(
-                    reserved_reads=input.max_results,
+                    reserved_reads=reserved_reads,
                     reservation_date=reservation_date,
                     workflow_id=activity.info().workflow_id,
                     workflow_run_id=activity.info().workflow_run_id,
@@ -153,7 +157,7 @@ class XActivities:
         # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
         actual_reads = len(posts)
         actual_cost = reconcile_x_reads(
-            reserved_reads=input.max_results,
+            reserved_reads=reserved_reads,
             actual_reads=actual_reads,
             reservation_date=reservation_date,
             workflow_id=activity.info().workflow_id,
@@ -162,9 +166,9 @@ class XActivities:
             cost_per_read=settings.x_post_read_cost,
         )
         
-        if actual_reads != input.max_results:
+        if actual_reads != reserved_reads:
             activity.logger.info(
-                f"Reserved {input.max_results} reads, got {actual_reads} posts, "
+                f"Reserved {reserved_reads} reads, got {actual_reads} posts, "
                 f"reconciled to ${actual_cost:.4f}"
             )
         
@@ -252,7 +256,7 @@ class XActivities:
         )
         
         settings = get_settings()
-        max_results = 10
+        max_results = self._x_client.billable_max_results(10)
         
         # Reserve budget atomically (S-2: check_followup must reserve)
         try:

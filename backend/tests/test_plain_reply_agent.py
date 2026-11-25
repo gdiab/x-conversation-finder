@@ -61,7 +61,7 @@ class FakeCompletions:
 def make_agent(payloads):
     completions = FakeCompletions(payloads)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    return PlainReplyAgent(openai_client=client), completions
+    return PlainReplyAgent(openai_client=client, require_budget_meter=False), completions
 
 
 @pytest.mark.asyncio

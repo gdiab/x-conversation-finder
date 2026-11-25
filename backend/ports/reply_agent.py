@@ -6,8 +6,9 @@ The plain activity adapter is the baseline and default.
 
 Budget (issue #8): an adapter that makes paid inference calls reserves each one
 through backend.budget.current_inference_meter() right before the request,
-sized from the prompt and the max output tokens it sends, and settles or
-releases it after (see PlainReplyAgent._complete). The activities open the meter.
+sized from an upper bound on the prompt's tokens and the max output tokens it
+sends, and settles it after (see PlainReplyAgent._complete). A failed request
+stays counted. The activities open the meter.
 """
 
 from abc import ABC, abstractmethod
