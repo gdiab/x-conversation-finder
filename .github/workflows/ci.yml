@@ -100,13 +100,19 @@ jobs:
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
-    
+        # jsdom 30 (used by the frontend tests) requires Node 22.22.2 or newer.
+        node-version: '22'
+
     - name: Install dependencies
       run: |
         cd frontend
-        npm install
-    
+        npm ci
+
+    - name: Test
+      run: |
+        cd frontend
+        npm test
+
     - name: Build
       run: |
         cd frontend
