@@ -66,7 +66,9 @@ MAX_REASON_CHARS = 200
 
 # Version of the trigger rules below. Stored with each check, so a card says
 # which rules decided it. Bump it when a trigger changes.
-# 1.0.0 (2026-11-24, issue #12): feature terms were read from the brief.
+# 1.0.0 (2026-11-24, issue #12): feature terms were read from the brief. This
+#   version never left the feature branch: it was not merged and ran only in
+#   tests, so no stored card carries it and the card does not handle it.
 # 1.1.0 (2026-11-25, issue #12): feature terms are the watch's "Key features".
 TRIGGER_RULES_VERSION = "1.1.0"
 

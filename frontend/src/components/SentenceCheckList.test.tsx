@@ -216,7 +216,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
     expect(citations).toHaveTextContent('"Relay can retry a failed delivery up to five times.": b2');
   });
 
-  it("shows no drafter's citations when there are none, as after a removal", () => {
+  it("shows no drafter's citations block when the draft has none", () => {
     render(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
 
     expect(screen.queryByTestId('drafter-citations')).not.toBeInTheDocument();
