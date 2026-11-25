@@ -374,6 +374,22 @@ describe('ReviewCard: error codes (issues #15, #20)', () => {
     expect(screen.getByRole('status')).toHaveTextContent('The draft changed while approving. Review it and approve again.');
   });
 
+  it('keeps Approve disabled after an edit until the reloaded card is shown', async () => {
+    const user = userEvent.setup();
+    let finishReload: () => void = () => {};
+    const onUpdate = vi.fn(() => new Promise<void>((resolve) => { finishReload = resolve; }));
+    editMock.mockResolvedValue('Edited synthetic text.');
+    render(<ReviewCard card={makeCard()} onUpdate={onUpdate} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    await act(async () => finishReload());
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled();
+  });
+
   it('closes the override prompt after a successful edit', async () => {
     const user = userEvent.setup();
     approveMock.mockRejectedValueOnce(postAnywayError());

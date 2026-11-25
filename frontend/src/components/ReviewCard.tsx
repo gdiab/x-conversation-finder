@@ -10,7 +10,9 @@ import { ReplyPlanPanel } from './ReplyPlanPanel';
 
 interface ReviewCardProps {
   card: ReviewCardType;
-  onUpdate: () => void;
+  // Reloads the queue. After an edit or nudge the card awaits it, so the
+  // actions stay disabled until the changed draft is shown.
+  onUpdate: () => void | Promise<void>;
 }
 
 // issue #20: shown instead of an error when the request can be sent again
@@ -152,7 +154,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       editRequestId.current = null; // Reset for next action
       setIsEditing(false);
       closePostAnyway();
-      onUpdate();
+      // Keep the actions disabled until the edited draft is shown, so an
+      // approve (and its override prompt) never applies to an unseen draft
+      await onUpdate();
     } catch (err) {
       const wait = retryNotice(err);
       if (wait) setNotice(wait);
@@ -184,7 +188,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       setNudgeInstruction('');
       setIsNudging(false);
       closePostAnyway();
-      onUpdate();
+      await onUpdate(); // as for edit: no approve before the new draft is shown
     } catch (err) {
       const wait = retryNotice(err);
       if (wait) setNotice(wait);
