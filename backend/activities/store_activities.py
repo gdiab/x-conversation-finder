@@ -287,6 +287,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                         "text": s.text,
                         "source_passage_id": s.source_passage_id,
                         "sentence_index": s.sentence_index,
+                        "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                     }
                     for s in card.evidence.draft.segments
                 ],
@@ -298,6 +299,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                             "text": s.text,
                             "source_passage_id": s.source_passage_id,
                             "sentence_index": s.sentence_index,
+                            "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                         }
                         for s in card.evidence.draft.claim_gate.segments
                     ],
@@ -488,6 +490,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                             "text": s.text,
                             "source_passage_id": s.source_passage_id,
                             "sentence_index": s.sentence_index,
+                            "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                         }
                         for s in value.draft.segments
                     ],
@@ -499,6 +502,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                                 "text": s.text,
                                 "source_passage_id": s.source_passage_id,
                                 "sentence_index": s.sentence_index,
+                                "phrase_id": s.phrase_id,  # issue #9: removal keeps valid phrase segments
                             }
                             for s in value.draft.claim_gate.segments
                         ],

@@ -186,6 +186,12 @@ async def test_404_on_refetch_redacts_text_and_spans_and_skips(make_review_input
                 dumped = json.dumps(card)
                 for fragment in POST_FRAGMENTS:
                     assert fragment not in dumped
+                # The valid assembled draft and its segment trace stay
+                assert card["evidence"]["draft"]["text"] == before["evidence"]["draft"]["text"]
+                assert [seg["text"] for seg in card["evidence"]["draft"]["segments"]] == [
+                    seg["text"] for seg in before["evidence"]["draft"]["segments"]
+                ]
+                assert all(seg["text"] for seg in card["evidence"]["draft"]["segments"])
             assert client.target_lookups == 1
 
             history = await handle.fetch_history()

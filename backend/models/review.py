@@ -74,6 +74,7 @@ class ReviewCard:
                         "source": m.source,
                         "passage": m.passage,
                         "relevance": m.relevance,
+                        "passage_id": m.passage_id,  # issue #9: as on the stored card
                     }
                     for m in self.evidence.founder_materials
                 ],
