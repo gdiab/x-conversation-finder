@@ -5,13 +5,13 @@ No real API calls, returns synthetic data.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
+from typing import List, Optional
 import hashlib
 import json
 from pathlib import Path
 
 from backend.models import Post, Author
-from backend.ports import XClientPort
+from backend.ports import SearchResult, XClientPort
 
 
 class FakeXClient(XClientPort):
@@ -80,12 +80,12 @@ class FakeXClient(XClientPort):
         query: str,
         since_id: Optional[str] = None,
         max_results: int = 10,
-    ) -> Tuple[List[Post], Optional[str]]:
+    ) -> SearchResult:
         """
         Fake search returning synthetic posts.
         
         Supports conversation_id: query syntax for testing followup replies.
-        Returns (posts, newest_id)
+        Every returned post is billable (the fake drops none).
         """
         self.call_count += 1
         
@@ -113,7 +113,7 @@ class FakeXClient(XClientPort):
         
         newest_id = results[0].id if results else since_id
         
-        return results, newest_id
+        return SearchResult(posts=results, newest_id=newest_id, billable_reads=len(results))
     
     async def lookup_post(self, post_id: str) -> Optional[Post]:
         """Lookup a post by ID."""

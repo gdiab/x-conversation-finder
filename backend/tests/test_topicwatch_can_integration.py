@@ -21,6 +21,7 @@ from backend.activities.reply_activities import ReplyActivities
 from backend.activities.store_activities import store_card
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters.fake_x_client import FakeXClient
+from backend.ports import SearchResult
 from backend.adapters.fake_reply_agent import FakeReplyAgent
 from backend.database import init_db
 from backend.budget import get_today_budget, get_today_utc
@@ -76,7 +77,7 @@ class CountingFakeXClient(FakeXClient):
         
         self.total_posts_served += len(posts)
         newest_id = posts[0].id if posts else since_id
-        return posts, newest_id
+        return SearchResult(posts=posts, newest_id=newest_id, billable_reads=len(posts))
 
 
 @pytest.mark.integration

@@ -165,7 +165,7 @@ Card writes (`store_card`, `update_card`, `delete_post_text`) take SQLite's writ
 
 Limit: Reviews of the same post under *other* accounts are covered only partly. Their stored cards are redacted, their nudges are refused, and their card writes are stored redacted. However, a Review that is still researching, planning or drafting the post sends it to the model, and one that approves later is not stopped by the recorded removal; it finds out at its own approve re-fetch. Today one account runs watches (ADR-0005), so this path needs a second account reviewing the same post.
 
-Each re-fetch reserves one X read through `backend/budget.py` (about $0.005, ADR-0005). Over budget it raises and removes nothing. A 404 on the founder's *reply* URL does not touch the target post's text.
+Each re-fetch reserves one X read through `backend/budget.py` (about $0.005, ADR-0005). Over budget it raises and removes nothing. A re-fetch that finds the post gone is reconciled to 0 reads: X returned no post object (issue #17). A 404 on the founder's *reply* URL does not touch the target post's text.
 
 Pending cards are **not** re-checked on a schedule, so X cost stays proportional to approvals and eval runs. A deleted post's text can therefore stay on a card that is never approved (pending, skipped or expired) until the eval re-fetches it.
 
@@ -206,12 +206,21 @@ call is counted per Temporal activity attempt:
   error) is released for both. 408, 5xx, read timeouts and crashes stay counted.
 - X search reserves `billable_max_results(max_results)`: the HTTP adapter clamps
   the request to X's 10-100 range, and the reservation covers what is sent.
+- X reads are counted per post object X returns in `data` (ADR-0005: Posts
+  Read is billed per resource; issue #17). Search returns a `SearchResult`
+  whose `billable_reads` includes posts the adapter drops because their author
+  is missing from `includes.users`. `newest_id` still covers converted posts
+  only: a dropped post comes back (and is counted again) on later polls only
+  until a newer post converts and `since_id` passes it.
 - A reservation that is already closed refuses to authorize another request
-  (`ReservationClosed`). `lookup_post` counts 1 read per attempt even when it returns None:
-  the HTTP adapter returns None only when X's error names the post as gone
-  (issue #9), and raises `MalformedLookupResponse` (also counted, X billed it)
-  for post data it cannot convert. A 404 that does not name the post is raised
-  as the HTTP error and released.
+  (`ReservationClosed`). `lookup_post` counts 1 read for an attempt that returns
+  the post, or post data the adapter cannot convert (`MalformedLookupResponse`,
+  raised; X billed it). It counts 0 when it returns None: the HTTP adapter
+  returns None only when X's error (200 without data, or HTTP 404) names the
+  post as gone (issue #9), and that response holds no post object. A 200 with
+  neither the post nor such an error raises `LookupReturnedNoPost` and is
+  released; a 404 that does not name the post is raised as the HTTP error and
+  released. The eval re-fetch (`refetch_stored_card_target`) counts the same way.
 - Output that hits the max output tokens (`finish_reason == "length"`) fails
   research, plan and draft without retry (`InferenceOutputTruncated`); the call
   stays counted.

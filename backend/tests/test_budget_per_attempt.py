@@ -44,7 +44,7 @@ from backend.budget import (
 from backend.config import get_settings
 from backend.database import BudgetReconciliationDB, BudgetReservationDB, get_db
 from backend.models import Evidence, FounderMaterial, Post, ReplyPlan
-from backend.ports import XClientPort
+from backend.ports import SearchResult, XClientPort
 
 
 USAGE_IN, USAGE_OUT = 120, 30
@@ -607,7 +607,8 @@ async def test_search_retry_after_lost_completion_records_both_reads(monkeypatch
 
     monkeypatch.setattr(xa, "reconcile_x_reads", reconcile_then_crash)
     posts = [_post(1), _post(2), _post(3)]
-    activities = XActivities(ScriptedXClient([(posts, "9003"), (posts, "9003")]))
+    page = SearchResult(posts=posts, newest_id="9003", billable_reads=3)
+    activities = XActivities(ScriptedXClient([page, page]))
     arg = SearchRecentInput(query="synthetic", max_results=10, idempotency_key="k")
 
     with pytest.raises(RuntimeError, match="attempt lost"):
@@ -623,7 +624,7 @@ async def test_search_retry_after_lost_completion_records_both_reads(monkeypatch
 @pytest.mark.asyncio
 async def test_search_timeout_keeps_reads_counted():
     request = httpx.Request("GET", "https://api.x.invalid/2/tweets/search/recent")
-    activities = XActivities(ScriptedXClient([httpx.ReadTimeout("synthetic", request=request), ([_post(1)], "9001")]))
+    activities = XActivities(ScriptedXClient([httpx.ReadTimeout("synthetic", request=request), SearchResult(posts=[_post(1)], newest_id="9001", billable_reads=1)]))
     arg = SearchRecentInput(query="synthetic", max_results=10, idempotency_key="k")
 
     with pytest.raises(httpx.ReadTimeout):
@@ -676,10 +677,12 @@ async def test_lookup_rejected_request_releases_the_read_and_retry_counts_one():
 
 
 @pytest.mark.asyncio
-async def test_lookup_returning_none_stays_counted(monkeypatch):
+async def test_lookup_returning_none_is_not_counted(monkeypatch):
     """The real HTTP adapter turns a 404 naming the post as not found into
-    None (issue #9), and None keeps 1 read. Post data without its author, which
-    X billed, now raises MalformedLookupResponse and also stays counted."""
+    None (issue #9). X returned no post object, so issue #17 reconciles it to
+    0 reads (it counted 1 under #8). Post data without its author, which X
+    billed, raises MalformedLookupResponse and stays counted
+    (test_x_read_counting.py)."""
     from backend.adapters.http_x_client import HttpXClient
 
     def handler(request):
@@ -700,10 +703,11 @@ async def test_lookup_returning_none_stays_counted(monkeypatch):
 
     assert result is None
     budget = get_today_budget()
-    assert budget["x_reads"] == 1
-    assert budget["x_cost_usd"] == pytest.approx(get_settings().x_post_read_cost)
+    assert budget["x_reads"] == 0
+    assert budget["x_cost_usd"] == pytest.approx(0.0)
     (recon,) = _reconciliations("x_reads")
-    assert recon.actual_amount == 1
+    assert recon.reserved_amount == 1
+    assert recon.actual_amount == 0
 
 
 @pytest.mark.asyncio

@@ -19,21 +19,33 @@ from backend.config import get_settings
 from temporalio.exceptions import ApplicationError
 
 
+# ApplicationError types for X responses that carried no post object
+# (issues #8, #17): X bills per post returned, so these attempts are released.
+X_UNBILLED_ERROR_TYPES = (
+    "RateLimitError",  # 429 from search or lookup
+    "LookupReturnedNoPost",  # a lookup 200 with neither the post nor a post-gone error
+)
+
+
 def x_billed_nothing(exc: BaseException) -> bool:
     """True when X returned nothing billable for the request (issue #8): X
-    refused it with a 4xx status, or the connection was never established.
+    refused it with a 4xx status, answered without any post object (issue
+    #17), or the connection was never established.
 
     X bills per post returned, and a refused request returns none, so the
     attempt's reservation is released. The HTTP adapter's base URL is fixed to
     the X API, so a 4xx comes from X itself, not from a gateway. The HTTP adapter raises
-    httpx.HTTPStatusError, or a RateLimitError ApplicationError for 429.
+    httpx.HTTPStatusError, or an ApplicationError: RateLimitError for 429,
+    LookupReturnedNoPost for a lookup 200 without data, MalformedLookupResponse
+    for post data it cannot convert (X returned and billed the post, so it
+    stays counted).
     408, 5xx, read timeouts and other errors return False: the request may
     have been served, so the reservation stays counted.
     """
     if request_never_sent(exc):
         return True
     if isinstance(exc, ApplicationError):
-        return exc.type == "RateLimitError"
+        return exc.type in X_UNBILLED_ERROR_TYPES
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         return 400 <= status < 500 and status != 408
@@ -98,7 +110,8 @@ class XActivities:
         Idempotent: same query + since_id returns cached results within 24h UTC.
         Cost tracking: updates the daily spend ledger. Each attempt reserves and
         reconciles on its own (issue #8); an attempt X answered with an error
-        status is released.
+        status is released. Reads are reconciled to the client's billable
+        count, which includes posts the adapter dropped (issue #17).
         Budget enforcement: checks daily cap before calling.
         Poll interval validation: HTTP adapter rejects sub-1h and negative intervals (item 3).
         """
@@ -146,7 +159,7 @@ class XActivities:
             raise
         
         try:
-            posts, newest_id = await self._x_client.search_recent(
+            result = await self._x_client.search_recent(
                 query=input.query,
                 since_id=input.since_id,
                 max_results=input.max_results,
@@ -163,8 +176,11 @@ class XActivities:
                 )
             raise
         
-        # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
-        actual_reads = len(posts)
+        posts = result.posts
+        # R5-B1: Reconcile budget to actual usage (two-way, idempotent).
+        # Issue #17: X billed every post it returned, also the ones the
+        # adapter dropped, so reconcile to the billable count, not len(posts).
+        actual_reads = result.billable_reads
         actual_cost = reconcile_x_reads(
             reserved_reads=reserved_reads,
             actual_reads=actual_reads,
@@ -177,15 +193,15 @@ class XActivities:
         
         if actual_reads != reserved_reads:
             activity.logger.info(
-                f"Reserved {reserved_reads} reads, got {actual_reads} posts, "
-                f"reconciled to ${actual_cost:.4f}"
+                f"Reserved {reserved_reads} reads, X returned {actual_reads} posts "
+                f"({len(posts)} usable), reconciled to ${actual_cost:.4f}"
             )
         
         activity.logger.info(f"Found {len(posts)} posts, cost ${actual_cost:.4f}")
         
         return SearchRecentOutput(
             posts=posts,
-            newest_id=newest_id,
+            newest_id=result.newest_id,
             cost_usd=actual_cost,
         )
     
@@ -195,10 +211,12 @@ class XActivities:
         Lookup a single post by ID.
         
         Idempotent: same post_id is cached.
-        Returns None if post is deleted (404).
-        Budget: 1 post read per attempt, also when None is returned (the adapter
-        cannot tell a 404 from unconvertible post data). An attempt X refused
-        with a 4xx status is released (issue #8).
+        Returns None if the post is gone (X's error names it as not found or
+        not visible; issue #9).
+        Budget: 1 post read per attempt that returns the post or post data the
+        adapter cannot convert (it raises; X billed it). None is reconciled to
+        0 reads: X returned no post object (issue #17). An attempt X refused
+        with a 4xx status, or answered without any post, is released (issue #8).
         """
         activity.logger.info(f"Looking up post {input.post_id} (key: {input.idempotency_key})")
         
@@ -231,13 +249,14 @@ class XActivities:
                 )
             raise
         
-        # Issue #8: close the reservation at 1 read. None is kept counted too:
-        # the HTTP adapter returns None both for a 404 and for a response whose
-        # post data it could not convert (e.g. no author expansion), which X
-        # billed. Only a refused request (4xx exception, above) is released.
-        reconcile_x_reads(
+        # Issue #8: close the reservation. Issue #17: the port returns None only
+        # when X answered that the post is gone, without a post object, which
+        # X does not bill; post data the adapter could not convert raises
+        # instead (above) and stays counted.
+        actual_reads = 1 if post is not None else 0
+        cost_usd = reconcile_x_reads(
             reserved_reads=1,
-            actual_reads=1,
+            actual_reads=actual_reads,
             reservation_date=reservation_date,
             workflow_id=activity.info().workflow_id,
             workflow_run_id=activity.info().workflow_run_id,
@@ -283,7 +302,7 @@ class XActivities:
         # Search for posts in the conversation thread
         query = f"conversation_id:{input.reply_post_id}"
         try:
-            posts, _ = await self._x_client.search_recent(
+            result = await self._x_client.search_recent(
                 query=query,
                 max_results=max_results,
             )
@@ -299,8 +318,10 @@ class XActivities:
                 )
             raise
         
-        # R5-B1: Reconcile budget to actual usage (two-way, idempotent)
-        actual_reads = len(posts)
+        posts = result.posts
+        # R5-B1: Reconcile budget to actual usage (two-way, idempotent);
+        # issue #17: to every post X returned, dropped ones included
+        actual_reads = result.billable_reads
         actual_cost = reconcile_x_reads(
             reserved_reads=max_results,
             actual_reads=actual_reads,
@@ -315,7 +336,7 @@ class XActivities:
             activity.logger.info(f"check_followup: reconciled to ${actual_cost:.4f} ({actual_reads} reads)")
         
         activity.logger.info(
-            f"Found {actual_reads} replies in conversation (cost ${actual_cost:.4f})"
+            f"Found {len(posts)} replies in conversation (cost ${actual_cost:.4f})"
         )
         
         return posts

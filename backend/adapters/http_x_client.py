@@ -5,11 +5,11 @@ Implements XClientPort using real X API v2 bearer token authentication.
 """
 
 import httpx
-from typing import List, Optional, Tuple
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 from temporalio.exceptions import ApplicationError
 
-from backend.ports import XClientPort
+from backend.ports import SearchResult, XClientPort
 from backend.models import Post, Author
 
 # Issue #9: X API v2 problem types meaning the post is gone or no longer
@@ -70,7 +70,7 @@ class HttpXClient(XClientPort):
         query: str,
         since_id: Optional[str] = None,
         max_results: int = 10,
-    ) -> Tuple[List[Post], Optional[str]]:
+    ) -> SearchResult:
         """
         Search recent posts using X API v2 recent search endpoint.
         
@@ -80,7 +80,9 @@ class HttpXClient(XClientPort):
             max_results: Maximum number of results (10-100, clamped)
         
         Returns:
-            Tuple of (list of posts, newest_id)
+            SearchResult: the converted posts, the newest converted post ID
+            (None if none converted) and the billable read count (every post
+            object in `data`, issue #17)
         
         Raises:
             httpx.HTTPError: On API errors
@@ -130,7 +132,7 @@ class HttpXClient(XClientPort):
         newest_id = None
         
         if "data" not in data or not data["data"]:
-            return (posts, newest_id)
+            return SearchResult(posts=posts, newest_id=newest_id, billable_reads=0)
         
         # Build author lookup from includes
         authors_by_id = {}
@@ -170,11 +172,14 @@ class HttpXClient(XClientPort):
             )
             posts.append(post)
             
-            # Track newest ID
+            # Track newest ID (over converted posts only, unchanged by issue
+            # #17; see SearchResult for what that means for dropped posts)
             if newest_id is None or int(tweet["id"]) > int(newest_id):
                 newest_id = tweet["id"]
         
-        return (posts, newest_id)
+        # Issue #17: X bills every post object in `data`, including the ones
+        # dropped above for a missing author.
+        return SearchResult(posts=posts, newest_id=newest_id, billable_reads=len(data["data"]))
     
     async def lookup_post(self, post_id: str) -> Optional[Post]:
         """
@@ -184,10 +189,16 @@ class HttpXClient(XClientPort):
             post_id: The post ID to lookup
         
         Returns:
-            Post object if found, None if 404
+            Post object if found; None if X's error body (on a 200 without
+            data, or on an HTTP 404) names this post as gone. None returned
+            no post object and is not billed (issue #17).
         
         Raises:
-            httpx.HTTPError: On API errors other than 404
+            ApplicationError: MalformedLookupResponse for post data that
+                cannot be converted (billed); LookupReturnedNoPost for a 200
+                with neither the post nor a post-gone error (not billed)
+            httpx.HTTPError: On other API errors, including a 404 that does
+                not name this post
         """
         params = {
             "tweet.fields": "created_at,conversation_id,in_reply_to_user_id,reply_settings,public_metrics",
@@ -242,9 +253,11 @@ class HttpXClient(XClientPort):
             # not found or not visible counts; any other body fails the lookup.
             if _post_is_gone(data, post_id):
                 return None
+            # Issue #17: no post object came back, so X billed nothing
+            # (x_billed_nothing releases the read).
             raise ApplicationError(
                 f"X API lookup of post {post_id} returned neither the post nor a not-found error",
-                type="MalformedLookupResponse",
+                type="LookupReturnedNoPost",
             )
         
         tweet = data["data"]
