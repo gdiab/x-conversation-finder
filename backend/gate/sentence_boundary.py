@@ -246,9 +246,10 @@ def word_boundary(word: str, next_word: Optional[str], *, sentence_start: bool =
     return END
 
 
-# A terminator with no space before a capitalized word ("fast.It saves"): a
-# missing space, or a joined name. "Node.js", "ASP.NET" and "U.S.A" do not match.
-_JOINED_SENTENCES_RE = re.compile(r"[a-z]{2}[.!?][A-Z][a-z]")
+# A terminator with no space before a capital letter ("fast.It saves",
+# "fast.AI saves"): a missing space, or a joined name. "Node.js", "ASP.NET"
+# and "U.S.A" do not match; "Node.JS" does (conservatively unselectable).
+_JOINED_SENTENCES_RE = re.compile(r"[a-z]{2}[.!?][A-Z]")
 
 
 def _boundary_after(sentence: str, next_sentence: str) -> Boundary:

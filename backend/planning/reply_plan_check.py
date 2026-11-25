@@ -29,10 +29,10 @@ _URL_RE = re.compile(r"https?://\S+?(?=[.,;:!?？)\]}»\"'”’]*(?:\s|$))", re
 # ready?", "Dr. Smith, can you help?"). An AMBIGUOUS period ("in 2021.
 # Canals or railways?") is a boundary here, so a statement before a question
 # never counts as part of it (issue #10; backend.gate.sentence_boundary).
-# A period with no space before a capitalized word ("We grew.Is that good?")
-# is a boundary as well; "Node.js" and "ASP.NET" are not.
+# A period with no space before a capital letter ("We grew.Is that good?",
+# "We launched.AI helps?") is a boundary as well; "Node.js" and "ASP.NET" are not.
 _BOUNDARY_RE = re.compile(
-    r"[.!?？]+[\"'”’)\]}»]*(?=\s|$)|[!?？]+[\"'”’)\]}»]*(?=\w)|(?<=[a-z][a-z])\.(?=[A-Z][a-z])|\n"
+    r"[.!?？]+[\"'”’)\]}»]*(?=\s|$)|[!?？]+[\"'”’)\]}»]*(?=\w)|(?<=[a-z][a-z])\.(?=[A-Z])|\n"
 )
 _QUESTION_MARKS = ("?", "？")
 _CLOSERS = "\"'”’)]}»"
@@ -147,8 +147,11 @@ def validate_reply_plan(plan: ReplyPlan, post_text: str) -> List[str]:
             errors.append("reply_type answer_question requires a question in the post, and the post has none")
         elif target_found:
             def inside_questions(start: int) -> bool:
+                # Emoji are masked for boundary detection, so one after the
+                # question mark ("What do you think? \U0001F914") may sit outside
+                # the span; like whitespace, it is not a statement.
                 return all(
-                    ch.isspace() or any(q_start <= i < q_end for q_start, q_end in spans)
+                    ch.isspace() or is_decoration(ch) or any(q_start <= i < q_end for q_start, q_end in spans)
                     for i, ch in enumerate(target, start)
                 )
 

@@ -127,6 +127,7 @@ GOLDEN_SPLITS = [
     ('"Is it fast?" asked a customer. Yes.', ['"Is it fast?" asked a customer.', "Yes."], [0]),
     # Codex thermo r8: a missing space joins two sentences; unclear.
     ("Our product is fast.It saves money.", ["Our product is fast.It saves money."], [0]),
+    ("We ship fast.AI saves time.", ["We ship fast.AI saves time."], [0]),
     ("We build on Node.js and ASP.NET today.", ["We build on Node.js and ASP.NET today."], []),
     # Codex thermo r9: emoji after a terminator do not hide it.
     ("Our product saves time!\U0001F680 Customers pay monthly.", ["Our product saves time!\U0001F680", "Customers pay monthly."], []),
@@ -611,6 +612,12 @@ def test_emoji_after_a_statement_stays_outside_the_question():
     assert validate_reply_plan(plan("We launched!"), post) != []
 
 
+@pytest.mark.parametrize("post", ["What do you think? \U0001F914", "What do you think?\U0001F914\U0001F914"])
+def test_question_target_may_include_a_trailing_emoji(post):
+    """Codex review r10."""
+    assert validate_reply_plan(plan(post), post) == []
+
+
 async def test_claim_with_trailing_emoji_assembles_without_extra_punctuation():
     result = await claim_gate(ClaimGateInput(
         segments=[claim(0), Segment(kind="non_claim", phrase_id="q.current_tool")],
@@ -626,6 +633,8 @@ def test_missing_space_before_a_question_splits_post_text():
     post = "We grew.Is that good?"
     assert [post[a:b].strip() for a, b in question_spans(post)] == ["Is that good?"]
     assert validate_reply_plan(plan("We grew."), post) != []
+    post = "We launched.AI helps?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["AI helps?"]
     post = "Anyone using Node.js for queues?"
     assert [post[a:b].strip() for a, b in question_spans(post)] == [post]
 
