@@ -430,6 +430,37 @@ async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
                 assert fragment not in json.dumps(stored_late)
 
 
+@pytest.mark.asyncio
+async def test_approve_is_rejected_until_the_card_is_stored(make_review_input):
+    """A Review is "pending" from the start. An approve during research would
+    re-fetch with no card to remove the text from, so it is rejected."""
+
+    class SlowResearch(QuotingAgent):
+        release = asyncio.Event()
+
+        async def research(self, post, topic, product_brief, idempotency_key):
+            await self.release.wait()
+            return await super().research(post, topic, product_brief, idempotency_key)
+
+    agent = SlowResearch()
+    client = TargetClient(["gone"])
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, client, agent):
+            review_input = make_review_input()
+            handle = await env.client.start_workflow(
+                ReviewWorkflow.run, review_input,
+                id=f"review:test:{review_input.post.id}_approve_too_early", task_queue="test",
+            )
+            with pytest.raises(WorkflowUpdateFailedError) as excinfo:
+                await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
+            assert "before the draft card is ready" in str(excinfo.value.cause)
+            assert client.target_lookups == 0
+            agent.release.set()
+            await env.sleep(1)
+            assert (await handle.query("get_card"))["status"] == "pending"
+            assert _db_card(handle.id)["post"]["text"] == review_input.post.text
+
+
 # ---------- the #5 fix still holds ----------
 
 

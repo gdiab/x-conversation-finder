@@ -179,6 +179,10 @@ class ReviewWorkflow:
         # issue #9: approve's target re-fetch (and any removal it triggers) is
         # in flight; validators block edits, nudges and other approves meanwhile
         self._approve_in_flight_count = 0
+        # issue #9: set once the pending card is stored. Before that, approve's
+        # re-fetch would find no card to remove the text from, and the card
+        # stored afterwards would hold it.
+        self._card_ready = False
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -551,6 +555,7 @@ class ReviewWorkflow:
             StoreCardInput(card=card, idempotency_key=f"{workflow_id}:store:pending"),
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_short_sec),
         )
+        self._card_ready = True
         
         # Step 3: Wait for human decision
         result = await self._wait_for_decision(workflow_id)
@@ -796,6 +801,12 @@ class ReviewWorkflow:
         """
         if self.status not in ["pending", "approved"]:
             raise ValueError(f"Cannot approve in status {self.status}")
+        
+        # issue #9: nothing to approve until the draft card is stored (a
+        # Review starts as "pending" while it is still researching/drafting).
+        # Validators do not run when an accepted update replays.
+        if not self._card_ready:
+            raise ValueError("Cannot approve before the draft card is ready")
         
         # S-3 + B3: Reject if any edit is currently in flight (count > 0)
         if self._edit_in_flight_count > 0:
