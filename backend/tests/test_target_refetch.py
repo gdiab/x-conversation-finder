@@ -507,6 +507,11 @@ async def test_approved_history_fails_replay_without_patch_guard(monkeypatch):
 # ---------- the eval hook ----------
 
 
+async def _finished(workflow_id):
+    """review_is_running for Reviews whose workflow has ended."""
+    return False
+
+
 async def _stored_card(make_review_input, suffix):
     """Run a Review until it expires (a past card) and return its workflow id."""
     async with await WorkflowEnvironment.start_time_skipping() as env:
@@ -521,14 +526,17 @@ async def _stored_card(make_review_input, suffix):
 async def test_eval_refetch_leaves_a_live_review_alone(make_review_input):
     """A pending Review holds its own copy of the evidence, so the eval must
     not remove text behind its back: no X read, no change."""
-    from backend.target_refetch import refetch_stored_card_target
+    from backend.target_refetch import refetch_stored_card_target, temporal_review_is_running
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, TargetClient(["found"])):
             review_input, handle = await _start(env, make_review_input, "eval_live")
             client = TargetClient(["gone"])
             reads_before = _x_reads()
-            assert await refetch_stored_card_target(client, handle.id, "run1") == "live"
+            is_running = temporal_review_is_running(env.client)
+            assert await refetch_stored_card_target(
+                client, handle.id, "run1", review_is_running=is_running
+            ) == "live"
             assert client.target_lookups == 0
             assert _x_reads() == reads_before
             assert _db_card(handle.id)["post"]["text"] == review_input.post.text
@@ -542,7 +550,7 @@ async def test_eval_refetch_found_keeps_card(make_review_input):
     workflow_id = await _stored_card(make_review_input, "eval_found")
     client = TargetClient(["found"])
     reads_before = _x_reads()
-    assert await refetch_stored_card_target(client, workflow_id, "run1") == "found"
+    assert await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished) == "found"
     stored = _db_card(workflow_id)
     assert QUESTION in stored["post"]["text"]
     assert stored["evidence"]["reply_plan"]["target_point"] == QUESTION
@@ -557,9 +565,9 @@ async def test_eval_refetch_404_removes_text_once_and_is_idempotent(make_review_
     client = TargetClient(["error", "gone"])
     reads_before = _x_reads()
     with pytest.raises(RuntimeError):
-        await refetch_stored_card_target(client, workflow_id, "run1")
+        await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished)
     # A retry of the same eval run reuses its budget reservation
-    assert await refetch_stored_card_target(client, workflow_id, "run1") == "removed"
+    assert await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished) == "removed"
     assert _x_reads() - reads_before == 1
     stored = _db_card(workflow_id)
     assert stored["post"]["text_removed"] is True
@@ -581,7 +589,7 @@ async def test_eval_refetch_404_removes_text_once_and_is_idempotent(make_review_
     for fragment in POST_FRAGMENTS:
         assert fragment not in json.dumps(redacted)
     # Already removed: no further X read
-    assert await refetch_stored_card_target(client, workflow_id, "run2") == "removed"
+    assert await refetch_stored_card_target(client, workflow_id, "run2", review_is_running=_finished) == "removed"
     assert client.target_lookups == 2
     assert _x_reads() - reads_before == 1
 
@@ -595,7 +603,7 @@ async def test_eval_refetch_over_budget_raises_and_keeps_text(make_review_input)
     client = TargetClient(["gone"])
     set_kill_switch(True)
     with pytest.raises(BudgetExceeded):
-        await refetch_stored_card_target(client, workflow_id, "run1")
+        await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished)
     set_kill_switch(False)
     assert client.target_lookups == 0
     assert QUESTION in _db_card(workflow_id)["post"]["text"]
@@ -619,7 +627,7 @@ async def test_founder_skip_is_stored_so_the_eval_can_recheck_it(make_review_inp
             await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
 
     client = TargetClient(["gone"])
-    assert await refetch_stored_card_target(client, handle.id, "run1") == "removed"
+    assert await refetch_stored_card_target(client, handle.id, "run1", review_is_running=_finished) == "removed"
     assert _db_card(handle.id)["post"]["text_removed"] is True
 
 
@@ -638,10 +646,30 @@ async def test_removal_redacts_model_written_topic_and_source():
     assert out["founder_materials"][1]["source"] == "product_brief"
     assert out["founder_materials"][0]["passage"] == "Our product records work."
 
+
+@pytest.mark.asyncio
+async def test_eval_rechecks_a_stale_pending_card_of_a_finished_review(make_review_input):
+    """Reviews skipped before issue #9 ended with their stored card still
+    "pending". Liveness comes from Temporal, so such a card is re-fetched."""
+    from backend.target_refetch import refetch_stored_card_target, temporal_review_is_running
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, TargetClient(["found"])):
+            _, handle = await _start(env, make_review_input, "eval_stale_pending")
+            await handle.terminate("test: workflow ended, card left pending")
+            assert _db_card(handle.id)["status"] == "pending"
+            client = TargetClient(["gone"])
+            assert await refetch_stored_card_target(
+                client, handle.id, "run1", review_is_running=temporal_review_is_running(env.client)
+            ) == "removed"
+            assert client.target_lookups == 1
+            # A workflow Temporal no longer knows is not running
+            assert await temporal_review_is_running(env.client)("review:test:never-started") is False
+
 @pytest.mark.asyncio
 async def test_eval_refetch_unknown_card():
     from backend.target_refetch import refetch_stored_card_target
 
     client = TargetClient(["found"])
-    assert await refetch_stored_card_target(client, "review:test:nope", "run1") == "no_card"
+    assert await refetch_stored_card_target(client, "review:test:nope", "run1", review_is_running=_finished) == "no_card"
     assert client.target_lookups == 0

@@ -11,12 +11,17 @@ Pending cards are not re-checked on a schedule (decided in issue #9): X cost
 stays proportional to approvals and eval runs, and a pending Review
 re-fetches again when the founder approves.
 
-The eval replays past cards only. A card whose Review is still live
-(pending or approved) is left alone: its workflow holds its own copy of the
-evidence and re-fetches at approve, so a removal here would not reach it.
+The eval replays past cards only. A card whose Review workflow is still
+running is left alone: the workflow holds its own copy of the evidence and
+re-fetches at approve, so a removal here would not reach it. Whether it runs
+is asked of Temporal (temporal_review_is_running), not read from the stored
+status: Reviews skipped before issue #9 ended with their card still "pending".
 """
 
-from typing import Literal
+from typing import Awaitable, Callable, Literal
+
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 from backend.activities.store_activities import (
     DeletePostTextInput,
@@ -30,8 +35,28 @@ from backend.ports import XClientPort
 
 RefetchOutcome = Literal["found", "removed", "live", "no_card"]
 
-# Stored statuses of a Review that is still running; the eval must not use them
-LIVE_STATUSES = ("pending", "approved")
+# Answers whether the Review workflow with this id is still running
+ReviewIsRunning = Callable[[str], Awaitable[bool]]
+
+
+def temporal_review_is_running(client: Client) -> ReviewIsRunning:
+    """A ReviewIsRunning check that asks Temporal for the workflow's status.
+
+    A workflow Temporal no longer knows (its history passed the namespace's
+    retention) is not running. Other errors propagate: the eval must not
+    guess.
+    """
+
+    async def is_running(workflow_id: str) -> bool:
+        try:
+            description = await client.get_workflow_handle(workflow_id).describe()
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                return False
+            raise
+        return description.status == WorkflowExecutionStatus.RUNNING
+
+    return is_running
 
 # Budget reservation scope for eval re-fetches; with the card's workflow id and
 # the caller's run key it makes the reservation idempotent per eval run.
@@ -42,6 +67,8 @@ async def refetch_stored_card_target(
     x_client: XClientPort,
     workflow_id: str,
     run_key: str,
+    *,
+    review_is_running: ReviewIsRunning,
 ) -> RefetchOutcome:
     """Look up a stored card's target post and apply the removal duty on a 404.
 
@@ -49,9 +76,10 @@ async def refetch_stored_card_target(
     - "removed": the post is gone (now, or at an earlier re-fetch); the stored
       post text and every evidence copy of it are removed, and the card must
       not be replayed with post text.
-    - "live": the card's Review is still running (status pending or
-      approved); nothing is read or changed, and the card must not be
-      replayed. Its workflow re-fetches the post at approve.
+    - "live": the card's Review workflow is still running (per
+      review_is_running, usually temporal_review_is_running); nothing is read
+      or changed, and the card must not be replayed. Its workflow re-fetches
+      the post at approve.
     - "no_card": no stored card has this workflow id.
 
     Reserves one X read through backend.budget first (raises BudgetExceeded
@@ -69,7 +97,7 @@ async def refetch_stored_card_target(
         return "no_card"
     if card["post"].get("text_removed"):
         return "removed"
-    if card["status"] in LIVE_STATUSES:
+    if await review_is_running(workflow_id):
         return "live"
 
     settings = get_settings()
