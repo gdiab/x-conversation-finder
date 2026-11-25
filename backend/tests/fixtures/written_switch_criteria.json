@@ -4,12 +4,17 @@
     "classic": {
       "product_name": "Acme",
       "product_aliases": [],
+      "key_features": [],
       "text": "Our product helps developers build reliable systems. Our product provides automatic failover. Our product guarantees strong consistency."
     },
     "relay": {
       "product_name": "Acme Relay",
       "product_aliases": [
         "Relay"
+      ],
+      "key_features": [
+        "Signed deliveries",
+        "Delivery replay"
       ],
       "text": "# Acme Relay\n\nAcme Relay delivers webhooks to your services. Relay can retry a failed delivery up to five times. Signed deliveries are available on the Team plan. Relay is faster than polling for changes. The replay tool lets you resend any delivery from the last 30 days. Our dashboard shows delivery latency per endpoint.\n\nKey features:\n- Signed deliveries\n- Delivery replay"
     }

@@ -55,6 +55,10 @@ class TopicWatchInput:
     # its Reviews stay in assembled mode until it is restarted with a name.
     product_name: str = ""
     product_aliases: Optional[list[str]] = None
+    # issue #12 (George's decision, 2026-11-25): the form's optional "Key
+    # features" list, passed to each Review like the aliases. It is the only
+    # source of feature terms. None for a watch started without the field.
+    key_features: Optional[list[str]] = None
     
     def __post_init__(self):
         """Default configs if not provided."""
@@ -164,6 +168,7 @@ class TopicWatchWorkflow:
                                 config=input.review_config,
                                 product_name=input.product_name,
                                 product_aliases=input.product_aliases,
+                                key_features=input.key_features,
                             ),
                             id=review_id,
                             parent_close_policy=ParentClosePolicy.ABANDON,
@@ -223,6 +228,7 @@ class TopicWatchWorkflow:
                 review_config=input.review_config,
                 product_name=input.product_name,
                 product_aliases=input.product_aliases,
+                key_features=input.key_features,
             )
         )
     

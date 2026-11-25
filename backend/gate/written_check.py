@@ -66,7 +66,14 @@ MAX_REASON_CHARS = 200
 
 # Version of the trigger rules below. Stored with each check, so a card says
 # which rules decided it. Bump it when a trigger changes.
-TRIGGER_RULES_VERSION = "1.0.0"  # 2026-11-24, issue #12
+# 1.0.0 (2026-11-24, issue #12): feature terms were read from the brief.
+# 1.1.0 (2026-11-25, issue #12): feature terms are the watch's "Key features".
+TRIGGER_RULES_VERSION = "1.1.0"
+
+# A feature term is one entry of the watch's "Key features" list (the Start
+# Watch form field; George's decision of 2026-11-25). It is a short name the
+# founder gives a feature ("Signed deliveries"), not a sentence about it.
+MAX_FEATURE_TERM_WORDS = 6
 
 TRIGGER_PRODUCT_NAME = "product_name"
 TRIGGER_FIRST_PERSON_PLURAL = "first_person_plural"
@@ -82,7 +89,7 @@ TRIGGER_LABELS = {
     TRIGGER_FIRST_PERSON_PLURAL: "uses we/our/us/ours",
     TRIGGER_NUMBER: "contains a number",
     TRIGGER_COMPARISON: "makes a comparison",
-    TRIGGER_FEATURE_TERM: "uses a feature term from the brief",
+    TRIGGER_FEATURE_TERM: "uses a key feature",
 }
 
 FIRST_PERSON_PLURAL = frozenset({"we", "our", "ours", "us", "ourselves"})
@@ -184,6 +191,32 @@ def clean_names(product_name: str, product_aliases: Optional[Sequence[str]]) -> 
     return name, aliases
 
 
+def feature_term_words(term: str) -> List[str]:
+    """The words a feature term is matched on, folded like the reply text."""
+    return _WORD_RE.findall(_fold(term)) if isinstance(term, str) else []
+
+
+def clean_feature_terms(key_features: Optional[Sequence[str]]) -> List[str]:
+    """The watch's "Key features" as the feature-term trigger uses them:
+    trimmed, in order, without empties or repeats. An entry with no letter or
+    digit has no word to match on and is dropped. None (a watch started
+    without the field) gives no feature terms.
+
+    The API refuses an entry of more than MAX_FEATURE_TERM_WORDS words, so the
+    founder is told; nothing is cut here.
+    """
+    terms: List[str] = []
+    seen = set()
+    for term in key_features or []:
+        if not feature_term_words(term):
+            continue
+        term = " ".join(term.split())
+        if term.casefold() not in seen:
+            seen.add(term.casefold())
+            terms.append(term)
+    return terms
+
+
 def find_triggers(
     sentence: str,
     product_name: str,
@@ -193,7 +226,8 @@ def find_triggers(
     """The deterministic triggers that fire on one sentence (amendment step 2).
 
     The name trigger reads only `product_name` and `product_aliases` (the
-    watch's "Product name" and "Also called" fields), never the brief.
+    watch's "Product name" and "Also called" fields), and the feature-term
+    trigger only `feature_terms` (its "Key features" field): never the brief.
     A digit inside the product name ("Relay2") is part of the name, not a
     number.
     """
@@ -403,10 +437,11 @@ def prepare_check(
 ) -> PreparedCheck:
     """Split the text, run the triggers and apply everything code can decide alone.
 
-    `mention_product` is the reply plan's decision (None for a founder edit).
+    `feature_terms` is the watch's "Key features" list. `mention_product` is
+    the reply plan's decision (None for a founder edit).
     """
     name, aliases = clean_names(product_name, product_aliases)
-    terms = list(feature_terms or [])
+    terms = clean_feature_terms(feature_terms)
     sentences = split_reply(text)
     triggers = [find_triggers(s, name, aliases, terms) for s in sentences]
     failures: List[List[str]] = []

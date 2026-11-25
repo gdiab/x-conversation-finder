@@ -181,7 +181,7 @@ def build_written_draft_prompt(request: WrittenDraftRequest) -> str:
     brief = "\n".join(render_brief_sentence(b) for b in request.brief_sentences) or "(the brief is empty)"
     terms = ""
     if request.feature_terms:
-        terms = "; or use any of these feature terms: " + ", ".join(request.feature_terms)
+        terms = "; or use any of these key features: " + ", ".join(request.feature_terms)
 
     if request.plan.mention_product:
         product_rule = (

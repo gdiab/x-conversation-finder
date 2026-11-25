@@ -43,6 +43,7 @@ from backend.activities.store_activities import (
     get_all_cards,
 )
 from backend.database import init_db
+from backend.gate.written_check import MAX_FEATURE_TERM_WORDS, clean_feature_terms, feature_term_words
 from backend.budget import get_today_budget
 
 # Configure logging
@@ -194,6 +195,7 @@ def review_error_response(exc: Exception, action: str, workflow_id: Optional[str
 
 MAX_PRODUCT_NAME_CHARS = 80
 MAX_PRODUCT_ALIASES = 10
+MAX_KEY_FEATURES = 20
 
 
 class StartWatchRequest(BaseModel):
@@ -207,6 +209,10 @@ class StartWatchRequest(BaseModel):
     # written-draft name trigger reads only these, never the brief text.
     product_name: str
     product_aliases: List[str] = Field(default_factory=list)
+    # issue #12 (George's decision, 2026-11-25): the form's optional "Key
+    # features" list. The written-draft feature-term trigger reads only this
+    # field, never the brief text.
+    key_features: List[str] = Field(default_factory=list)
 
     @field_validator("product_name")
     @classmethod
@@ -232,6 +238,30 @@ class StartWatchRequest(BaseModel):
         if len(aliases) > MAX_PRODUCT_ALIASES:
             raise ValueError(f"At most {MAX_PRODUCT_ALIASES} aliases")
         return aliases
+
+    @field_validator("key_features")
+    @classmethod
+    def key_features_are_short_terms(cls, value: List[str]) -> List[str]:
+        """A key feature is the short name of a feature, not a sentence about
+        it. An entry the trigger could not use is refused, so the founder is
+        told, instead of being dropped."""
+        for feature in value:
+            feature = " ".join(feature.split())
+            if not feature:
+                continue  # a blank from the comma-separated field
+            if not feature_term_words(feature):
+                raise ValueError(f'Key feature "{feature}" has no letter or digit')
+            if len(feature.split()) > MAX_FEATURE_TERM_WORDS:
+                raise ValueError(
+                    f"Each key feature must be at most {MAX_FEATURE_TERM_WORDS} words "
+                    f'(got {len(feature.split())}: "{feature}")'
+                )
+            if len(feature) > MAX_PRODUCT_NAME_CHARS:
+                raise ValueError(f"Each key feature must be at most {MAX_PRODUCT_NAME_CHARS} characters")
+        features = clean_feature_terms(value)  # trimmed, without blanks and repeats
+        if len(features) > MAX_KEY_FEATURES:
+            raise ValueError(f"At most {MAX_KEY_FEATURES} key features")
+        return features
 
 
 class StartWatchResponse(BaseModel):
@@ -318,6 +348,7 @@ async def start_watch(request: StartWatchRequest):
                 review_config=review_config,
                 product_name=request.product_name,
                 product_aliases=request.product_aliases,
+                key_features=request.key_features,
             ),
             id=workflow_id,
             task_queue="x-conversation-finder",
@@ -330,13 +361,13 @@ async def start_watch(request: StartWatchRequest):
     
     except Exception as e:
         if "already exists" in str(e).lower():
-            # A running watch keeps the brief and product name it was started
-            # with (issue #12: stop it first to give it a product name)
+            # A running watch keeps the brief, product name and key features
+            # it was started with (issue #12: stop it first to change them)
             return StartWatchResponse(
                 workflow_id=workflow_id,
                 message=(
-                    f"Watch already running for topic '{request.topic}'. Its product name and "
-                    "brief were not changed; stop the watch first to change them."
+                    f"Watch already running for topic '{request.topic}'. Its product name, key "
+                    "features and brief were not changed; stop the watch first to change them."
                 ),
             )
         raise HTTPException(status_code=500, detail=str(e))

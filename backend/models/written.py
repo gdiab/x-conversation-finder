@@ -29,7 +29,7 @@ class BriefSentence:
 
     id: str  # "b1", "b2", ...: position in backend.gate.brief.split_brief
     text: str
-    # The heading, or the lead-in line of a list ("Key features"), the sentence
+    # The heading, or the lead-in line of a list ("Not supported yet"), the sentence
     # stands under. A list item or a sentence under "Not supported yet" means
     # something else without it, so the checker and the card show both.
     context: str = ""
@@ -84,7 +84,7 @@ class WrittenDraftInfo:
 
     product_name: str = ""
     product_aliases: List[str] = field(default_factory=list)
-    feature_terms: List[str] = field(default_factory=list)  # read from the brief
+    feature_terms: List[str] = field(default_factory=list)  # the watch's "Key features"
     brief_sentence_count: int = 0
     splitter_version: Optional[int] = None  # the split the sentences were numbered under
     trigger_rules_version: str = ""

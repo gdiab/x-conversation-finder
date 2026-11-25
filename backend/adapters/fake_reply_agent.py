@@ -24,7 +24,7 @@ from backend.planning import question_spans
 from backend.gate.sentence_boundary import SPLITTER_VERSION
 
 # issue #12: the fake written draft. Sentences without a product name, we/our,
-# a number, a comparison or a feature term, so only the brief sentence between
+# a number, a comparison or a key feature, so only the brief sentence between
 # them is checked as a product claim.
 _FAKE_WRITTEN_OPENER_BY_REPLY_TYPE = {
     "answer_question": "Good question, and a hard thing to get right.",

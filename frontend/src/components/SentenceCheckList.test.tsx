@@ -155,21 +155,48 @@ describe('ReviewCard: written draft (issue #12)', () => {
     expect(screen.queryByText('Claim Gate:')).not.toBeInTheDocument();
   });
 
-  it('names the product, its aliases and the feature terms the check used', () => {
+  it('names the product, its aliases and the key features the check used', () => {
     render(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
 
     const section = screen.getByRole('heading', { name: 'Product Claim Check' }).parentElement as HTMLElement;
     expect(section).toHaveTextContent('names the product ("Acme Relay", "Relay")');
-    expect(section).toHaveTextContent('Feature terms read from your brief: Signed deliveries');
+    expect(section).toHaveTextContent("uses one of the watch's key features");
+    expect(section).toHaveTextContent('Key features from your watch settings: Signed deliveries');
   });
 
-  it('says when the brief lists no feature terms', () => {
+  it('says when the watch has no key features', () => {
     const draft = makeWrittenDraft();
     draft.written = { product_name: 'Acme Relay', product_aliases: [], feature_terms: [] };
     render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
 
-    // States the rule, not a guessed cause: a features list of long items also gives none
-    expect(screen.getByText(/none \(a feature term is an item of at most 6 words in a list named "features"\)/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Key features from your watch settings: none \(the watch was started without key features, so no sentence is checked for using one\)/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the drafter's own citations as a record, not as part of the check", () => {
+    const draft = makeWrittenDraft();
+    draft.written = {
+      product_name: 'Acme Relay',
+      product_aliases: [],
+      feature_terms: [],
+      drafter_hints: [
+        { sentence: 'Relay can retry a failed delivery up to five times.', brief_sentence_ids: ['b2', 'b3'] },
+        { sentence: 'We would love to hear how it goes.', brief_sentence_ids: [] },
+      ],
+    };
+    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
+
+    const citations = screen.getByTestId('drafter-citations');
+    expect(citations).toHaveTextContent('the checker was not shown it, and it is not a verdict');
+    expect(citations).toHaveTextContent('"Relay can retry a failed delivery up to five times.": b2, b3');
+    expect(citations).toHaveTextContent('"We would love to hear how it goes.": no brief sentence named');
+  });
+
+  it("shows no drafter's citations when there are none, as after a removal", () => {
+    render(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByTestId('drafter-citations')).not.toBeInTheDocument();
   });
 
   it('shows the edit check, not the stale draft check, once the draft was edited', () => {

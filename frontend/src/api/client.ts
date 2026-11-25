@@ -47,14 +47,14 @@ export type DraftMode = "assembled" | "written";
 export interface BriefSentence {
   id: string;
   text: string;
-  // The heading or list lead-in the sentence stands under ("Key features")
+  // The heading or list lead-in the sentence stands under ("Not supported yet")
   context?: string;
 }
 
 /** A deterministic trigger that made code check a sentence as a product claim. */
 export interface TriggerHit {
   trigger: "product_name" | "first_person_plural" | "number" | "comparison" | "feature_term" | string;
-  // The matched text: the product name or alias, "our", a number, a feature term...
+  // The matched text: the product name or alias, "our", a number, a key feature...
   match: string;
 }
 
@@ -167,8 +167,11 @@ export interface ReviewCard {
       written?: {
         product_name: string;
         product_aliases: string[];
-        // Feature terms read from the brief's feature list (a trigger)
+        // The watch's "Key features" (a trigger). Never read from the brief.
         feature_terms: string[];
+        // The brief sentences the drafter said support its own sentences:
+        // provenance only, never sent to the checker. Emptied on removal.
+        drafter_hints?: Array<{ sentence: string; brief_sentence_ids: string[] }>;
         checker_called?: boolean;
         checker_model?: string;
       } | null;
@@ -213,11 +216,12 @@ export interface StartWatchRequest {
   topic: string;
   query: string;
   product_brief: string;
-  // issue #12: the form's "Product name" (required) and "Also called"
-  // (optional). Written drafts check any reply sentence that uses one of
-  // these names against the brief.
+  // issue #12: the form's "Product name" (required), "Also called" and
+  // "Key features" (both optional). Written drafts check any reply sentence
+  // that uses one of these names or features against the brief.
   product_name: string;
   product_aliases: string[];
+  key_features: string[];
 }
 
 const API_BASE = '/api';

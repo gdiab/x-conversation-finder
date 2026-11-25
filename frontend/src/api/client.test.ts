@@ -164,7 +164,7 @@ describe('generateRequestId', () => {
   });
 });
 
-describe('startWatch (issue #12: product name and aliases)', () => {
+describe('startWatch (issue #12: product name, aliases and key features)', () => {
   const REQUEST = {
     account: 'synthetic_founder',
     topic: 'webhooks',
@@ -172,9 +172,10 @@ describe('startWatch (issue #12: product name and aliases)', () => {
     product_brief: 'Acme Relay delivers webhooks.',
     product_name: 'Acme Relay',
     product_aliases: ['Relay'],
+    key_features: ['Signed deliveries'],
   };
 
-  it('posts the product name and the aliases with the watch', async () => {
+  it('posts the product name, the aliases and the key features with the watch', async () => {
     fetchMock.mockResolvedValue(
       new Response('{"workflow_id":"watch:synthetic_founder:webhooks","message":"Started"}', { status: 200 }),
     );

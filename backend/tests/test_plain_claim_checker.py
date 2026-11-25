@@ -145,11 +145,12 @@ def test_the_port_and_the_activity_input_have_no_field_for_the_post_the_plan_or_
     assert {f.name for f in dataclasses.fields(ClaimCheckRequest)} == {
         "sentences", "brief_sentences", "product_name", "product_aliases", "must_verify",
     }
-    # The activity knows the plan's product decision (a boolean) and the post's id (for
-    # the removal lookup), and nothing else of the plan or the post
+    # The activity knows the watch's settings (name, aliases, key features), the plan's
+    # product decision (a boolean) and the post's id (for the removal lookup), and
+    # nothing else of the plan or the post
     assert {f.name for f in dataclasses.fields(CheckWrittenDraftInput)} == {
-        "text", "product_brief", "product_name", "idempotency_key", "product_aliases", "mention_product",
-        "post_id",
+        "text", "product_brief", "product_name", "idempotency_key", "product_aliases", "key_features",
+        "mention_product", "post_id",
     }
     assert list(ClaimCheckerPort.check.__code__.co_varnames[:3]) == ["self", "request", "idempotency_key"]
 

@@ -181,7 +181,10 @@ async def test_written_review_stores_a_card_with_the_per_sentence_check(make_rev
     checker = RecordingChecker()
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, checker=checker):
-            handle, workflow_id = await _start(env, make_review_input, "written", product_aliases=["Acme Cloud"])
+            handle, workflow_id = await _start(
+                env, make_review_input, "written", product_aliases=["Acme Cloud"],
+                key_features=[" Real-time   monitoring ", "Audit log", "real-time monitoring"],
+            )
             card = await wait_for_card_ready(handle)
 
             assert card["status"] == "pending"
@@ -208,9 +211,8 @@ async def test_written_review_stores_a_card_with_the_per_sentence_check(make_rev
             assert draft["written"]["checker_called"] is True
             # The drafter's own citation is kept on the draft as provenance
             assert draft["written"]["drafter_hints"] == [{"sentence": CLAIM, "brief_sentence_ids": ["b1"]}]
-            assert draft["written"]["feature_terms"] == [
-                "Automatic failover", "Strong consistency guarantees", "Real-time monitoring",
-            ]
+            # The watch's "Key features", cleaned; the brief's own "Key features:" list is not read
+            assert draft["written"]["feature_terms"] == ["Real-time monitoring", "Audit log"]
 
             # The stored card (what the list API serves) carries the same check
             stored = _db_card(workflow_id)["evidence"]
@@ -474,6 +476,49 @@ async def test_a_failing_edit_needs_post_anyway_which_is_recorded(make_review_in
             stored = _db_card(workflow_id)
             assert stored["post_anyway"] is True
             assert stored["post_anyway_failing_sentences"] == [FAILING_EDIT]
+
+
+KEY_FEATURE_EDIT = "Automatic failover would have caught that."
+
+
+@pytest.mark.asyncio
+async def test_a_key_feature_puts_the_drafters_and_the_founders_sentences_in_the_check(make_review_input):
+    """The drafter is told the watch's key features, and the check of a
+    founder edit reads the same list."""
+    agent = WritingAgent()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent):
+            handle, _ = await _start(env, make_review_input, "key_feature", key_features=["Automatic failover"])
+            card = await wait_for_card_ready(handle)
+            assert card["evidence"]["draft"]["written"]["feature_terms"] == ["Automatic failover"]
+            assert agent.requests[0].feature_terms == ["Automatic failover"]
+
+            await handle.execute_update("edit", args=[KEY_FEATURE_EDIT, str(uuid.uuid4())])
+
+            card = await handle.query("get_card")
+            [result] = card["edited_text_gate_results"]
+            assert result["triggers"] == [{"trigger": "feature_term", "match": "Automatic failover"}]
+            assert (result["kind"], result["passed"]) == ("claim", False)
+            assert result["reason"].startswith('Checked as a product claim (uses a key feature ("Automatic failover"))')
+
+
+@pytest.mark.asyncio
+async def test_a_review_without_key_features_has_no_feature_terms(make_review_input):
+    """A watch started without the field (or before it existed): the brief's
+    own "Key features:" list does not make its items triggers."""
+    agent = WritingAgent()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent):
+            handle, _ = await _start(env, make_review_input, "no_key_features")
+            card = await wait_for_card_ready(handle)
+            assert card["evidence"]["draft"]["written"]["feature_terms"] == []
+            assert agent.requests[0].feature_terms == []
+
+            await handle.execute_update("edit", args=[KEY_FEATURE_EDIT, str(uuid.uuid4())])
+
+            card = await handle.query("get_card")
+            [result] = card["edited_text_gate_results"]
+            assert result["triggers"] == []
 
 
 @pytest.mark.asyncio
@@ -941,9 +986,9 @@ def test_review_fixture_covers_the_paths_this_change_touches():
     ]
     assert updates == ["edit", "nudge", "approve"]
     assert "check_written_draft" not in scheduled
-    # Its input predates the product name fields
+    # Its input predates the product name fields and the key features
     started = _payload(events[0], "workflowExecutionStartedEventAttributes")
-    assert "product_name" not in started and "product_aliases" not in started
+    assert not {"product_name", "product_aliases", "key_features"} & set(started)
 
 
 @pytest.mark.asyncio
@@ -974,7 +1019,7 @@ def test_watch_fixtures_predate_the_product_name_fields():
     for fixture, _ in WATCH_HISTORIES:
         events = _events(fixture)
         started = _payload(events[0], "workflowExecutionStartedEventAttributes")
-        assert "product_name" not in started and "product_aliases" not in started
+        assert not {"product_name", "product_aliases", "key_features"} & set(started)
         children = [e for e in events if e["eventType"] == "EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED"]
         assert children, fixture
     assert _events(WATCH_HISTORIES[1][0])[-1]["eventType"] == "EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW"
@@ -991,15 +1036,27 @@ def test_inputs_recorded_before_the_new_fields_decode_to_assembled_defaults():
     from temporalio.converter import value_to_type
 
     from backend.activities import DraftReplyInput, PlanReplyResult
+    from backend.activities.written_check_activities import CheckWrittenDraftInput
     from backend.workflows.review import ReviewInput
     from backend.workflows.topic_watch import TopicWatchInput
 
     watch = value_to_type(TopicWatchInput, _payload(_events(WATCH_HISTORIES[0][0])[0], "workflowExecutionStartedEventAttributes"))
     review = value_to_type(ReviewInput, _payload(_events(REVIEW_HISTORY[0])[0], "workflowExecutionStartedEventAttributes"))
 
-    assert (watch.product_name, watch.product_aliases) == ("", None)
-    assert (review.product_name, review.product_aliases) == ("", None)
+    assert (watch.product_name, watch.product_aliases, watch.key_features) == ("", None, None)
+    assert (review.product_name, review.product_aliases, review.key_features) == ("", None, None)
+    # An input recorded with a product name but before the "Key features"
+    # field (2026-11-25) decodes to no key features: no feature terms
+    named = dict(_payload(_events(REVIEW_HISTORY[0])[0], "workflowExecutionStartedEventAttributes"),
+                 product_name="Acme", product_aliases=["Acme Cloud"])
+    assert value_to_type(ReviewInput, named).key_features is None
+    check_input = value_to_type(CheckWrittenDraftInput, {
+        "text": "x", "product_brief": "A brief.", "product_name": "Acme", "idempotency_key": "k",
+        "product_aliases": [], "mention_product": None, "post_id": "1",
+    })
+    assert check_input.key_features is None
     plan = {"reply_type": "add_observation", "target_point": "x", "mention_product": True, "mention_product_reason": "y"}
     old_result = value_to_type(PlanReplyResult, {"plan": plan, "errors": []})
     assert (old_result.draft_mode, old_result.draft_mode_note) == (None, None)
-    assert {f.name: f.default for f in dataclasses.fields(DraftReplyInput)}["draft_mode"] is None
+    defaults = {f.name: f.default for f in dataclasses.fields(DraftReplyInput)}
+    assert (defaults["draft_mode"], defaults["key_features"]) == (None, None)

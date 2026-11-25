@@ -1,9 +1,9 @@
-"""The product brief as numbered sentences, and its feature terms (issue #12).
+"""The product brief as numbered sentences (issue #12).
 
 Written drafts (ADR-0006 amendment 2026-11-24) are checked against the brief:
 the checker cites brief sentences by id, and code confirms the ids exist. This
 module turns the founder's brief (Markdown or plain text) into that numbered
-list, deterministically, and reads the feature terms the brief lists.
+list, deterministically.
 
 Rules:
 - A heading sets the context of what follows and is not a sentence itself.
@@ -15,7 +15,7 @@ Rules:
 - A list item is one sentence, with its continuation lines ("- Not
   supported:" followed by an indented "Slack and Teams." is one sentence).
   Its context is the heading path, the lead-in line that ends in a colon
-  ("Key features:") when present, and the items it is nested under
+  ("Not supported yet:") when present, and the items it is nested under
   ("Integrations we do not support > Slack").
 - A line that ends in a colon is the context of the list or the one
   paragraph that follows it (with or without a blank line between), and is a
@@ -30,13 +30,10 @@ Rules:
 - Text without a letter or digit (a horizontal rule) is not a sentence.
 - Ids are "b1", "b2", ... in document order.
 
-Feature terms are the short items (at most MAX_FEATURE_TERM_WORDS words) of a
-list that is named a feature list: the word "feature" or "features" is in the
-item the list is nested under, else in its lead-in line ("Key features:"),
-else in the heading it stands under. Only that nearest name counts. The
-comma-separated terms after such a lead-in on one line ("Features: a, b") are
-feature terms too. Nothing else in the brief is a feature term: the trigger
-must be predictable from what the founder wrote.
+Nothing in the brief is a feature term. The feature-term trigger reads only
+the watch's "Key features" field (George's decision of 2026-11-25; see
+backend.gate.written_check.clean_feature_terms), as the name trigger reads
+only "Product name" and "Also called".
 
 Like every sentence splitter, this runs only inside activities, never in
 workflow code (see ADR-0006, 2026-11-21 amendment, item 2).
@@ -49,7 +46,6 @@ from backend.gate.sentence_split import split_into_sentences
 from backend.gate.sentence_boundary import merge_at_unclear_boundaries
 from backend.models.written import BriefSentence
 
-MAX_FEATURE_TERM_WORDS = 6
 # A prose "sentence" with fewer words is joined to the sentence before it
 MIN_SENTENCE_WORDS = 3
 
@@ -57,12 +53,6 @@ _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s*(.*?)\s*#*\s*$")
 # A Setext underline: the paragraph above it is a heading (=== level 1, --- level 2)
 _SETEXT_RE = re.compile(r"^\s{0,3}(=+|-{2,})\s*$")
 _LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+\u2022]|\d{1,3}[.)])\s+(.+?)\s*$")
-_FEATURE_WORD_RE = re.compile(r"\bfeatures?\b", re.IGNORECASE)
-# "Key features: a, b and c" on one line
-_INLINE_FEATURES_RE = re.compile(r"^([^:]*\bfeatures?\b[^:]*):\s*(\S.*)$", re.IGNORECASE)
-_INLINE_SEPARATOR_RE = re.compile(r"\s*[,;]\s*(?:and\s+)?|\s+and\s+", re.IGNORECASE)
-# Where a list item's term ends and its description starts
-_TERM_END_RE = re.compile(r":|\s[-\u2013\u2014]\s|\(|\.\s")
 _MARKUP_RE = re.compile(r"[*_`]+")
 _WORD_RE = re.compile(r"[^\W_]+")
 
@@ -75,16 +65,11 @@ def _indent(whitespace: str) -> int:
     return len(whitespace.expandtabs(4))
 
 
-def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
-    """Return ((text, context) units in order, feature term candidates)."""
+def _parse(product_brief: str) -> List[Tuple[str, str]]:
+    """Return the brief's (text, context) units in order."""
     units: List[Tuple[str, str]] = []
-    terms: List[str] = []
     headings: List[Tuple[int, str]] = []  # (level, text): the open heading path
     colon_lead: Optional[str] = None  # lead-in of the list or paragraph being read
-    # The colon line that names the list being read ("Key features"): the
-    # innermost one of a chain. Empty when the list has none (then colon_lead,
-    # if set, is just the sentence before the list).
-    list_name = ""
     pending_lead: Optional[str] = None  # a "...:" sentence that may introduce what follows
     pending_parent: Optional[str] = None  # the lead-in the pending lead-in itself stands under
     # The last sentence of the paragraph just read, with its own lead-in: if a
@@ -93,7 +78,6 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     paragraph: List[str] = []
     # The open items of the list being read: [indent, text, index in units or None]
     items: List[list] = []
-    feature_items: List[list] = []  # items of a feature list; read once they are complete
     blank_since_item = False
 
     def context(*inner: Optional[str]) -> str:
@@ -112,9 +96,6 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             return
         text = " ".join(paragraph)
         paragraph.clear()
-        inline = _INLINE_FEATURES_RE.match(text)
-        if inline:
-            terms.extend(_INLINE_SEPARATOR_RE.split(inline.group(2).rstrip(".")))
         sentences = merge_at_unclear_boundaries(split_into_sentences(text))
         lead, colon_lead = colon_lead, None  # a lead-in covers one paragraph
         if sentences and sentences[-1].rstrip().endswith(":"):
@@ -141,16 +122,14 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             add_unit(pending_lead, context(pending_parent))
             pending_lead = pending_parent = None
 
-    def take_pending_lead() -> str:
-        """The lead-in introduces what follows: it becomes its context.
-        Returns the lead-in itself, without the lead-ins it stands under."""
+    def take_pending_lead() -> None:
+        """The lead-in introduces what follows: it becomes its context."""
         nonlocal pending_lead, pending_parent, colon_lead
-        name = ""
         if pending_lead is not None:
-            name = _clean_context(pending_lead)
-            colon_lead = " > ".join(part for part in (pending_parent, name) if part)
+            colon_lead = " > ".join(
+                part for part in (pending_parent, _clean_context(pending_lead)) if part
+            )
             pending_lead = pending_parent = None
-        return name
 
     def open_heading(level: int, text: str) -> None:
         nonlocal colon_lead, intro
@@ -184,15 +163,13 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         elif item_match:
             flush_paragraph()
             if pending_lead is not None:
-                list_name = take_pending_lead()
+                take_pending_lead()
                 items.clear()
-            elif not items:
-                list_name = ""
-                if intro is not None:
-                    # The sentence right before a list introduces it, with or
-                    # without a colon: a bold "Not supported yet" line, or "We
-                    # do not integrate with these tools" (it stays a sentence too)
-                    colon_lead = " > ".join(part for part in (intro[0], _clean_context(intro[1])) if part)
+            elif not items and intro is not None:
+                # The sentence right before a list introduces it, with or
+                # without a colon: a bold "Not supported yet" line, or "We
+                # do not integrate with these tools" (it stays a sentence too)
+                colon_lead = " > ".join(part for part in (intro[0], _clean_context(intro[1])) if part)
             intro = None
             indent, item = _indent(item_match.group(1)), item_match.group(2)
             while items and items[-1][0] >= indent:
@@ -202,22 +179,6 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
             # "Not supported > Integrations" keeps the "not"
             index = add_unit(item, context(colon_lead, *parents))
             items.append([indent, item, index])
-            # What names this list decides whether it is a feature list: the
-            # item it is nested under, else its lead-in line ("Key features:"),
-            # else the heading it stands under. Only that nearest one counts:
-            # under "## Features", the sub-items of "- Limitations" are not
-            # feature terms, and neither is a list introduced by "Plans:".
-            if parents:
-                named_by = parents[-1]
-            elif list_name:
-                # The innermost lead-in only: under "Features:" then "Plans:",
-                # the list is named "Plans"
-                named_by = list_name
-            else:
-                named_by = headings[-1][1] if headings else ""
-            if _FEATURE_WORD_RE.search(named_by):
-                # Read at the end: continuation lines may still extend the item
-                feature_items.append(items[-1])
             blank_since_item = False
         elif items and not paragraph and (
             not blank_since_item or _indent(line[: len(line) - len(line.lstrip())]) > items[-1][0]
@@ -246,42 +207,16 @@ def _parse(product_brief: str) -> Tuple[List[Tuple[str, str]], List[str]]:
                 flush_paragraph()
     flush_paragraph()
     emit_pending_lead()
-    terms.extend(item[1] for item in feature_items)
-    return units, terms
+    return units
 
 
 def split_brief(product_brief: str) -> List[BriefSentence]:
     """The brief's sentences in order, with ids "b1", "b2", ..."""
-    units, _ = _parse(product_brief or "")
+    units = _parse(product_brief or "")
     return [
         BriefSentence(id=f"b{i}", text=text, context=context)
         for i, (text, context) in enumerate(units, start=1)
     ]
-
-
-def _clean_term(raw: str) -> str:
-    term = _MARKUP_RE.sub("", raw)
-    end = _TERM_END_RE.search(term)
-    if end:
-        term = term[:end.start()]
-    return " ".join(term.split()).strip(" .,;:!?\"'“”‘’")
-
-
-def brief_feature_terms(product_brief: str) -> List[str]:
-    """Feature terms the brief lists (see the module docstring), in order, without repeats."""
-    _, candidates = _parse(product_brief or "")
-    terms: List[str] = []
-    seen = set()
-    for raw in candidates:
-        term = _clean_term(raw)
-        words = _WORD_RE.findall(term)
-        if not 1 <= len(words) <= MAX_FEATURE_TERM_WORDS or not any(w.isalpha() for w in words):
-            continue
-        key = term.casefold()
-        if key not in seen:
-            seen.add(key)
-            terms.append(term)
-    return terms
 
 
 def render_brief_sentence(sentence: BriefSentence) -> str:

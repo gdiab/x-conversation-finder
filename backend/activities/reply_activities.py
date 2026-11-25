@@ -6,8 +6,8 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from backend.config import get_settings
-from backend.gate.brief import brief_feature_terms, split_brief
-from backend.gate.written_check import clean_names
+from backend.gate.brief import split_brief
+from backend.gate.written_check import clean_feature_terms, clean_names
 from backend.models import Evidence, Post, ReplyPlan
 from backend.models.written import DRAFT_MODE_WRITTEN
 from backend.planning import (
@@ -49,6 +49,7 @@ class DraftReplyInput:
     product_brief: str = ""
     product_name: str = ""
     product_aliases: Optional[List[str]] = None
+    key_features: Optional[List[str]] = None  # the watch's "Key features" (feature terms)
 
 
 @dataclass
@@ -245,7 +246,7 @@ class ReplyActivities:
                         brief_sentences=split_brief(input.product_brief),
                         product_name=name,
                         product_aliases=aliases,
-                        feature_terms=brief_feature_terms(input.product_brief),
+                        feature_terms=clean_feature_terms(input.key_features),
                         steer=input.steer,
                     ),
                     idempotency_key=input.idempotency_key,

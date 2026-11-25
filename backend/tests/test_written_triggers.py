@@ -9,6 +9,7 @@ from backend.gate.written_check import (
     TRIGGER_FIRST_PERSON_PLURAL,
     TRIGGER_NUMBER,
     TRIGGER_PRODUCT_NAME,
+    clean_feature_terms,
     clean_names,
     find_triggers,
 )
@@ -227,7 +228,7 @@ def test_common_reply_phrases_are_not_comparisons(sentence):
     assert TRIGGER_COMPARISON not in _kinds(sentence)
 
 
-# ---------- feature terms ----------
+# ---------- feature terms (the watch's "Key features") ----------
 
 
 def test_feature_terms_fire_as_whole_phrases():
@@ -240,6 +241,38 @@ def test_feature_terms_do_not_fire_on_parts_or_other_words():
     assert TRIGGER_FEATURE_TERM not in _kinds("Deliveries were late all week.")
     assert TRIGGER_FEATURE_TERM not in _kinds("I signed up for the delivery plan.")
     assert TRIGGER_FEATURE_TERM not in _kinds("Signed deliveries would catch that.", terms=[])
+    assert TRIGGER_FEATURE_TERM not in _kinds("Signed deliveries would catch that.", terms=None)
+
+
+def test_key_features_are_cleaned_like_the_names():
+    """The watch's "Key features" as entered: trimmed, in order, without
+    blanks, repeats or entries that have no word to match on."""
+    assert clean_feature_terms(None) == []
+    assert clean_feature_terms([]) == []
+    assert clean_feature_terms(
+        ["  Signed   deliveries ", "", "signed deliveries", "Delivery replay", "--", None, "S3 export"]
+    ) == ["Signed deliveries", "Delivery replay", "S3 export"]
+
+
+def test_a_key_feature_is_matched_as_normalized_whole_words():
+    terms = ["Dead-letter queue", "S3 export"]
+
+    assert _matches("A dead letter queue would hold those.", TRIGGER_FEATURE_TERM, terms=terms) == ["Dead-letter queue"]
+    assert _matches("Dead-letter queues hold those.", TRIGGER_FEATURE_TERM, terms=terms) == ["Dead-letter queue"]
+    # Fullwidth letters fold to the same words (NFKC), as in the claim gate
+    assert _matches("The ｓ３ export covers that.", TRIGGER_FEATURE_TERM, terms=terms) == ["S3 export"]
+    assert TRIGGER_FEATURE_TERM not in _kinds("The queue filled up with dead jobs.", terms=terms)
+
+
+def test_a_long_key_feature_is_kept_and_only_adds_a_check():
+    """The API refuses an entry of more than six words. One that reaches the
+    gate another way is not cut: it can only add a sentence to the checked set."""
+    long_term = "retries with backoff and a dead-letter queue"
+
+    assert clean_feature_terms([long_term]) == [long_term]
+    assert _matches(
+        "Retries with backoff and a dead letter queue cover that.", TRIGGER_FEATURE_TERM, terms=[long_term]
+    ) == [long_term]
 
 
 # ---------- several triggers at once ----------

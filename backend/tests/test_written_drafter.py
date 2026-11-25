@@ -17,7 +17,7 @@ from temporalio.testing import ActivityEnvironment
 from backend.activities.reply_activities import DraftReplyInput, PlanReplyInput, ReplyActivities
 from backend.adapters import FakeReplyAgent
 from backend.adapters.plain_reply_agent import PlainReplyAgent, build_written_draft_prompt, parse_written_draft
-from backend.gate.brief import brief_feature_terms, split_brief
+from backend.gate.brief import split_brief
 from backend.models import Evidence, FounderMaterial, ReplyPlan
 from backend.models.written import DrafterHint
 from backend.planning import NO_PRODUCT_NAME_NOTE, resolve_draft_mode
@@ -90,7 +90,7 @@ def _request(sample_post, plan=PLAN, steer=None, evidence=None):
         brief_sentences=split_brief(RELAY_BRIEF),
         product_name=RELAY_NAME,
         product_aliases=RELAY_ALIASES,
-        feature_terms=brief_feature_terms(RELAY_BRIEF),
+        feature_terms=["Signed deliveries", "Delivery replay"],
         steer=steer,
     )
 
@@ -142,7 +142,7 @@ def test_the_prompt_shows_the_post_the_plan_and_the_numbered_brief(sample_post):
     assert "founder of Acme Relay (also called Relay)" in prompt
     assert "At most 3 sentences and at most 280 characters" in prompt
     assert "Exactly one sentence says something about Acme Relay" in prompt
-    assert "feature terms: Signed deliveries, Delivery replay" in prompt
+    assert "key features: Signed deliveries, Delivery replay" in prompt
     assert '"support"' in prompt
 
 

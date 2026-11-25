@@ -15,7 +15,7 @@ from temporalio.exceptions import ApplicationError
 
 from backend.activities.store_activities import card_post_text_removed, post_removal_recorded
 from backend.budget import meter_inference
-from backend.gate.brief import brief_feature_terms, split_brief
+from backend.gate.brief import split_brief
 from backend.gate.written_check import judge, prepare_check
 from backend.models.written import WrittenCheckResult
 from backend.ports.claim_checker import ClaimCheckerPort
@@ -35,6 +35,9 @@ class CheckWrittenDraftInput:
     product_name: str
     idempotency_key: str
     product_aliases: Optional[List[str]] = None
+    # The watch's "Key features": the only source of feature terms. None for
+    # a watch started without the field: no feature terms.
+    key_features: Optional[List[str]] = None
     # The reply plan's decision; None for a founder edit, which is not held to the plan
     mention_product: Optional[bool] = None
     # The target post's id, for the removal lookup only; never sent to the checker
@@ -90,7 +93,7 @@ class WrittenCheckActivities:
             split_brief(input.product_brief),
             input.product_name,
             input.product_aliases,
-            brief_feature_terms(input.product_brief),
+            input.key_features,
             input.mention_product,
         )
         if not prepared.needs_checker:

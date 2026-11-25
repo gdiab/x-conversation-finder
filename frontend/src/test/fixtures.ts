@@ -81,6 +81,7 @@ export function makeWrittenDraft(overrides: Partial<Draft> = {}): Draft {
       product_name: 'Acme Relay',
       product_aliases: ['Relay'],
       feature_terms: ['Signed deliveries'],
+      drafter_hints: [],
       checker_called: true,
       checker_model: 'fake-checker',
     },

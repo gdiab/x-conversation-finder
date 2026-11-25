@@ -15,7 +15,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   first_person_plural: 'uses we/our/us/ours',
   number: 'contains a number',
   comparison: 'makes a comparison',
-  feature_term: 'uses a feature term from the brief',
+  feature_term: 'uses a key feature',
 };
 
 /** "names the product ("Acme"), uses we/our/us/ours ("our")" */

@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseAlsoCalled, StartWatchForm } from './StartWatchForm';
+import { parseCommaList, StartWatchForm } from './StartWatchForm';
 import { startWatch } from '../api/client';
 
 vi.mock('../api/client', async (importOriginal) => {
@@ -22,13 +22,24 @@ async function fillRequired(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByPlaceholderText(/Describe your product/), 'Acme Relay delivers webhooks.');
 }
 
-describe('StartWatchForm: product name and "Also called" (issue #12)', () => {
-  it('has a required Product name field and an optional Also called field', () => {
+describe('StartWatchForm: product name, "Also called" and "Key features" (issue #12)', () => {
+  it('has a required Product name field and optional Also called and Key features fields', () => {
     render(<StartWatchForm onSuccess={vi.fn()} />);
 
     expect(screen.getByLabelText('Product name:')).toBeRequired();
     expect(screen.getByLabelText('Also called (optional):')).not.toBeRequired();
-    expect(screen.getByText(/is checked against your brief/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Key features (optional):')).not.toBeRequired();
+    expect(screen.getByText(/uses the product name or one of these names is checked against your brief/)).toBeInTheDocument();
+    expect(screen.getByText(/Key features are read only from this field, not from the brief/)).toBeInTheDocument();
+  });
+
+  it('puts Key features next to Product name and Also called, before the brief', () => {
+    render(<StartWatchForm onSuccess={vi.fn()} />);
+
+    const labels = screen.getAllByText(/:$/, { selector: 'label' }).map((label) => label.textContent?.trim());
+    expect(labels.slice(-4)).toEqual([
+      'Product name:', 'Also called (optional):', 'Key features (optional):', 'Product Brief:',
+    ]);
   });
 
   it('sends the product name and the aliases as a list', async () => {
@@ -40,6 +51,7 @@ describe('StartWatchForm: product name and "Also called" (issue #12)', () => {
     await fillRequired(user);
     await user.type(screen.getByLabelText('Product name:'), '  Acme Relay ');
     await user.type(screen.getByLabelText('Also called (optional):'), 'Relay, , AcmeRelay,relay');
+    await user.type(screen.getByLabelText('Key features (optional):'), ' Signed   deliveries, ,Delivery replay,signed deliveries');
     await user.click(screen.getByRole('button', { name: 'Start Watch' }));
 
     expect(startWatchMock).toHaveBeenCalledWith({
@@ -49,12 +61,13 @@ describe('StartWatchForm: product name and "Also called" (issue #12)', () => {
       product_brief: 'Acme Relay delivers webhooks.',
       product_name: 'Acme Relay',
       product_aliases: ['Relay', 'AcmeRelay'],
+      key_features: ['Signed deliveries', 'Delivery replay'],
     });
     expect(await screen.findByText("Started watch for topic 'webhooks'")).toBeInTheDocument();
     expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 
-  it('sends an empty alias list when Also called is left empty', async () => {
+  it('sends empty lists when Also called and Key features are left empty', async () => {
     const user = userEvent.setup();
     startWatchMock.mockResolvedValue({ workflow_id: 'watch:x:y', message: 'ok' });
     render(<StartWatchForm onSuccess={vi.fn()} />);
@@ -64,6 +77,7 @@ describe('StartWatchForm: product name and "Also called" (issue #12)', () => {
     await user.click(screen.getByRole('button', { name: 'Start Watch' }));
 
     expect(startWatchMock.mock.calls[0][0].product_aliases).toEqual([]);
+    expect(startWatchMock.mock.calls[0][0].key_features).toEqual([]);
   });
 
   it('refuses a product name made of spaces without calling the API', async () => {
@@ -82,7 +96,7 @@ describe('StartWatchForm: product name and "Also called" (issue #12)', () => {
     const user = userEvent.setup();
     startWatchMock.mockResolvedValue({
       workflow_id: 'watch:x:y',
-      message: "Watch already running for topic 'webhooks'. Its product name and brief were not changed; stop the watch first to change them.",
+      message: "Watch already running for topic 'webhooks'. Its product name, key features and brief were not changed; stop the watch first to change them.",
     });
     render(<StartWatchForm onSuccess={vi.fn()} />);
 
@@ -94,11 +108,11 @@ describe('StartWatchForm: product name and "Also called" (issue #12)', () => {
   });
 });
 
-describe('parseAlsoCalled', () => {
+describe('parseCommaList', () => {
   it('splits on commas, trims, and drops blanks and repeats', () => {
-    expect(parseAlsoCalled('')).toEqual([]);
-    expect(parseAlsoCalled(' , ,')).toEqual([]);
-    expect(parseAlsoCalled('Relay')).toEqual(['Relay']);
-    expect(parseAlsoCalled(' Acme   Relay ,Relay,  relay , AR')).toEqual(['Acme Relay', 'Relay', 'AR']);
+    expect(parseCommaList('')).toEqual([]);
+    expect(parseCommaList(' , ,')).toEqual([]);
+    expect(parseCommaList('Relay')).toEqual(['Relay']);
+    expect(parseCommaList(' Acme   Relay ,Relay,  relay , AR')).toEqual(['Acme Relay', 'Relay', 'AR']);
   });
 });

@@ -29,7 +29,7 @@ import pytest
 from temporalio.testing import ActivityEnvironment
 
 from backend.activities.written_check_activities import CheckWrittenDraftInput, WrittenCheckActivities
-from backend.gate.brief import brief_feature_terms, split_brief
+from backend.gate.brief import split_brief
 from backend.gate.written_check import judge, prepare_check
 from backend.models.written import ClaimVerdict
 from backend.tests.written_helpers import (
@@ -59,14 +59,13 @@ ADVERSARIAL_KINDS = {
     "hides a claim in a question",
 }
 
-# 2026-11-21 edit-path cases that steps 2 to 4 do NOT reject, because they
-# make no product claim (step 4: such sentences are not gated against the
-# brief; founder review is the backstop). The amendment's first criterion
-# says "every must-REJECT case ... is rejected by steps 2-4", so as worded it
-# cannot hold for these five. Whether to reword the criterion or add a rule is
-# George's decision (tasks/report-12.md); this list pins the current behavior
-# so the gap cannot grow unnoticed.
-NOT_PRODUCT_CLAIMS_UNDER_STEP_4 = {
+# 2026-11-21 edit-path cases that make no product claim. Steps 2 to 4 allow
+# them by design: step 4 does not gate such sentences against the brief, and
+# their tone is caught by founder review. Criterion 1 covers the cases that
+# make a product claim (George's decision of 2026-11-25, recorded in the
+# amendment). This list pins the group, so a case cannot move between the two
+# groups unnoticed.
+ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS = {
     "What stack are you on.",
     "What stack are you on!",
     "I like the idea.",
@@ -106,7 +105,7 @@ def _prepared(case):
         split_brief(b["text"]),
         b["product_name"],
         b["product_aliases"],
-        brief_feature_terms(b["text"]),
+        b["key_features"],
     )
 
 
@@ -174,7 +173,24 @@ def test_fixture_briefs_are_numbered_as_the_cases_assume():
     assert [s.id for s in relay] == [f"b{i}" for i in range(1, 9)]
     assert relay[1].text == "Relay can retry a failed delivery up to five times."
     assert relay[5].text == "Our dashboard shows delivery latency per endpoint."
-    assert brief_feature_terms(FIXTURE["briefs"]["relay"]["text"]) == ["Signed deliveries", "Delivery replay"]
+
+
+def test_feature_terms_come_from_the_key_features_setting_not_from_the_brief():
+    """The relay brief has its own "Key features:" list. Without the watch's
+    key features, no sentence is checked for using a feature term."""
+    relay = FIXTURE["briefs"]["relay"]
+    assert "Key features:\n- Signed deliveries" in relay["text"]
+    text = "Signed deliveries are available on every plan."
+
+    def triggers(key_features):
+        prepared = prepare_check(
+            text, split_brief(relay["text"]), relay["product_name"], relay["product_aliases"], key_features
+        )
+        return [sorted({h.trigger for h in hits}) for hits in prepared.triggers], prepared.feature_terms
+
+    assert triggers(relay["key_features"]) == ([["feature_term"]], ["Signed deliveries", "Delivery replay"])
+    assert triggers(None) == ([[]], [])
+    assert triggers([]) == ([[]], [])
 
 
 # ---------- step 2: the triggers, with no model involved ----------
@@ -210,23 +226,33 @@ def test_criterion_2_every_adversarial_paraphrase_is_rejected():
 
 
 def test_criterion_1_every_2026_11_21_case_that_makes_a_product_claim_is_rejected():
-    for case in _by(E21):
-        if case["text"] in NOT_PRODUCT_CLAIMS_UNDER_STEP_4:
-            continue
+    product_claims = [c for c in _by(E21) if c["text"] not in ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS]
+
+    assert len(product_claims) == 12
+    for case in product_claims:
         assert case["expect"] == "reject"
         assert not _check(case).passed, case["id"]
 
 
-def test_criterion_1_gap_cases_that_are_not_product_claims_are_not_rejected():
-    """See NOT_PRODUCT_CLAIMS_UNDER_STEP_4: the criterion as worded does not hold for these."""
-    not_rejected = {c["text"] for c in _by(E21) if c["expect"] == "pass"}
+def test_the_five_2026_11_21_cases_that_are_not_product_claims_are_allowed_by_design():
+    """Out of scope for the claim gate (step 4); see ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS."""
+    allowed = {c["text"] for c in _by(E21) if c["expect"] == "pass"}
 
-    assert not_rejected == NOT_PRODUCT_CLAIMS_UNDER_STEP_4
+    assert allowed == ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS and len(allowed) == 5
     for case in _by(E21):
-        if case["text"] in NOT_PRODUCT_CLAIMS_UNDER_STEP_4:
+        if case["text"] in ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS:
             assert case["decided_by"] == "step-4"
             assert case["triggers"] == [[]]  # no trigger fires on any of them
             assert _check(case).passed
+
+
+def test_the_adr_records_criterion_1_and_names_the_five_allowed_cases():
+    """The amendment's wording and this file's two groups stay in step."""
+    amendment = ADR.read_text().split("## Amendment 2026-11-24", 1)[1]
+
+    assert "that makes a product claim is rejected by steps 2-4" in amendment
+    for text in ALLOWED_BY_DESIGN_NOT_PRODUCT_CLAIMS:
+        assert f"'{text}'" in amendment, text
 
 
 def test_replies_that_should_pass_do():
@@ -319,6 +345,7 @@ async def test_check_written_draft_activity_gives_the_same_outcome(case):
             product_brief=b["text"],
             product_name=b["product_name"],
             product_aliases=b["product_aliases"],
+            key_features=b["key_features"],
             idempotency_key=case["id"],
         ),
     )

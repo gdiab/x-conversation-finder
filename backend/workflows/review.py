@@ -143,6 +143,10 @@ class ReviewInput:
     # predates the fields: they stay in assembled mode.
     product_name: str = ""
     product_aliases: Optional[List[str]] = None
+    # issue #12 (George's decision, 2026-11-25): the watch's "Key features"
+    # field, the only source of feature terms. None on Reviews started by a
+    # watch without it: no feature terms, and the card says so.
+    key_features: Optional[List[str]] = None
     
     def __post_init__(self):
         """Default config if not provided."""
@@ -401,6 +405,7 @@ class ReviewWorkflow:
             product_brief=input.product_brief,
             product_name=input.product_name,
             product_aliases=input.product_aliases,
+            key_features=input.key_features,
         )
 
     async def _check_written_text(
@@ -408,9 +413,10 @@ class ReviewWorkflow:
     ) -> WrittenCheckResult:
         """Run the product-claim check of a written text (issue #12).
 
-        The activity gets the text, the brief and the product name. It is not
-        given the post, the plan or the drafter's hints, only the plan's
-        product decision (None for a founder edit).
+        The activity gets the text, the brief, the product name and the
+        watch's key features. It is not given the post, the plan or the
+        drafter's hints, only the plan's product decision (None for a founder
+        edit).
         """
         input = self.input
         return await workflow.execute_activity(
@@ -421,6 +427,7 @@ class ReviewWorkflow:
                 product_name=input.product_name,
                 idempotency_key=key,
                 product_aliases=input.product_aliases,
+                key_features=input.key_features,
                 mention_product=mention_product,
                 post_id=input.post.id,
             ),

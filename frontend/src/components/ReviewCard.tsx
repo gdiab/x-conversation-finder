@@ -465,15 +465,15 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
             the product
             {card.evidence.draft.written?.product_name && <> ("{card.evidence.draft.written.product_name}"
               {(card.evidence.draft.written.product_aliases ?? []).map((alias) => `, "${alias}"`)})</>}
-            , uses we/our/us/ours, contains a number, makes a comparison or uses a feature term from
-            your brief, or when a separate checker reads it as about the product. A product claim must
-            be supported by sentences of your brief.
+            , uses we/our/us/ours, contains a number, makes a comparison or uses one of the watch's
+            key features, or when a separate checker reads it as about the product. A product claim
+            must be supported by sentences of your brief.
           </div>
           <div style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
-            Feature terms read from your brief:{' '}
+            Key features from your watch settings:{' '}
             {(card.evidence.draft.written?.feature_terms ?? []).length > 0
               ? card.evidence.draft.written?.feature_terms.join(', ')
-              : 'none (a feature term is an item of at most 6 words in a list named "features")'}
+              : 'none (the watch was started without key features, so no sentence is checked for using one)'}
           </div>
           {edited ? (
             <div style={{ fontSize: '14px', color: '#666' }}>
@@ -483,6 +483,21 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
             </div>
           ) : (
             <SentenceCheckList checks={card.evidence.draft.sentence_checks ?? []} />
+          )}
+          {/* ADR-0006 amendment 2026-11-24, step 1: the drafter's own list is provenance */}
+          {!edited && (card.evidence.draft.written?.drafter_hints ?? []).length > 0 && (
+            <div data-testid="drafter-citations" style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
+              <div style={{ marginBottom: '4px' }}>
+                <strong>The drafter's own citations.</strong> The model that wrote the draft named these
+                brief sentences as its support. This is a record only: the checker was not shown it, and
+                it is not a verdict.
+              </div>
+              {(card.evidence.draft.written?.drafter_hints ?? []).map((hint, idx) => (
+                <div key={idx}>
+                  "{hint.sentence}": {(hint.brief_sentence_ids ?? []).length > 0 ? hint.brief_sentence_ids.join(', ') : 'no brief sentence named'}
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}

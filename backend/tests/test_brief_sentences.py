@@ -1,9 +1,9 @@
-"""The product brief as numbered sentences, and its feature terms (issue #12).
+"""The product brief as numbered sentences (issue #12).
 
 Synthetic briefs only.
 """
 
-from backend.gate.brief import brief_feature_terms, render_brief_sentence, split_brief
+from backend.gate.brief import render_brief_sentence, split_brief
 from backend.gate.sentence_boundary import merge_at_unclear_boundaries
 
 
@@ -235,87 +235,38 @@ def test_lines_of_one_paragraph_are_joined_and_blank_lines_separate():
 def test_empty_brief_has_no_sentences():
     assert split_brief("") == []
     assert split_brief("   \n\n") == []
-    assert brief_feature_terms("") == []
 
 
 def test_split_is_deterministic(product_brief):
     assert split_brief(product_brief) == split_brief(product_brief)
 
 
-# ---------- feature terms ----------
+# ---------- a "features" list is an ordinary list ----------
+#
+# Feature terms come from the watch's "Key features" field, never from the
+# brief (George's decision of 2026-11-25; see test_written_triggers.py). A
+# list named "features" is read like any other list.
 
 
-def test_feature_terms_are_the_items_of_a_features_list(product_brief):
-    assert brief_feature_terms(product_brief) == [
-        "Automatic failover",
-        "Strong consistency guarantees",
-        "Real-time monitoring",
+def test_a_features_list_gives_ordinary_brief_sentences():
+    brief = "Key features:\n- Signed\n  deliveries\n- Replay\n"
+
+    assert _texts(brief) == [
+        ("b1", "Key features", "Signed deliveries"),
+        ("b2", "Key features", "Replay"),
     ]
 
 
-def test_feature_terms_come_from_a_features_heading_too():
-    brief = "## Features\n- **Signed deliveries** - every request carries a signature\n- `Replay`: resend a delivery\n"
-
-    assert brief_feature_terms(brief) == ["Signed deliveries", "Replay"]
-
-
-def test_a_wrapped_feature_item_gives_the_whole_term():
-    """Read after its continuation line, or the term would be "Signed" and
-    fire on "I signed up yesterday"."""
-    brief = "Key features:\n- Signed\n  deliveries\n- Replay\n"
-
-    assert brief_feature_terms(brief) == ["Signed deliveries", "Replay"]
-    assert [t for _, _, t in _texts(brief)] == ["Signed deliveries", "Replay"]
-
-
-def test_inline_feature_list_is_read():
+def test_an_inline_features_line_is_one_sentence():
     brief = "Key features: retries with backoff, a dead-letter queue, and replay."
 
-    assert brief_feature_terms(brief) == ["retries with backoff", "a dead-letter queue", "replay"]
+    assert _texts(brief) == [("b1", "", brief)]
 
 
-def test_only_what_names_the_list_decides_whether_it_is_a_feature_list():
-    """The parent item, else the lead-in line, else the heading: the nearest one only."""
-    under_heading = "# Features\n- Replay\n- Signed deliveries\n"
-    intro_sentence = "# Features\nThese ship today.\n- Replay\n"  # a sentence is not a list name
-    under_parent = "- Main features:\n  - Replay\n- Limits:\n  - Ten endpoints\n"
-    other_lead_in = "# Features\nPlans:\n- Free tier\n"  # the list is named "Plans"
-    chained_lead_in = "Features:\nPlans:\n- Basic\n- Premium\n"  # the innermost lead-in names it
-    chained_feature_lead_in = "Not offered yet:\nPlanned features:\n- Audit logs\n"
-    other_parent = "## Features\n- Limitations\n  - Manual setup\n"
-    far_above = "# Feature overview\n## Not supported yet\n- Single sign-on\n"
+def test_chained_lead_ins_above_a_list_are_its_context():
+    brief = "Features:\nPlans:\n- Basic\n- Premium\n"
 
-    assert brief_feature_terms(under_heading) == ["Replay", "Signed deliveries"]
-    assert brief_feature_terms(intro_sentence) == ["Replay"]
-    assert brief_feature_terms(under_parent) == ["Replay"]
-    assert brief_feature_terms(other_lead_in) == []
-    assert brief_feature_terms(chained_lead_in) == []
-    assert _texts(chained_lead_in)[0] == ("b1", "Features > Plans", "Basic")  # the context keeps the chain
-    assert brief_feature_terms(chained_feature_lead_in) == ["Audit logs"]
-    # "Limitations" is a feature-list item; what is nested under it is not
-    assert brief_feature_terms(other_parent) == ["Limitations"]
-    assert brief_feature_terms(far_above) == []
-
-
-def test_lists_that_are_not_feature_lists_give_no_terms():
-    brief = "## Not supported yet\n- Single sign-on\n\nWho it is for:\n- Small teams\n"
-
-    assert brief_feature_terms(brief) == []
-
-
-def test_long_items_and_repeats_are_not_terms():
-    brief = (
-        "## Features\n"
-        "- A very long item that describes something in many many words overall\n"
-        "- Replay\n"
-        "- replay\n"
-    )
-
-    assert brief_feature_terms(brief) == ["Replay"]
-
-
-def test_prose_is_never_a_source_of_feature_terms():
-    """The trigger must be predictable from what the founder listed."""
-    brief = "Our product has automatic failover and real-time monitoring as features."
-
-    assert brief_feature_terms(brief) == []
+    assert _texts(brief) == [
+        ("b1", "Features > Plans", "Basic"),
+        ("b2", "Features > Plans", "Premium"),
+    ]

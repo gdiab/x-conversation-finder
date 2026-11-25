@@ -1,8 +1,10 @@
-"""Product name and "Also called" on a watch (issue #12; George's decision of
-2026-11-24 on question (b)), the DRAFT_MODE setting, and worker registration.
+"""Product name, "Also called" and "Key features" on a watch (issue #12;
+George's decisions of 2026-11-24 on question (b) and of 2026-11-25 on
+question (c)), the DRAFT_MODE setting, and worker registration.
 
-The two fields are entered in the Start Watch form, stored on the TopicWatch
-input and passed to each Review. Fake adapters and synthetic data only.
+The three fields are entered in the Start Watch form, stored on the
+TopicWatch input and passed to each Review. Fake adapters and synthetic data
+only.
 """
 
 import asyncio
@@ -71,6 +73,29 @@ def test_names_have_a_length_and_count_limit():
         _request(product_aliases=[f"alias {i}" for i in range(11)])
 
 
+def test_key_features_are_optional_and_cleaned_like_the_aliases():
+    assert _request().key_features == []
+
+    request = _request(key_features=["  Signed   deliveries ", "", "signed deliveries", "Delivery replay"])
+
+    assert request.key_features == ["Signed deliveries", "Delivery replay"]
+
+
+def test_a_key_feature_is_a_short_term_and_a_refused_entry_is_named():
+    six_words = "retries with backoff and jitter built-in"
+    assert _request(key_features=[six_words]).key_features == [six_words]
+
+    with pytest.raises(ValidationError, match=r'at most 6 words \(got 7: "retries with backoff and a dead-letter queue"\)'):
+        _request(key_features=["retries with backoff and a dead-letter queue"])
+    with pytest.raises(ValidationError, match="at most 80 characters"):
+        _request(key_features=["y" * 81])
+    with pytest.raises(ValidationError, match='Key feature "--" has no letter or digit'):
+        _request(key_features=["Replay", "--"])
+    with pytest.raises(ValidationError, match="At most 20 key features"):
+        _request(key_features=[f"feature {i}" for i in range(21)])
+    assert len(_request(key_features=[f"feature {i}" for i in range(20)]).key_features) == 20
+
+
 class _RecordingTemporal:
     def __init__(self, error=None):
         self.started = []
@@ -87,10 +112,11 @@ async def test_start_watch_puts_the_fields_on_the_topic_watch_input(monkeypatch)
     temporal = _RecordingTemporal()
     monkeypatch.setattr(api, "temporal_client", temporal)
 
-    response = await api.start_watch(_request(product_aliases=["Relay"]))
+    response = await api.start_watch(_request(product_aliases=["Relay"], key_features=["Signed deliveries"]))
 
     [(watch_input, workflow_id, task_queue)] = temporal.started
     assert (watch_input.product_name, watch_input.product_aliases) == ("Acme Relay", ["Relay"])
+    assert watch_input.key_features == ["Signed deliveries"]
     assert workflow_id == "watch:founder:reliability" == response.workflow_id
     assert task_queue == "x-conversation-finder"
 
@@ -102,7 +128,7 @@ async def test_starting_a_running_watch_says_its_product_name_was_not_changed(mo
     response = await api.start_watch(_request())
 
     assert "already running" in response.message
-    assert "product name and brief were not changed; stop the watch first" in response.message
+    assert "product name, key features and brief were not changed; stop the watch first" in response.message
 
 
 # ---------- a nudge's response after a removal recorded elsewhere ----------
@@ -252,6 +278,7 @@ async def test_a_watch_with_a_product_name_gives_its_reviews_written_drafts(make
                 make_topic_watch_input(
                     query="reliability distributed systems",
                     product_name="Acme", product_aliases=["Acme Cloud"],
+                    key_features=["Real-time monitoring"],
                 ),
                 id="watch:test:reliability_named", task_queue="test",
             )
@@ -261,11 +288,14 @@ async def test_a_watch_with_a_product_name_gives_its_reviews_written_drafts(make
                 review_input = json.loads(child.input.payloads[0].data)
                 assert review_input["product_name"] == "Acme"
                 assert review_input["product_aliases"] == ["Acme Cloud"]
+                assert review_input["key_features"] == ["Real-time monitoring"]
 
             [card, *_] = await _drafted_cards(1)
             assert card["evidence"]["draft_mode"] == "written"
             assert card["evidence"]["draft"]["mode"] == "written"
             assert card["evidence"]["draft"]["written"]["product_aliases"] == ["Acme Cloud"]
+            # The watch's key features, not the brief's own "Key features:" list
+            assert card["evidence"]["draft"]["written"]["feature_terms"] == ["Real-time monitoring"]
             await handle.signal("stop")
             await handle.result()
 
@@ -299,6 +329,7 @@ async def test_continue_as_new_carries_the_product_name(make_topic_watch_input):
                 make_topic_watch_input(
                     query="reliability distributed systems", continue_as_new_after=1,
                     product_name="Acme", product_aliases=["Acme Cloud"],
+                    key_features=["Real-time monitoring"],
                 ),
                 id="watch:test:reliability_can", task_queue="test",
             )
@@ -319,6 +350,7 @@ async def test_continue_as_new_carries_the_product_name(make_topic_watch_input):
             next_input = json.loads(continued.input.payloads[0].data)
             assert next_input["product_name"] == "Acme"
             assert next_input["product_aliases"] == ["Acme Cloud"]
+            assert next_input["key_features"] == ["Real-time monitoring"]
             await env.client.get_workflow_handle(handle.id).signal("stop")
 
 

@@ -9,16 +9,19 @@ interface StartWatchFormProps {
   onSuccess: () => void;
 }
 
-/** "Relay, AcmeRelay" -> ["Relay", "AcmeRelay"]; blanks and repeats are dropped. */
-export function parseAlsoCalled(value: string): string[] {
-  const names: string[] = [];
+/**
+ * A comma-separated field as a list: "Relay, AcmeRelay" -> ["Relay", "AcmeRelay"].
+ * Blanks and repeats are dropped. Used for "Also called" and "Key features".
+ */
+export function parseCommaList(value: string): string[] {
+  const entries: string[] = [];
   for (const part of value.split(',')) {
-    const name = part.trim().replace(/\s+/g, ' ');
-    if (name && !names.some((n) => n.toLowerCase() === name.toLowerCase())) {
-      names.push(name);
+    const entry = part.trim().replace(/\s+/g, ' ');
+    if (entry && !entries.some((e) => e.toLowerCase() === entry.toLowerCase())) {
+      entries.push(entry);
     }
   }
-  return names;
+  return entries;
 }
 
 export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
@@ -28,6 +31,7 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
   const [productBrief, setProductBrief] = useState('');
   const [productName, setProductName] = useState('');
   const [alsoCalled, setAlsoCalled] = useState('');
+  const [keyFeatures, setKeyFeatures] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -52,7 +56,8 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
         query,
         product_brief: productBrief,
         product_name: productName.trim(),
-        product_aliases: parseAlsoCalled(alsoCalled),
+        product_aliases: parseCommaList(alsoCalled),
+        key_features: parseCommaList(keyFeatures),
       });
       
       setSuccess(result.message);
@@ -148,6 +153,25 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
           <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
             Other names people use for the product, separated by commas. In written drafts, a reply
             sentence that uses the product name or one of these names is checked against your brief.
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="watch-key-features" style={{ display: 'block', marginBottom: '4px' }}>
+            Key features (optional):
+          </label>
+          <input
+            id="watch-key-features"
+            type="text"
+            value={keyFeatures}
+            onChange={(e) => setKeyFeatures(e.target.value)}
+            style={{ width: '100%', padding: '8px' }}
+            placeholder="e.g., Signed deliveries, Delivery replay"
+          />
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            Short names of features your brief describes, separated by commas (at most 6 words each).
+            In written drafts, a reply sentence that uses one of them is checked against your brief.
+            Key features are read only from this field, not from the brief.
           </div>
         </div>
 
