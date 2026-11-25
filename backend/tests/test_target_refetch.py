@@ -668,24 +668,32 @@ async def test_eval_rechecks_a_stale_pending_card_of_a_finished_review(make_revi
 
 
 class QuoteAsIdentifierAgent(QuotingAgent):
-    """A drafting model that puts a post quote where a phrase_id belongs."""
+    """A drafting model that puts a post quote where identifiers belong."""
+
+    def __init__(self, quote):
+        super().__init__()
+        self.quote = quote
 
     async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
         from backend.models import Segment
 
         evidence = await super().draft(evidence, steer, idempotency_key, plan)
-        evidence.draft.segments = [Segment(kind="non_claim", phrase_id=QUESTION)]
+        evidence.draft.segments = [
+            Segment(kind="non_claim", phrase_id=self.quote),
+            Segment(kind="claim", source_passage_id=self.quote, sentence_index=0),
+        ]
         return evidence
 
 
 @pytest.mark.asyncio
-async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_input):
+@pytest.mark.parametrize("quote", [QUESTION, "Struggling"])  # a phrase, and an identifier-shaped word
+async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_input, quote):
     """A gate failure must not carry a model-supplied quote of the post into
     stored errors or the skip reason, where an eval removal could not find it."""
     from backend.target_refetch import refetch_stored_card_target
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
-        async with _worker(env, TargetClient(["found"]), QuoteAsIdentifierAgent()):
+        async with _worker(env, TargetClient(["found"]), QuoteAsIdentifierAgent(quote)):
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
@@ -696,8 +704,8 @@ async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_inp
     stored = _db_card(handle.id)
     for card in (queried, stored):
         assert "Unknown phrase_id" in json.dumps(card)
-        assert QUESTION not in card["skip_reason"]
-        assert QUESTION not in json.dumps(card["evidence"]["draft"])
+        assert quote not in card["skip_reason"]
+        assert quote not in json.dumps(card["evidence"]["draft"])
 
     assert await refetch_stored_card_target(
         TargetClient(["gone"]), handle.id, "run1", review_is_running=_finished
