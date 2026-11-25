@@ -149,6 +149,52 @@ async def test_an_edit_response_withholds_the_text_once_the_post_is_removed(monk
     assert withheld == {"message": "Edited", "new_text": "[removed - post deleted]"}
 
 
+def _rejected_nudge():
+    from temporalio.client import WorkflowUpdateFailedError
+    from temporalio.exceptions import ApplicationError
+
+    return WorkflowUpdateFailedError(ApplicationError(
+        "Nudged draft rejected; the current draft is unchanged: You said 'eventual consistency' bites: no",
+        non_retryable=True,
+    ))
+
+
+def _post_anyway_required():
+    from temporalio.client import WorkflowUpdateFailedError
+    from temporalio.exceptions import ApplicationError
+
+    return WorkflowUpdateFailedError(ApplicationError(
+        "Edited text has 1 failing sentence(s). Set post_anyway=true to approve anyway.",
+        {"gate_state": "failed", "failing_sentences": ["You said 'eventual consistency' bites."]},
+        type="PostAnywayRequired",
+        non_retryable=True,
+    ))
+
+
+def _json(response):
+    return json.loads(response.body)
+
+
+def test_a_refusal_does_not_quote_the_draft_once_the_post_is_removed(monkeypatch):
+    """A rejected nudge names the failing sentence; post_anyway_required lists
+    failing sentences. Both can quote a written draft, which can quote the post."""
+    monkeypatch.setattr(api, "card_post_text_removed", lambda workflow_id: False)
+    nudge = _json(api.review_error_response(_rejected_nudge(), "Nudge", "review:test:1"))
+    approve = _json(api.review_error_response(_post_anyway_required(), "Approve", "review:test:1"))
+    assert "eventual consistency" in nudge["detail"]
+    assert approve["failing_sentences"] == ["You said 'eventual consistency' bites."]
+
+    monkeypatch.setattr(api, "card_post_text_removed", lambda workflow_id: True)
+    nudge = _json(api.review_error_response(_rejected_nudge(), "Nudge", "review:test:1"))
+    approve = _json(api.review_error_response(_post_anyway_required(), "Approve", "review:test:1"))
+
+    assert (nudge["code"], nudge["detail"]) == ("rejected", api.REFUSAL_DETAILS_REMOVED)
+    assert approve["code"] == "post_anyway_required"
+    assert approve["failing_sentences"] == ["[removed - post deleted]"]
+    assert approve["gate_state"] == "failed"
+    assert "eventual consistency" not in json.dumps([nudge, approve])
+
+
 # ---------- TopicWatch passes the fields to each Review ----------
 
 

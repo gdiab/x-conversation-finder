@@ -89,6 +89,16 @@ def test_a_name_without_letters_or_with_symbols_still_fires(name, sentence):
     assert _matches(sentence, TRIGGER_PRODUCT_NAME, name=name, aliases=[]) == [name]
 
 
+def test_a_name_that_is_itself_a_number_does_not_hide_a_quantity():
+    """A product called "One": "one delivery" could be the name or a number,
+    so nothing is exempt. A name with a digit in it ("Relay2") still is."""
+    hits = find_triggers("One retries one delivery.", "One", [], [])
+
+    assert [(h.trigger, h.match) for h in hits] == [(TRIGGER_PRODUCT_NAME, "One"), (TRIGGER_NUMBER, "one")]
+    assert TRIGGER_NUMBER in {h.trigger for h in find_triggers("37 handles that.", "37", [], [])}
+    assert TRIGGER_NUMBER not in {h.trigger for h in find_triggers("Relay2 handles that.", "Relay2", [], [])}
+
+
 def test_clean_names_trims_and_drops_blanks_and_repeats():
     assert clean_names("  Acme   Relay ", [" Relay", "relay", "", "acme relay", "AR"]) == (
         "Acme Relay", ["Relay", "AR"]

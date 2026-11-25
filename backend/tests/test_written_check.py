@@ -332,6 +332,20 @@ def test_one_is_a_number_in_a_claim_too():
     assert 'a number no brief sentence states: "one"' in prepared.structural_failures[0][1]
 
 
+def test_a_product_named_with_a_number_word_still_has_its_numbers_checked():
+    sentences = brief("One retries failed deliveries.", "One keeps five copies.")
+
+    quantity = prepare_check("One retries two deliveries.", sentences, "One")
+    named_only = prepare_check("One retries failed deliveries.", sentences, "One")
+
+    # "two" is in no brief sentence: rejected before the checker call
+    assert not quantity.needs_checker
+    assert 'a number no brief sentence states: "two"' in quantity.structural_failures[0][1]
+    # The name alone is fine: the brief sentences state "One" too
+    assert named_only.needs_checker
+    assert judge(named_only, _verdicts(SUPPORTED_B1)).passed
+
+
 def test_a_triggered_sentence_cannot_be_supported_by_an_empty_brief():
     prepared = prepare_check(CLAIM, [], NAME, ALIASES)
 

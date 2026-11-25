@@ -225,10 +225,19 @@ def find_triggers(
     def inside_name(start: int, end: int) -> bool:
         return any(a <= start and end <= b for a, b in name_spans)
 
+    # A name that is nothing but numbers ("One", "37") cannot be told from a
+    # quantity: "One retries one delivery." Then nothing is exempt, and the
+    # name counts as a number too (the brief sentences that name the product
+    # state it, so the number rule still lets a supported claim pass).
+    numeric_names = {
+        label.casefold() for label in [name, *aliases]
+        if label and all(w in NUMBER_WORDS or w.isdigit() for w in _WORD_RE.findall(_fold(label)) or [""])
+    }
+
     for word, start, end in words:
         if word in FIRST_PERSON_PLURAL:
             add(TRIGGER_FIRST_PERSON_PLURAL, word)
-        if inside_name(start, end):
+        if inside_name(start, end) and not numeric_names:
             continue
         if _DIGIT_RUN_RE.search(word) or word in NUMBER_WORDS:
             add(TRIGGER_NUMBER, word)

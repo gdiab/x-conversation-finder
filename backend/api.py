@@ -139,13 +139,23 @@ def temporal_not_connected() -> JSONResponse:
     return error_response(500, "server_error", "Temporal client not connected")
 
 
-def review_error_response(exc: Exception, action: str) -> JSONResponse:
+# A refusal can quote the draft: a rejected nudge names the failing sentence
+# and the checker's reason, and post_anyway_required lists failing sentences.
+REFUSAL_DETAILS_REMOVED = "The request was refused. Its details were removed with the post."
+
+
+def review_error_response(exc: Exception, action: str, workflow_id: Optional[str] = None) -> JSONResponse:
     """Map an exception from a Review update, signal or query to a response.
 
     A rejected update (validator or handler) is a WorkflowUpdateFailedError
     whose str() is only "Workflow update failed"; the reason is its cause.
     Only failures that are not the Review's own decision (an activity that
     failed, Temporal unreachable) are 500s.
+
+    With `workflow_id`, a refusal that can quote the draft ("rejected",
+    "post_anyway_required") is returned without those quotes once the stored
+    card records that the post was removed (issue #12; the same rule as the
+    edit and nudge success responses).
     """
     cause = exc.cause if isinstance(exc, WorkflowUpdateFailedError) else None
     # An activity can refuse on purpose too: draft_reply refuses to redraft
@@ -167,7 +177,13 @@ def review_error_response(exc: Exception, action: str) -> JSONResponse:
                 "gate_state": details.get("gate_state"),
                 "failing_sentences": list(details.get("failing_sentences") or []),
             }
-        return error_response(status_code, code, cause.message, **extra)
+        detail = cause.message
+        if code in ("rejected", "post_anyway_required") and workflow_id and card_post_text_removed(workflow_id):
+            if code == "rejected":
+                detail = REFUSAL_DETAILS_REMOVED
+            if "failing_sentences" in extra:
+                extra["failing_sentences"] = [POST_TEXT_REMOVED for _ in extra["failing_sentences"]]
+        return error_response(status_code, code, detail, **extra)
     if isinstance(exc, RPCError) and exc.status == RPCStatusCode.NOT_FOUND:
         # No such workflow, or (for updates and signals) it has already ended
         return error_response(404, "not_found", f"Review not found or no longer running: {exc.message}")
@@ -368,7 +384,7 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         return {"message": result}
 
     except Exception as e:
-        return review_error_response(e, "Approve")
+        return review_error_response(e, "Approve", workflow_id)
 
 
 @app.post("/api/reviews/{workflow_id}/skip")
@@ -412,7 +428,7 @@ async def edit_review(workflow_id: str, request: EditRequest):
         return {"message": "Edited", "new_text": result}
     
     except Exception as e:
-        return review_error_response(e, "Edit")
+        return review_error_response(e, "Edit", workflow_id)
 
 
 @app.post("/api/reviews/{workflow_id}/nudge")
@@ -439,7 +455,7 @@ async def nudge_review(workflow_id: str, request: NudgeRequest):
         return {"message": "Nudged", "new_draft": result}
     
     except Exception as e:
-        return review_error_response(e, "Nudge")
+        return review_error_response(e, "Nudge", workflow_id)
 
 
 @app.get("/api/reviews/{workflow_id}")
@@ -482,7 +498,7 @@ async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest)
         return {"message": "Confirmed", "result": result}
     
     except Exception as e:
-        return review_error_response(e, "Confirm posted")
+        return review_error_response(e, "Confirm posted", workflow_id)
 
 
 @app.get("/api/budget")
