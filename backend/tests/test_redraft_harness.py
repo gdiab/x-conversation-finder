@@ -908,6 +908,12 @@ def test_the_script_never_writes_through_a_symlink_or_over_the_database(tmp_path
             redraft_harness.safe_write(hard, "{}")
     finally:
         redraft_harness.PROTECTED.remove(db.resolve())
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("synthetic tracked file")
+    os.link(tracked, tmp_path / "out" / "linked.json")
+    with pytest.raises(SystemExit):
+        redraft_harness.safe_write(tmp_path / "out" / "linked.json", "{}")
+    assert tracked.read_text() == "synthetic tracked file"
     assert db.read_text() == "synthetic database"
     redraft_harness.safe_write(tmp_path / "out" / "summary.md", "ok")  # outside a repo: allowed
     assert (tmp_path / "out" / "summary.md").read_text() == "ok"

@@ -76,6 +76,9 @@ def safe_write(path: Path, text: str) -> None:
     path = Path(path)
     if path.is_symlink():
         sys.exit(f"Refusing to write {path}: it is a symlink")
+    if path.exists() and path.stat().st_nlink > 1:
+        # Writing would change every other name of the file, tracked or not
+        sys.exit(f"Refusing to write {path}: it has other hard links")
     resolved = path.resolve()
     if any(resolved == p or (path.exists() and p.exists() and os.path.samefile(path, p)) for p in PROTECTED):
         # samefile: a hard link to the database resolves to another path
@@ -235,8 +238,11 @@ async def run(args) -> None:
         # Also when the run failed: no cached plan of a removed post is kept,
         # and earlier reports get the removals recorded since they were written
         prune_removed_plans(plans, is_removed)
-        safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))
-        swept = sweep_earlier_reports(out_root, is_removed)
+        try:
+            safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))
+        finally:
+            # Also when the cache could not be written
+            swept = sweep_earlier_reports(out_root, is_removed)
     # A removal recorded while the earlier reports were swept: apply it to
     # this run's records too, right before they are written
     apply_removals(records, plans, is_removed, excluded)
