@@ -172,6 +172,74 @@ def _parse_plan(result: object) -> dict:
 
 # --- Written drafts (issue #12; ADR-0006 amendment 2026-11-24) ---
 
+def written_product_rule(name: str, mention_product: bool) -> str:
+    """The product rule of the written drafter's prompt (issue #29).
+
+    The first live run (2026-11-25) broke it in two ways: a second sentence
+    described the product through "it", so the checker counted two product
+    claims, and the product sentence paraphrased the brief into qualities it
+    does not state ("streamlines management"). The rule names both.
+    """
+    if not mention_product:
+        return (
+            f"- Do not mention {name}, and say nothing about it or about what \"we\" do: the plan says\n"
+            f"  not to mention the product. No sentence may describe, hint at or refer to {name}, also\n"
+            "  not through \"it\", \"this\", \"that tool\" or \"the platform\"."
+        )
+    return (
+        f"- The product sentence: exactly one sentence is about {name}. Everything the reply says\n"
+        f"  about {name} or its makers goes in that one sentence. No other sentence may describe,\n"
+        f"  hint at or refer back to {name}, also not through \"it\", \"this\", \"that tool\", \"they\"\n"
+        "  or \"the platform\": the check counts each such sentence as a second product claim, and\n"
+        "  the reply fails.\n"
+        "- Write the product sentence close to the wording of one or two brief sentences, and cite\n"
+        "  them in \"support\": start from a brief sentence's text and change as few words as the\n"
+        "  reply needs. You may shorten it, fit the grammar to the reply, and write \"we\"\n"
+        f"  or \"our\" for {name}. Read the heading or list a brief sentence stands under: one under\n"
+        f"  a heading such as \"Not supported\" or \"What it is not\" says what {name} does not do or\n"
+        "  is not, and never supports the opposite. Do not add a quality, benefit, outcome, number,\n"
+        "  comparison, customer or integration that the cited sentences do not state (not \"streamlines\",\n"
+        "  \"easily\", \"seamlessly\", \"efficiently\", \"saves time\" unless the brief says so). Do not\n"
+        "  drop or change a qualifier, limit, condition or modal (can, may, will, always, never),\n"
+        "  and do not move what the brief says about one feature to another. If a brief sentence\n"
+        "  does not fit the post as it stands, say less, not something else. It must be a\n"
+        "  statement, not a question."
+    )
+
+
+def written_check_failures_for_prompt(draft: Optional[Draft]) -> str:
+    """The previous draft's failed check, for a redraft prompt (issue #29).
+
+    The Review workflow's steer cuts each failed sentence to 50 characters,
+    and the steer string is recorded in workflow history, so it stays as it
+    is. The full sentences and reasons are on the previous draft
+    (sentence_checks, plan_conformance_failures), which the drafter is sent
+    anyway; this lists them. Empty when there is no failed written check.
+    """
+    if draft is None or draft.mode != DRAFT_MODE_WRITTEN or draft.claim_gate.passed:
+        return ""
+    lines = []
+    for check in draft.sentence_checks or []:
+        if not getattr(check, "passed", True):
+            lines.append(f"- \"{check.sentence}\": {check.reason}")
+    for reason in draft.plan_conformance_failures or []:
+        lines.append(f"- The reply as a whole: {reason}")
+    if not lines:
+        reasoning = draft.claim_gate.reasoning
+        if not reasoning:
+            return ""
+        lines.append(f"- {reasoning}")
+    return (
+        "\n\nThe previous draft failed the product-claim check:\n"
+        + "\n".join(lines)
+        + "\nRewrite it so that it follows the rules above. In particular: at most one sentence is about\n"
+        "the product, no other sentence refers to it (also not through \"it\" or \"this\") or says in\n"
+        "general what a tool or approach does, and the product sentence says only what its cited\n"
+        "brief sentences say, in words close to theirs. If no brief sentence supports what a failed\n"
+        "sentence says, drop that claim instead of rewording it."
+    )
+
+
 def build_written_draft_prompt(request: WrittenDraftRequest) -> str:
     """The written drafter's prompt: the post, the plan and the numbered brief."""
     name = request.product_name
@@ -183,24 +251,14 @@ def build_written_draft_prompt(request: WrittenDraftRequest) -> str:
     if request.feature_terms:
         terms = "; or use any of these key features: " + ", ".join(request.feature_terms)
 
-    if request.plan.mention_product:
-        product_rule = (
-            f"- Exactly one sentence says something about {name} (you may write \"we\" or \"our\").\n"
-            "  It must say only what the brief sentences state. You may rephrase, but do not add, drop\n"
-            "  or change a number, qualifier, limit, condition, modal (can, may, will, always, never),\n"
-            "  comparison, customer or integration, and do not move what the brief says about one\n"
-            "  feature to another. It must be a statement, not a question."
-        )
-    else:
-        product_rule = (
-            f"- Do not mention {name}, and say nothing about it or about what \"we\" do: the plan says\n"
-            "  not to mention the product."
-        )
+    product_rule = written_product_rule(name, request.plan.mention_product)
 
     previous = ""
+    failures = ""
     current = request.evidence.draft
     if request.steer and current and current.text:
         previous = f"\n\nPrevious draft (rewrite it, do not start over):\n{current.text}"
+        failures = written_check_failures_for_prompt(current)
     steer_text = f"\n\nAdditional instruction: {request.steer}" if request.steer else ""
 
     return f"""{format_plan_for_prompt(request.plan)}
@@ -219,19 +277,26 @@ stands under in parentheses, then the text):
 {brief}
 
 Rules:
-- At most {MAX_SENTENCES} sentences and at most {MAX_CHARS} characters in total. Plain text: no
-  hashtags, links or emoji.
+- At most {MAX_SENTENCES} sentences and at most {MAX_CHARS} characters in total; aim for 2 sentences
+  and under 220 characters. Plain text: no hashtags, links or emoji.
 - Respond to the plan's target point in your own words: agree or disagree with it, add an
   observation, answer it, or ask one specific question about the poster's own situation. Do
   not open with a greeting or with thanks, and do not repeat the post back.
 {product_rule}
-- Every other sentence must not: name {name}; use "we", "our", "us" or "ours"; contain a
-  number (a digit, or a number word such as "one", "two", "first", "second", "half" or
+- Every other sentence is about the post and the poster, not about {name}: what they said,
+  their setup, their problem ("you", "your ..."). Name what you refer to; do not start a
+  sentence with "It", "This", "That" or "They". Do not say in general what a tool, setup,
+  approach or practice does or achieves ("X can streamline Y", "a solid setup is crucial for
+  Z"): the check reads such a sentence as a claim about {name}, and it fails. For the same
+  reason, do not use the words the brief uses for what {name} is or is not (the kind of tool,
+  its category) in those sentences.
+- Those other sentences also must not: name {name}; use "we", "our", "us" or "ours"; contain
+  a number (a digit, or a number word such as "one", "two", "first", "second", "half" or
   "twice", also in "which one", "no one" or "First, ..."); compare things (than, vs, better,
   faster, cheaper, same as){terms}. Code checks any such sentence as a product claim, and it
   fails.
 - Write each sentence on its own, with a space after its end. No ellipses, and no line breaks.
-- Never state something about {name} that the brief sentences do not state.{previous}{steer_text}
+- Never state something about {name} that the brief sentences do not state.{previous}{failures}{steer_text}
 
 Return a JSON object with two keys:
 - "reply": the reply text.

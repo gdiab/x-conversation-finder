@@ -141,7 +141,7 @@ def test_the_prompt_shows_the_post_the_plan_and_the_numbered_brief(sample_post):
     assert "[b7] (Acme Relay > Key features) Signed deliveries" in prompt
     assert "founder of Acme Relay (also called Relay)" in prompt
     assert "At most 3 sentences and at most 280 characters" in prompt
-    assert "Exactly one sentence says something about Acme Relay" in prompt
+    assert "exactly one sentence is about Acme Relay" in prompt
     assert "key features: Signed deliveries, Delivery replay" in prompt
     assert '"support"' in prompt
 
@@ -150,7 +150,10 @@ def test_the_prompt_follows_a_plan_that_does_not_mention_the_product(sample_post
     prompt = build_written_draft_prompt(_request(sample_post, plan=NO_MENTION))
 
     assert "Do not mention Acme Relay" in prompt
-    assert "Exactly one sentence says something about" not in prompt
+    assert "exactly one sentence is about" not in prompt
+    assert "The product sentence" not in prompt
+    # A pronoun is a mention too
+    assert 'not through "it", "this"' in prompt
 
 
 def test_a_steer_shows_the_previous_draft_and_the_instruction(sample_post):
@@ -162,6 +165,116 @@ def test_a_steer_shows_the_previous_draft_and_the_instruction(sample_post):
 
     assert "Previous draft (rewrite it, do not start over):\nAn earlier synthetic draft." in prompt
     assert "Additional instruction: Make it shorter" in prompt
+
+
+# ---------- issue #29: the one-claim rule and the redraft steer ----------
+
+
+def test_the_prompt_puts_every_product_statement_in_one_sentence(sample_post):
+    """The first live run's drafts described the product in a second sentence
+    through "it"; the checker counted it as a second product claim."""
+    prompt = build_written_draft_prompt(_request(sample_post))
+
+    assert "exactly one sentence is about Acme Relay" in prompt
+    assert "Everything the reply says\n  about Acme Relay or its makers goes in that one sentence" in prompt
+    assert 'also not through "it", "this", "that tool", "they"' in prompt
+    assert "counts each such sentence as a second product claim" in prompt
+    assert "Every other sentence is about the post and the poster, not about Acme Relay" in prompt
+    # The checker reads a general statement about what a tool does as a product claim
+    assert 'do not start a\n  sentence with "It", "This", "That" or "They"' in prompt
+    assert "Do not say in general what a tool, setup,\n  approach or practice does or achieves" in prompt
+    assert "do not use the words the brief uses for what Acme Relay is or is not" in prompt
+
+
+def test_the_prompt_keeps_the_product_sentence_close_to_the_brief(sample_post):
+    """The first live run's drafts added qualities the brief does not state."""
+    prompt = build_written_draft_prompt(_request(sample_post))
+
+    assert "close to the wording of one or two brief sentences" in prompt
+    assert "start from a brief sentence's text and change as few words as the\n  reply needs" in prompt
+    # A brief sentence under a negating heading never supports the opposite claim
+    assert "is not, and never supports the opposite" in prompt
+    assert "Do not add a quality, benefit, outcome, number,\n  comparison, customer or integration" in prompt
+    assert '"streamlines"' in prompt
+    assert "say less, not something else" in prompt
+    assert "It must be a\n  statement, not a question." in prompt
+
+
+def _failed_written_evidence():
+    from backend.models import ClaimGateResult, Draft
+    from backend.models.written import SentenceCheck
+
+    evidence = _evidence()
+    evidence.draft = Draft(
+        text="Retries matter. Relay retries forever and it makes queues painless.",
+        segments=[], mode="written",
+        claim_gate=ClaimGateResult(
+            passed=False, segments=[],
+            failed_sentences=[["Relay retries forever and it makes queues painless.", "synthetic reason"]],
+            reasoning="1 failure(s)",
+        ),
+        sentence_checks=[
+            SentenceCheck(sentence="Retries matter.", passed=True, kind="non_claim", verdict="not_a_product_claim"),
+            SentenceCheck(
+                sentence="Relay retries forever and it makes queues painless.", passed=False, kind="claim",
+                reason="The brief does not state that retries are unlimited.", verdict="unsupported",
+            ),
+        ],
+        plan_conformance_failures=["the reply plan says to mention the product, but the draft has no product claim"],
+        steers_applied=[],
+    )
+    return evidence
+
+
+def test_a_redraft_after_a_failed_check_restates_the_rules_with_the_whole_failed_sentence(sample_post):
+    """The workflow's steer cuts each failed sentence to 50 characters; the
+    redraft prompt lists the whole sentence, its reason and the rules."""
+    steer = "Previous draft failed claim gate. Fix these issues: 'Relay retries forever and it makes queues painl...': x"
+    prompt = build_written_draft_prompt(_request(sample_post, steer=steer, evidence=_failed_written_evidence()))
+
+    assert "The previous draft failed the product-claim check:" in prompt
+    assert (
+        '- "Relay retries forever and it makes queues painless.": '
+        "The brief does not state that retries are unlimited."
+    ) in prompt
+    assert "- The reply as a whole: the reply plan says to mention the product" in prompt
+    # The passing sentence is not listed as a failure
+    assert '- "Retries matter."' not in prompt
+    assert "at most one sentence is about\nthe product" in prompt
+    assert "drop that claim instead of rewording it" in prompt
+    assert "or says in\ngeneral what a tool or approach does" in prompt
+    # The workflow's steer, recorded in history, is still shown as it was
+    assert f"Additional instruction: {steer}" in prompt
+    # The product rule itself is in the prompt too
+    assert "exactly one sentence is about Acme Relay" in prompt
+
+
+def test_a_nudge_of_a_passing_draft_lists_no_failures(sample_post):
+    prompt = build_written_draft_prompt(
+        _request(sample_post, steer="Make it shorter", evidence=FakeEvidenceWithDraft.build())
+    )
+
+    assert "failed the product-claim check" not in prompt
+
+
+def test_a_failed_check_without_sentence_reasons_shows_its_reasoning(sample_post):
+    evidence = _failed_written_evidence()
+    evidence.draft.sentence_checks = []
+    evidence.draft.plan_conformance_failures = []
+    evidence.draft.claim_gate.reasoning = "The reply has 4 sentences; the limit is 3."
+
+    prompt = build_written_draft_prompt(_request(sample_post, steer="x", evidence=evidence))
+
+    assert "failed the product-claim check:\n- The reply has 4 sentences; the limit is 3." in prompt
+
+
+def test_an_assembled_previous_draft_lists_no_written_failures(sample_post):
+    evidence = _failed_written_evidence()
+    evidence.draft.mode = "assembled"
+
+    prompt = build_written_draft_prompt(_request(sample_post, steer="x", evidence=evidence))
+
+    assert "failed the product-claim check" not in prompt
 
 
 class FakeEvidenceWithDraft:

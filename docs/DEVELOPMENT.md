@@ -115,6 +115,7 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `test_written_switch_criteria.py`: The written-draft switch criteria (ADR-0006, 2026-11-24 amendment) on `fixtures/written_switch_criteria.json`: every must-REJECT case with the answer a correct checker must give. See "Draft modes" below for what these tests prove and what only a live model run can
 - `test_written_check.py`, `test_written_triggers.py`, `test_brief_sentences.py`: The code side of the written-draft check: verdict rules, triggers (with the watch's key features) and brief sentences
 - `test_written_workflow.py`: Written drafts through the Review workflow (redraft, skip, edit, nudge, removal) and replay of the histories recorded before written drafts
+- `test_redraft_harness.py`: The offline redraft harness (issue #29) with fake adapters: no X calls, the database left unchanged, the workflow's redraft steps, the spend cap, and a summary without text
 
 ## Using the System
 
@@ -191,6 +192,28 @@ A failed draft is redrafted with the reasons, then the post is skipped as "not e
 **What the tests prove, and what they cannot.** `test_written_switch_criteria.py` runs every must-REJECT case with a fake checker that returns the answer a correct checker must give. That proves the code side: which sentences the triggers force into the check, that a forced sentence is rejected unless the checker cites brief sentences that exist, and which cases code rejects with no checker call. It does not prove that the real model returns the correct answer. Of the 24 must-REJECT cases, code alone rejects 6 before the checker is asked (questions that make a product claim, and numbers no brief sentence states); the other 18 are rejected only if the checker judges entailment correctly, and a wrong `supported` with a real citation would pass them. Measuring that needs a live run on the real model: the blind comparison of `assembled` against `written` on stored evidence (switch criterion 3), which is not built or run yet. The `FakeClaimChecker` used with fake adapters accepts only a brief sentence word for word that does not stand under a negating heading; it is a stand-in, not a paraphrase checker.
 
 Switch criterion 1 covers the 2026-11-21 cases that make a product claim. The five that make none (for example 'I like the idea.') are allowed by design: they are outside the claim gate, and founder review catches their tone (George's decision of 2026-11-25, at the end of the ADR amendment). The test file pins both groups.
+
+**The writer prompt (issue #29).** The first live run (2026-11-25) failed in two ways: a second sentence described the product through "it", so two sentences counted as product claims, and the product sentence paraphrased the brief into qualities it does not state. The written drafter's prompt (`build_written_draft_prompt` in `backend/adapters/plain_reply_agent.py`) now says that everything about the product goes in one sentence, written close to the wording of the cited brief sentences, and that every other sentence is about the poster and does not say in general what a tool or approach does (the checker reads such a sentence as about the product). A redraft after a failed check also lists each failed sentence in full with its reason and restates these rules. The workflow's steer, recorded in history, is unchanged; the prompt reads the failed check from the previous draft.
+
+### Redraft harness (issue #29)
+
+`scripts/redraft_harness.py` measures writer-prompt changes on stored evidence. It runs the written path of a Review (draft, check, one redraft with the workflow's steer, check) against the real model on the cards in a local database. It never searches X, opens the database read-only, changes no card, and does not write the app's budget ledger; its own `--max-cost` cap (default $0.25 per run) refuses a call whose worst-case cost would pass it.
+
+Cards do not store the brief, product name, other names or key features, so export them first from each watch's start input in Temporal (read-only). Run both commands from the checkout that holds your `.env` (the OpenAI key and model come from the app's settings), with the script of the code you want to measure:
+
+```bash
+python <repo>/scripts/redraft_harness.py export-settings \
+  --workflow-id "watch:<account>:<topic>" --out <repo>/eval-out/watch-settings.json
+python <repo>/scripts/redraft_harness.py run --db x_conversation_finder.db \
+  --settings <repo>/eval-out/watch-settings.json --out-root <repo>/eval-out/redraft \
+  --label before --samples 3
+```
+
+- **Which cards.** Cards that reached drafting (a draft or a reply plan). Cards whose post text was removed are left out. A card stored before the plan step has no plan: the harness plans it once and caches the plan in `<out-root>/plans.json` (an invalid plan too), so runs with different labels draft the same posts under the same plans.
+- **Output.** `<out-root>/<label>/report.json` has every draft, sentence, trigger, verdict and reason; `summary.md` has the aggregate numbers only (pass rates, failure kinds, product-claim sentences per draft, calls, tokens, cost) and is what goes into a pull request. The report holds real post and brief text: the script refuses an output path inside a git work tree that git does not ignore (`eval-out/` is ignored).
+- **Samples.** The drafter runs at temperature 0.7, so one run per post is noisy; `--samples 3` runs the written path three times per post. With `gpt-4o-mini` a sample of 21 posts costs about $0.02.
+
+The harness is the first piece of switch criterion 3 (the blind comparison of `assembled` against `written` on stored evidence); the comparison and its scoring are not built yet.
 
 ### Post removal (ADR-0006, issue #9)
 

@@ -368,3 +368,24 @@ def test_the_script_refuses_an_output_path_git_would_track(tmp_path):
     redraft_harness.ensure_ignored(tmp_path / "outside" / "report.json")  # not in a repo: allowed
     with pytest.raises(SystemExit):
         redraft_harness.ensure_ignored(repo / "reports" / "report.json")
+
+
+@pytest.mark.asyncio
+async def test_a_plan_invalid_twice_is_cached_so_later_runs_leave_the_post_out(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"))
+
+    class BadPlanner(ScriptedAgent):
+        async def plan(self, post, evidence, idempotency_key, feedback=None):
+            self.plans += 1
+            return dataclasses.replace(PLAN, target_point="not in the post")
+
+    plans = {}
+    agent = BadPlanner()
+    first, _, _ = await run_harness(reviews[:1], SETTINGS, agent, CountingChecker(), plans=plans, max_attempts=2, samples=2)
+    again, _, _ = await run_harness(reviews[:1], SETTINGS, agent, CountingChecker(), plans=plans, max_attempts=2)
+
+    assert [r.outcome for r in first] == ["plan_invalid"]  # once, not per sample
+    assert agent.plans == 2  # the request and its one re-request; the second run asks nothing
+    assert list(plans["review:t:2001"]) == ["invalid"]
+    assert [(r.plan_source, r.outcome) for r in again] == [("invalid", "plan_invalid")]
+    assert agent.requests == []

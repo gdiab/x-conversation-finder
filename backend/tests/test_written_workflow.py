@@ -38,6 +38,7 @@ from backend.activities.store_activities import (
 )
 from backend.activities.written_check_activities import WrittenCheckActivities
 from backend.activities.x_activities import XActivities
+from backend.adapters.plain_reply_agent import build_written_draft_prompt
 from backend.adapters import FakeClaimChecker, FakeReplyAgent, FakeXClient
 from backend.models import ReplyPlan
 from backend.planning import NO_PRODUCT_NAME_NOTE
@@ -79,6 +80,7 @@ class WritingAgent(FakeReplyAgent):
         self._plans = list(plans or [])
         self.requests = []
         self.previous_texts = []  # the draft each request asked to rewrite, if any
+        self.prompts = []  # the prompt the plain adapter would send for each request
         self.assembled_calls = 0
 
     async def plan(self, post, evidence, idempotency_key, feedback=None):
@@ -94,6 +96,7 @@ class WritingAgent(FakeReplyAgent):
         self.requests.append(request)
         # Read now: the call below replaces request.evidence.draft
         self.previous_texts.append(request.evidence.draft.text if request.evidence.draft else None)
+        self.prompts.append(build_written_draft_prompt(request))
         evidence = await super().draft_written(request, idempotency_key)
         if self._texts:
             evidence.draft.text = self._texts.pop(0)
@@ -274,6 +277,12 @@ async def test_a_failed_check_is_redrafted_once_with_the_reasons(make_review_inp
     assert "Checked as a product claim (uses we/our/us/ours" in second.steer
     assert "The brief does not support it" in second.steer
     assert agent.previous_texts == [None, UNSUPPORTED_DRAFT]  # the drafter is shown what failed
+    # Issue #29: the redraft prompt lists the whole failed sentence with its
+    # reason (the steer cuts it to 50 characters) and restates the rules
+    assert "failed the product-claim check" not in agent.prompts[0]
+    assert f'- "{UNSUPPORTED_CLAIM}": Checked as a product claim' in agent.prompts[1]
+    assert f'- "{OPENER}"' not in agent.prompts[1]
+    assert "at most one sentence is about\nthe product" in agent.prompts[1]
     assert len(checker.requests) == 2
     assert card["evidence"]["draft"]["steers_applied"] == [second.steer]
 

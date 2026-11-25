@@ -312,13 +312,17 @@ async def plan_for(
     (issue #5) has none: a cached plan from an earlier harness run is reused,
     so runs before and after a prompt change draft under the same plan.
     Otherwise the agent plans it as the plan_reply activity would (validated
-    in code, one re-request with the errors), and a valid plan is cached.
+    in code, one re-request with the errors), and the plan is cached; a plan
+    invalid twice is cached as {"invalid": [errors]}, and the post is left
+    out of every run that uses the cache.
     """
     evidence = review.evidence
     if evidence.reply_plan is not None and not evidence.reply_plan_errors:
         return evidence.reply_plan, "stored"
     cached = plans.get(review.workflow_id)
     if isinstance(cached, dict):
+        if "invalid" in cached:
+            return None, "invalid"
         return value_to_type(ReplyPlan, cached), "cached"
     feedback: Optional[List[str]] = None
     for attempt in range(1, REPLY_PLAN_MAX_ATTEMPTS + 1):
@@ -335,6 +339,8 @@ async def plan_for(
             plans[review.workflow_id] = asdict(plan)
             return plan, "planned"
         feedback = list(errors)
+    # Cached too, so that every run with this cache covers the same posts
+    plans[review.workflow_id] = {"invalid": feedback or []}
     return None, "invalid"
 
 
