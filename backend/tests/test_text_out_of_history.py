@@ -500,7 +500,7 @@ def test_a_late_attempt_cannot_overwrite_what_a_later_step_wrote(make_review_inp
     post_id = review_input.post_id
 
     def write_as(seq, attempt, value):
-        with mock.patch.object(review_docs, "current_writer", return_value=(seq, attempt)):
+        with mock.patch.object(review_docs, "current_writer", return_value=("run1", seq, attempt)):
             review_docs.save_doc("review:test:late", post_id, "evidence", value)
 
     write_as(1, 1, "research, first attempt")
@@ -513,7 +513,7 @@ def test_a_late_attempt_cannot_overwrite_what_a_later_step_wrote(make_review_inp
     db = get_db()
     try:
         row = db.get(ReviewDocDB, ("review:test:late", "evidence"))
-        assert (row.writer_seq, row.writer_attempt) == (2, 2)
+        assert (row.writer_run, row.writer_seq, row.writer_attempt) == ("run1", 2, 2)
     finally:
         db.close()
 
@@ -583,10 +583,45 @@ def test_a_late_follow_up_write_is_dropped(make_review_input):
     db.close()
 
     def write_as(attempt, replies):
-        with mock.patch.object(review_docs, "current_writer", return_value=(9, attempt)):
+        with mock.patch.object(review_docs, "current_writer", return_value=("run1", 9, attempt)):
             _update_card_sync(UpdateCardInput(workflow_id=wid, idempotency_key="k",
                                               followup_replies=replies, writer_slot="followup"))
 
     write_as(2, [{"id": "2", "text": "newer"}])
     write_as(1, [{"id": "1", "text": "older"}])  # the late first attempt
     assert get_stored_card(wid)["followup_replies"] == [{"id": "2", "text": "newer"}]
+
+
+@pytest.mark.asyncio
+async def test_a_review_started_again_under_the_same_id_is_not_blocked_by_the_earlier_run(make_review_input):
+    """A restarted watch finds the post again and starts its Review under the
+    same workflow id once the first run closed. The new run's activity ids
+    start again at 1; its writes must not be dropped as late attempts of the
+    earlier run (review round 6)."""
+    from backend.database import ReviewDocDB, get_db
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, x_client=MarkerXClient(), draft_mode="assembled"):
+            review_input = make_review_input(post=marker_post())
+            wid = f"review:test:{review_input.post_id}_rerun_23"
+            first = await env.client.start_workflow(ReviewWorkflow.run, review_input, id=wid, task_queue="test")
+            await wait_for_card_ready(first)
+            await first.execute_update("edit", args=["What is your stack?", str(uuid.uuid4())])
+            await first.signal("skip", args=["Not now", str(uuid.uuid4())])
+            assert await first.result() == "skipped"
+
+            second = await env.client.start_workflow(ReviewWorkflow.run, review_input, id=wid, task_queue="test")
+            card = await wait_for_card_ready(second)
+            assert second.result_run_id != first.result_run_id
+            assert card["status"] == "pending"
+            # The new run's draft, not the first run's edit
+            assert card["evidence"]["draft"]["text"] != "What is your stack?"
+            state = await second.query("get_card")
+            assert state["draft_sha256"] == text_digest(card["evidence"]["draft"]["text"])
+            db = get_db()
+            try:
+                runs = {r.writer_run for r in db.query(ReviewDocDB).filter(ReviewDocDB.workflow_id == wid)
+                        if r.writer_run}
+            finally:
+                db.close()
+            assert runs == {second.result_run_id}

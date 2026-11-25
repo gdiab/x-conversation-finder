@@ -178,6 +178,9 @@ class ReplyActivities:
         )
         
         if text_free:
+            # The run's first write: an earlier run of this workflow id (a
+            # Review started again by a restarted watch) leaves no documents
+            review_docs.clear_earlier_runs(activity.info().workflow_id)
             review_docs.save_doc(
                 activity.info().workflow_id, post.id, review_docs.EVIDENCE_SLOT, evidence
             )

@@ -79,6 +79,10 @@ class ReviewDocDB(Base):
     # activities in scheduling order) and attempt. A late attempt (a
     # timed-out one whose thread finished after its retry) or an earlier
     # step cannot overwrite what a later one wrote. None outside an activity.
+    # Ordering holds within one workflow run: a Review started again under
+    # the same workflow id (a restarted watch) is a new run, and its first
+    # activity clears the earlier run's documents.
+    writer_run = Column(String, nullable=True)
     writer_seq = Column(Integer, nullable=True)
     writer_attempt = Column(Integer, nullable=True)
 

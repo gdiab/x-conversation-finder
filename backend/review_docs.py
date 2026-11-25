@@ -294,8 +294,8 @@ def find_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T]) -> O
 
 
 def current_writer() -> Optional[tuple]:
-    """(activity id, attempt) of the running activity, or None outside one
-    (the API) or when the id is not a number."""
+    """(workflow run id, activity id, attempt) of the running activity, or
+    None outside one (the API) or when the id is not a number."""
     from temporalio import activity
 
     try:
@@ -303,18 +303,48 @@ def current_writer() -> Optional[tuple]:
     except RuntimeError:
         return None
     try:
-        return int(info.activity_id), int(info.attempt)
+        return info.workflow_run_id, int(info.activity_id), int(info.attempt)
     except (TypeError, ValueError):
         return None
 
 
 def written_later(row, writer: Optional[tuple]) -> bool:
-    """Whether `row` was written by a later step, or a later attempt of the
-    same step, than `writer`: then `writer` is a late attempt (its retry has
-    finished and the workflow moved on), and its write is dropped."""
+    """Whether `row` was written, in the same workflow run, by a later step
+    or a later attempt of the same step than `writer`: then `writer` is a
+    late attempt (its retry has finished and the workflow moved on), and its
+    write is dropped. A row from another run never blocks a write."""
     if row is None or writer is None or row.writer_seq is None:
         return False
-    return (row.writer_seq, row.writer_attempt or 0) > writer
+    if row.writer_run != writer[0]:
+        return False
+    return (row.writer_seq, row.writer_attempt or 0) > (writer[1], writer[2])
+
+
+def _writer_fields(writer: Optional[tuple]) -> dict:
+    if writer is None:
+        return {"writer_run": None, "writer_seq": None, "writer_attempt": None}
+    return {"writer_run": writer[0], "writer_seq": writer[1], "writer_attempt": writer[2]}
+
+
+@_text_safe
+def clear_earlier_runs(workflow_id: str) -> None:
+    """Delete the documents an earlier run of this workflow id wrote (a
+    Review started again by a restarted watch). Called by the run's first
+    activity (research_post), before it writes."""
+    writer = current_writer()
+    if writer is None:
+        return
+    db = get_db()
+    try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))
+        db.query(ReviewDocDB).filter(
+            ReviewDocDB.workflow_id == workflow_id,
+            ReviewDocDB.writer_run.isnot(None),
+            ReviewDocDB.writer_run != writer[0],
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
 
 
 def doc_written_later(db, workflow_id: str, slot: str, writer: Optional[tuple] = None) -> bool:
@@ -332,7 +362,7 @@ def claim_write(db, workflow_id: str, post_id: str, slot: str) -> bool:
         return False
     db.merge(ReviewDocDB(
         workflow_id=workflow_id, slot=slot, post_id=post_id, data={}, updated_at=_now(),
-        writer_seq=writer[0] if writer else None, writer_attempt=writer[1] if writer else None,
+        **_writer_fields(writer),
     ))
     return True
 
@@ -376,7 +406,7 @@ def save_doc_in(db, workflow_id: str, post_id: str, slot: str, value: Any) -> bo
         return False
     db.merge(ReviewDocDB(
         workflow_id=workflow_id, slot=slot, post_id=post_id, data=to_json(value), updated_at=_now(),
-        writer_seq=writer[0] if writer else None, writer_attempt=writer[1] if writer else None,
+        **_writer_fields(writer),
     ))
     return True
 
