@@ -88,9 +88,23 @@ class CardWrites:
 
         await asyncio.wait_for(_wait(), WAIT_TIMEOUT_SEC)
 
-    async def wait_for_pending(self, workflow_id: str) -> None:
-        """Wait until the pending card is stored (the draft is ready to edit)."""
+    async def wait_for_pending(self, workflow_id: str, client) -> None:
+        """Wait until the pending card is stored and the workflow knows it.
+
+        The recorder fires inside the store_card activity, before the
+        workflow has processed the activity's completion. Approve is rejected
+        until the workflow sets its card-ready flag (issue #9), which happens
+        in the workflow task that handles that completion, so also wait for
+        Temporal to record that workflow task (see _card_ready_recorded).
+        """
         await self.wait_for(f"{workflow_id}:store:pending")
+        handle = client.get_workflow_handle(workflow_id)
+
+        async def _poll() -> None:
+            while not _card_ready_recorded(await handle.fetch_history()):
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(_poll(), WAIT_TIMEOUT_SEC)
 
     async def wait_for_approved(self, workflow_id: str) -> None:
         """Wait until the workflow wrote status=approved to the stored card.
@@ -121,6 +135,28 @@ class CardWrites:
 @pytest.fixture
 def card_writes() -> CardWrites:
     return CardWrites()
+
+
+def _card_ready_recorded(history) -> bool:
+    """True when the history shows the workflow task that handled the pending
+    store_card completion: store_card scheduled, that activity completed, and
+    a workflow task completed after it. run() sets the card-ready flag in that
+    workflow task, right after the activity returns."""
+    from temporalio.api.enums.v1 import EventType
+
+    store_id = None
+    store_done = False
+    for event in history.events:
+        kind = event.event_type
+        if kind == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED and store_id is None:
+            if event.activity_task_scheduled_event_attributes.activity_type.name == "store_card":
+                store_id = event.event_id
+        elif kind == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED and store_id is not None:
+            if event.activity_task_completed_event_attributes.scheduled_event_id == store_id:
+                store_done = True
+        elif kind == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED and store_done:
+            return True
+    return False
 
 
 def _past_approve_write(history) -> bool:
@@ -195,7 +231,7 @@ async def test_edit_passing_text_approve_works(make_review_input, x_activities, 
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Get original draft
             card = await handle.query("get_card")
@@ -278,7 +314,7 @@ async def test_edit_adding_uncovered_claim_requires_post_anyway(make_review_inpu
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Edit to add uncovered claim (not a passage sentence, not a non_claim)
             edited_text = "Thanks for the question. Works on Kubernetes. Happy to help."
@@ -385,7 +421,7 @@ async def test_b4_edit_exact_match_keeps_verdict(make_review_input, x_activities
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Get original draft text
             card = await handle.query("get_card")
@@ -439,7 +475,7 @@ async def test_s1_edit_after_approve_rejected(make_review_input, x_activities, r
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Approve first
             client_request_id = str(uuid.uuid4())
@@ -522,7 +558,7 @@ async def test_s3_edit_in_flight_prevents_concurrent_approve(make_review_input, 
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Start edit Update, wait only for ACCEPTED (not completed)
             client_request_id = str(uuid.uuid4())
@@ -607,7 +643,7 @@ async def test_edit_regate_replay_deterministic(make_review_input, x_activities,
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Edit
             edited_text = "Thanks! Our product helps developers build reliable distributed systems. Happy to help."
@@ -675,7 +711,7 @@ async def test_b2_edit_regate_fails_open_fix(make_review_input, x_activities, re
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Edit to text that will fail gate (numbers + compliance terms)
             edited_text = "Our product is SOC2 certified and 10x faster."
@@ -790,7 +826,7 @@ async def test_b3_concurrent_edits_with_counter(make_review_input, x_activities,
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Start two edits; both block in their gate activity
             edit1_task = asyncio.create_task(
@@ -870,7 +906,7 @@ async def test_c_edit_regate_activity_error_not_checked(make_review_input, x_act
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Edit will fail in gate activity
             gate_call_count = 0
@@ -985,7 +1021,7 @@ async def test_qa_r12_concurrent_edits_last_writer_wins(make_review_input, x_act
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Start FIRST edit (will block in gate)
             edit1_task = asyncio.create_task(
@@ -1130,7 +1166,7 @@ async def test_qa_r15_edit_four_segments_rejected(make_review_input, x_activitie
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Edit to exactly the example text with 4 sentences
             edited_text = "Hi! Our product helps developers build reliable systems. Happy to help. What stack are you on?"
@@ -1254,7 +1290,7 @@ async def test_r14_s5_workflow_race_edit_seq(make_review_input, x_activities, re
                 task_queue="test",
             )
             
-            await card_writes.wait_for_pending(workflow_id)
+            await card_writes.wait_for_pending(workflow_id, env.client)
             
             # Start EDIT_A (will block in gate)
             edit_a_task = asyncio.create_task(
