@@ -262,8 +262,10 @@ def build_written_draft_prompt(request: WrittenDraftRequest) -> str:
     previous = ""
     failures = ""
     current = request.evidence.draft
-    if request.steer and current and current.text:
-        previous = f"\n\nPrevious draft (rewrite it, do not start over):\n{current.text}"
+    if request.steer and current:
+        if current.text:
+            previous = f"\n\nPrevious draft (rewrite it, do not start over):\n{current.text}"
+        # Also for an empty previous draft: its failure says it was empty
         failures = written_check_failures_for_prompt(current)
     steer_text = f"\n\nAdditional instruction: {request.steer}" if request.steer else ""
 

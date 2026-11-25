@@ -187,7 +187,7 @@ async def run(args) -> None:
         plans_path.write_text(json.dumps(plans, indent=2, ensure_ascii=False))
     summary = summarize(records, excluded, cap, stopped_by_cap=stopped)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "report.json").write_text(report_json(args.label, records, summary))
+    (out_dir / "report.json").write_text(report_json(args.label, records, summary, sorted({c.model for c in cap.calls})))
     (out_dir / "summary.md").write_text(summary_markdown(args.label, summary))
     print(summary_markdown(args.label, summary))
     print(f"wrote {out_dir}/report.json and summary.md")

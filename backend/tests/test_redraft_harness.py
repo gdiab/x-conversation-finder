@@ -490,8 +490,6 @@ def test_the_summary_refuses_a_label_that_is_not_a_short_name():
     assert harness.safe_label("after-2") and not harness.safe_label("a post about x")
     with pytest.raises(ValueError):
         summary_markdown("review:t:2001 text", {})
-    assert harness._model_label("gpt-4o-mini-2024-07-18") == "gpt-4o-mini-2024-07-18"
-    assert harness._model_label("some text with spaces") == "(unrecognized model name)"
 
 
 # ---------- review round 2 ----------
@@ -568,9 +566,15 @@ def test_a_spend_cap_that_cannot_limit_is_refused(cap_usd):
         SpendCap(cap_usd, 1e-6, 1e-6)
 
 
-def test_a_model_name_shaped_like_an_id_is_not_shown():
-    assert harness._model_label("review:account:123") == "(unrecognized model name)"
-    assert harness._model_label("2124917236280553696") == "(unrecognized model name)"
+def test_provider_model_names_stay_out_of_the_pasteable_summary():
+    client, _ = _stub_client()
+    cap = SpendCap(cap_usd=1.0, input_cost_usd=1e-6, output_cost_usd=1e-5)
+    cap.calls.append(harness.CallRecord("draft", "review:account:123", 1, 1, 0.0))
+
+    summary = summarize([], harness.Counter(), cap)
+
+    assert "review:account:123" not in json.dumps(summary) + summary_markdown("x1", summary)
+    assert json.loads(report_json("x1", [], summary, ["review:account:123"]))["models"] == ["review:account:123"]
 
 
 def test_the_script_refuses_to_write_when_git_fails(tmp_path, monkeypatch):
@@ -650,6 +654,87 @@ def test_labels_and_model_names_with_ids_are_refused():
     assert harness.safe_label("after2")
     for label in ("2124917236280553696", "run-2124917236", "a/b", "x" * 41):
         assert not harness.safe_label(label)
-    assert harness._model_label("gpt-4o-mini-2024-07-18") == "gpt-4o-mini-2024-07-18"
-    assert harness._model_label("openai/gpt-4o") == "openai/gpt-4o"
-    assert harness._model_label("post/1234567") == "(unrecognized model name)"
+
+
+
+# ---------- review round 4: what the harness keeps of a removed post ----------
+
+
+@pytest.mark.asyncio
+async def test_a_post_removed_after_a_finished_attempt_leaves_no_text_and_no_cached_plan(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    checker = CountingChecker()
+    removed = {"now": False}
+
+    class RemovedAfterTheCheck(CountingChecker):
+        async def check(self, request, idempotency_key):
+            response = await checker.check(request, idempotency_key)
+            removed["now"] = True
+            return response
+
+    plans = {}
+    records, excluded, _ = await run_harness(
+        reviews[:1], SETTINGS, ScriptedAgent(texts=[UNSUPPORTED]), RemovedAfterTheCheck(),
+        plans=plans, max_attempts=2, is_removed=lambda post_id: removed["now"],
+    )
+
+    (record,) = records
+    assert record.outcome == "removed" and excluded["post_text_removed"] == 1
+    (attempt,) = record.attempts
+    assert attempt.text == "" and attempt.reasoning == ""
+    assert all(s.sentence == "" and s.reason == "" for s in attempt.sentences)
+    assert attempt.failure_kinds == ["unsupported"]  # counts stay
+    assert plans == {}  # the cached plan quoted the post
+    shown = report_json("x1", records, summarize(records, excluded, None))
+    assert POST_TEXT not in shown and UNSUPPORTED not in shown and PLAN.target_point not in shown
+    assert summarize(records, excluded, None)["first_draft_pass_rate"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_removal_recorded_after_a_posts_runs_is_applied_before_the_report(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    finished = []
+
+    def removed(post_id):
+        # 2001 is removed once the harness has moved on to the next post
+        return post_id == "2001" and len(finished) > 0
+
+    class Tracking(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            if request.post.id == "2002":
+                finished.append(True)
+            return await super().draft_written(request, idempotency_key)
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, Tracking(), CountingChecker(), plans={}, max_attempts=2, samples=2, is_removed=removed,
+    )
+
+    assert [(r.post_id, r.outcome) for r in records] == [
+        ("2001", "removed"), ("2001", "removed"), ("2002", "passed_first"), ("2002", "passed_first"),
+    ]
+    assert excluded["post_text_removed"] == 1  # 2001, once for its two runs
+    assert all(a.text == "" for r in records[:2] for a in r.attempts)
+
+
+@pytest.mark.asyncio
+async def test_a_post_removed_before_its_first_check_still_reports_its_cost(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+    client, _ = _stub_client()
+    cap = SpendCap(cap_usd=1.0, input_cost_usd=1e-6, output_cost_usd=1e-5)
+    wrapped = cap.wrap(client)
+    removed = {"now": False}
+
+    class PaidDraft(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            await wrapped.chat.completions.create(model="m", messages=[], max_completion_tokens=10)
+            removed["now"] = True
+            return await super().draft_written(request, idempotency_key)
+
+    records, _, _ = await run_harness(
+        reviews[1:], SETTINGS, PaidDraft(), CountingChecker(), plans={}, max_attempts=2, cap=cap,
+        is_removed=lambda post_id: removed["now"],
+    )
+
+    (record,) = records
+    assert record.outcome == "removed" and record.attempts == []
+    assert record.model_calls == 1 and record.cost_usd > 0

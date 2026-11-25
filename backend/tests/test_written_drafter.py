@@ -318,6 +318,17 @@ def test_a_failed_sentence_in_brackets_is_listed_as_a_sentence(sample_post):
     assert '- "[Relay handles 8 tasks]": a synthetic reason' in prompt
 
 
+def test_an_empty_previous_draft_still_shows_its_failure(sample_post):
+    evidence = _failed_written_evidence()
+    evidence.draft.text = ""
+    evidence.draft.claim_gate.failed_sentences = [["[reply]", "The reply is empty; it must have at least 1 sentence"]]
+
+    prompt = build_written_draft_prompt(_request(sample_post, steer="x", evidence=evidence))
+
+    assert "Previous draft" not in prompt
+    assert "- The reply as a whole: The reply is empty" in prompt
+
+
 def test_an_assembled_previous_draft_lists_no_written_failures(sample_post):
     evidence = _failed_written_evidence()
     evidence.draft.mode = "assembled"

@@ -332,6 +332,7 @@ class PostRecord:
     # What this run's model calls cost (plan, drafts, checks), from the spend cap
     model_calls: int = 0
     cost_usd: float = 0.0
+    post_id: str = ""
 
 
 # Failure kinds, read from the check's reasons (backend/gate/written_check.py)
@@ -610,6 +611,7 @@ async def run_harness(
                 records.append(PostRecord(
                     review.workflow_id, review.topic, sample, source, mention, outcome, attempts, error,
                     model_calls=len(new_calls), cost_usd=round(sum(c.cost_usd for c in new_calls), 6),
+                    post_id=review.post.id,
                 ))
 
             try:
@@ -627,17 +629,56 @@ async def run_harness(
                 record(outcome_of(attempts))
             except PostRemovedDuringRun:
                 excluded[EXCLUDED_REMOVED] += 1
-                if attempts:
-                    # Finished attempts were paid for; the run is not a result
+                if cap is not None and len(cap.calls) > calls_before or attempts:
+                    # Its calls were paid for; the run is not a result, and
+                    # apply_removals below drops its text
                     record("removed")
                 break
             except SpendCapReached as e:
                 # The attempts that finished are kept: their calls were paid
                 record("error", str(e))
+                apply_removals(records, plans, is_removed, excluded)
                 return records, excluded, True
             except Exception as e:  # one post's failure does not end the run
                 record("error", f"{type(e).__name__}: {e}")
+    apply_removals(records, plans, is_removed, excluded)
     return records, excluded, False
+
+
+def apply_removals(
+    records: List[PostRecord],
+    plans: Dict[str, Any],
+    is_removed: Optional[Callable[[str], bool]],
+    excluded: Counter,
+) -> None:
+    """Drop what the harness holds of a post whose removal is recorded
+    (issue #9), before anything is written: every run of the post becomes
+    "removed" with its drafts, sentences, reasons and steers emptied (they
+    can quote the post), and its cached plan (whose target point is a span
+    of the post) is deleted. Call counts, costs and failure kinds stay.
+    Asked once per post after the run, so a removal recorded while the
+    harness worked on other posts is honoured too.
+    """
+    if is_removed is None:
+        return
+    removed = {r.post_id for r in records if r.post_id and is_removed(r.post_id)}
+    for record in records:
+        if record.post_id not in removed:
+            continue
+        if record.outcome != "removed" and not any(
+            r.post_id == record.post_id and r.outcome == "removed" for r in records
+        ):
+            excluded[EXCLUDED_REMOVED] += 1  # once per post, when first found here
+        record.outcome = "removed"
+        record.error = ""
+        plans.pop(record.workflow_id, None)
+        for attempt in record.attempts:
+            attempt.text = ""
+            attempt.steer = None
+            attempt.reasoning = ""
+            for sentence in attempt.sentences:
+                sentence.sentence = ""
+                sentence.reason = ""
 
 
 # --- Report ---
@@ -653,7 +694,8 @@ def summarize(
     """Aggregate numbers only: no post, draft or brief text, no ids. This is
     what may be pasted into a pull request of the public repo."""
     outcomes = Counter(r.outcome for r in records)
-    drafted = [r for r in records if r.attempts]
+    # A removed post's runs are not results: they count only in "outcomes"
+    drafted = [r for r in records if r.attempts and r.outcome != "removed"]
     first_kinds: Counter = Counter()
     redraft_kinds: Counter = Counter()
     claim_counts: Counter = Counter()
@@ -698,7 +740,6 @@ def summarize(
             entry["input_tokens"] += c.input_tokens
             entry["output_tokens"] += c.output_tokens
             entry["cost_usd"] = round(entry["cost_usd"] + c.cost_usd, 6)
-        summary["models"] = sorted({_model_label(c.model) for c in cap.calls})
         summary["calls"] = by_call
         summary["cost_usd"] = round(cap.spent_usd, 6)
         summary["spend_cap_usd"] = cap.cap_usd
@@ -724,11 +765,6 @@ def safe_label(label: str) -> bool:
     return _name_like(label, 40) and "/" not in label
 
 
-def _model_label(model: str) -> str:
-    """A model name as reported by the provider, if it looks like one."""
-    return model if _name_like(model or "", 64) else "(unrecognized model name)"
-
-
 def summary_markdown(label: str, summary: Dict[str, Any]) -> str:
     """The aggregate summary as a Markdown table, safe to paste (no text)."""
     if not safe_label(label):
@@ -740,11 +776,15 @@ def summary_markdown(label: str, summary: Dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def report_json(label: str, records: Sequence[PostRecord], summary: Dict[str, Any]) -> str:
-    """The full report: the summary plus every post's drafts and checks. It
-    holds model-written text that can quote real posts: keep it local."""
+def report_json(
+    label: str, records: Sequence[PostRecord], summary: Dict[str, Any], models: Optional[Sequence[str]] = None,
+) -> str:
+    """The full report: the summary, the model names the provider reported
+    (kept out of the pasteable summary: a gateway may return any string),
+    and every post's drafts and checks. It holds model-written text that can
+    quote real posts: keep it local."""
     return json.dumps(
-        {"label": label, "summary": summary, "posts": [asdict(r) for r in records]},
+        {"label": label, "summary": summary, "models": models or [], "posts": [asdict(r) for r in records]},
         indent=2,
         ensure_ascii=False,
     )
