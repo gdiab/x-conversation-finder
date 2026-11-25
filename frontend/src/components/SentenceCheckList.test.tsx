@@ -74,6 +74,23 @@ describe('SentenceCheckList', () => {
     );
   });
 
+  it('does not credit the checker with a classification it did not make', () => {
+    // No trigger, and the checker gave no usable answer: code fails the sentence closed
+    const check = makeSentenceCheck({
+      sentence: 'It retries failed deliveries for you.',
+      kind: 'claim',
+      passed: false,
+      verdict: 'unsupported',
+      checker_flagged: false,
+      reason: 'Checked as a product claim (the checker did not clearly say that it is not about the product). The checker returned no verdict for it.',
+    });
+    render(<SentenceCheckList checks={[check]} />);
+
+    const row = screen.getByTestId('sentence-check');
+    expect(row).toHaveTextContent('Checked because: the checker did not clearly say that it is not about the product');
+    expect(row).not.toHaveTextContent('the checker read it as a statement about the product');
+  });
+
   it('names an alias match and a trigger it has no label for', () => {
     const check = makeSupportedClaim({
       triggers: [

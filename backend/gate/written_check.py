@@ -309,10 +309,15 @@ class PreparedCheck:
 
 
 # Sentence terminators the claim gate's splitter does not know: fullwidth and
-# ideographic stops and marks, and the doubled marks. A reply that uses one
-# without a space after it still ends a sentence there.
-_OTHER_TERMINATORS = "".join(map(chr, (0x3002, 0xFF0E, 0xFF61, 0xFF01, 0xFF1F, 0x203C, 0x2047, 0x2048, 0x2049)))
-_OTHER_TERMINATOR_RE = re.compile(f"([{_OTHER_TERMINATORS}]+)(?=\\S)")
+# ideographic stops and marks, the doubled marks, and the full stops and
+# question marks of other scripts (Armenian, Arabic, Urdu, Devanagari,
+# Ethiopic, Canadian syllabics). A closed list. A reply ends a sentence at
+# each of them, whatever follows.
+_OTHER_TERMINATORS = "".join(map(chr, (
+    0x3002, 0xFF0E, 0xFF61, 0xFF01, 0xFF1F, 0x203C, 0x2047, 0x2048, 0x2049,
+    0x0589, 0x061F, 0x06D4, 0x0964, 0x0965, 0x1362, 0x1367, 0x166E,
+)))
+_OTHER_TERMINATOR_RE = re.compile(f"([{_OTHER_TERMINATORS}]+)")
 
 
 # What may follow a dot inside one word without the dot ending a sentence: a

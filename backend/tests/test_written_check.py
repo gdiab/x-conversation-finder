@@ -449,6 +449,17 @@ def test_fullwidth_and_ideographic_terminators_end_a_sentence():
     assert "at most 3 sentences (got 5)" in prepared.structural_failures[0][1]
 
 
+def test_other_terminators_end_a_sentence_with_a_space_after_them_too():
+    stop = chr(0x3002)  # ideographic full stop
+    spaced = prepare_check(f"Acme ships{stop} Acme retries{stop} Acme scales{stop} Acme works{stop}", BRIEF, "Acme", [], [])
+    urdu = prepare_check("That is hard" + chr(0x06D4) + " Really hard" + chr(0x061F) + " Yes", BRIEF, "Acme", [], [])
+
+    assert len(spaced.sentences) == 4
+    assert any("at most 3 sentences (got 4)" in reason for _, reason in spaced.structural_failures)
+    assert any("at most 1 product claim" in reason for _, reason in spaced.structural_failures)
+    assert len(urdu.sentences) == 3
+
+
 @pytest.mark.parametrize("mark", ["?", chr(0xFF1F), chr(0x2047), chr(0x2048)])
 def test_a_question_mark_of_any_width_makes_a_triggered_sentence_a_question(mark):
     prepared = _prepare(f"Did you know Relay can retry a failed delivery up to five times{mark}")

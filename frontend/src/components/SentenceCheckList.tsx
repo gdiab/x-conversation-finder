@@ -109,7 +109,9 @@ export function SentenceCheckList({ checks }: SentenceCheckListProps) {
                 <strong>Checked because:</strong>{' '}
                 {triggers.length > 0
                   ? `it ${describeTriggers(triggers)}`
-                  : 'the checker read it as a statement about the product'}
+                  : check.checker_flagged
+                    ? 'the checker read it as a statement about the product'
+                    : 'the checker did not clearly say that it is not about the product'}
                 {triggers.length > 0 && check.checker_flagged && '; the checker also read it as about the product'}
               </div>
             )}

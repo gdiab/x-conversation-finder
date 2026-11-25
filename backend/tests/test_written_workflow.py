@@ -706,7 +706,11 @@ def _written_card():
                 "segments": [],
                 "claim_gate": {"passed": False, "segments": [], "failed_sentences": [
                     {"sentence": "You said 'eventual consistency' bites.", "reason": "no"}], "reasoning": "r"},
-                "steers_applied": ["Previous draft failed claim gate. Fix these issues: 'You said...': no"],
+                "steers_applied": [
+                    "Previous draft failed claim gate. Fix these issues: 'You said...': no",
+                    "Drop the part about 'eventual consistency'",  # a founder nudge quoting the draft
+                    "manual_edit",
+                ],
                 "sentence_checks": [check],
                 "written": {
                     "product_name": PRODUCT, "product_aliases": [], "feature_terms": ["Automatic failover"],
@@ -739,6 +743,10 @@ def test_removal_redacts_everything_a_model_wrote_on_a_written_card():
     assert check["supporting"] == [{"id": "b1", "text": CLAIM, "context": "Product Brief"}]
     assert draft["written"]["drafter_hints"] == []
     assert draft["written"]["product_name"] == PRODUCT  # the founder's own field
+    # A nudge was typed while looking at the model's text, so it goes; code's markers stay
+    assert draft["steers_applied"] == [
+        "Previous draft failed claim gate. details removed with the post", POST_TEXT_REMOVED, "manual_edit",
+    ]
     # The card-level copies of the edited sentences go too
     assert redacted["edited_text_gate_results"] == [check]
     assert redacted["post_anyway_failing_sentences"] == [POST_TEXT_REMOVED]
@@ -753,12 +761,14 @@ def test_removal_keeps_an_assembled_cards_draft_and_edit_results():
     card = _written_card()
     card["evidence"]["draft_mode"] = "assembled"
     card["evidence"]["draft"].update(mode="assembled", text="Thanks! Happy to help.", sentence_checks=[], written=None)
+    card["evidence"]["draft"]["steers_applied"] = ["Make it shorter", "manual_edit"]
     card["edited_text_gate_results"] = [{"sentence": "Thanks!", "passed": True, "kind": "non_claim", "reason": ""}]
     card["post_anyway_failing_sentences"] = ["Founder's own sentence."]
 
     redacted = redact_removed_card(card)
 
     assert redacted["evidence"]["draft"]["text"] == "Thanks! Happy to help."
+    assert redacted["evidence"]["draft"]["steers_applied"] == ["Make it shorter", "manual_edit"]
     assert redacted["edited_text_gate_results"] == card["edited_text_gate_results"]
     assert redacted["post_anyway_failing_sentences"] == ["Founder's own sentence."]
 

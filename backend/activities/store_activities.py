@@ -46,6 +46,7 @@ def _redact_material(material: Dict[str, Any], passage_unverified: bool = False)
 GATE_SKIP_REASON_PREFIX = "Not enough evidence:"  # review.py _draft_and_validate
 GATE_STEER_PREFIX = "Previous draft failed claim gate."  # review.py _draft_and_validate
 GATE_DETAILS_REMOVED = "details removed with the post"
+MANUAL_EDIT_STEER = "manual_edit"  # review.py appends it to steers_applied on a founder edit
 
 
 def redact_skip_reason(reason: Optional[str]) -> Optional[str]:
@@ -184,7 +185,8 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
     A written draft (issue #12) is different: the model wrote its text after
     reading the post, so the text goes, with each sentence check's sentence
     and reason and the drafter's hints. A founder edit of a written draft
-    goes too: it starts from the model's text.
+    goes too: it starts from the model's text. So do the founder's nudges on
+    it, which are written while looking at that text.
     """
     passages = {
         m.get("passage_id"): m.get("passage") or ""
@@ -215,6 +217,16 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
     if redacted.get("mode") == DRAFT_MODE_WRITTEN:
         if redacted.get("text"):
             redacted["text"] = POST_TEXT_REMOVED
+        if isinstance(redacted.get("steers_applied"), list):
+            # A nudge on a written draft is written while looking at model text
+            # that can quote the post ("drop the part about ..."), so it goes
+            # too. The "manual_edit" marker and the gate's own redacted steer
+            # are code-written and stay.
+            redacted["steers_applied"] = [
+                s if s == MANUAL_EDIT_STEER or (isinstance(s, str) and s.startswith(GATE_STEER_PREFIX))
+                else POST_TEXT_REMOVED
+                for s in redacted["steers_applied"]
+            ]
         if isinstance(redacted.get("sentence_checks"), list):
             redacted["sentence_checks"] = [redact_sentence_check(c) for c in redacted["sentence_checks"]]
         if isinstance(redacted.get("written"), dict):
