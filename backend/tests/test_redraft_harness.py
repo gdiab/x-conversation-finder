@@ -1404,3 +1404,106 @@ def test_the_script_looks_posts_up_unless_told_not_to(tmp_path, monkeypatch, no_
     assert ("| refetch | `off` |" in summary) is no_refetch
     assert ("| refetch | `on` |" in summary) is (not no_refetch)
     assert len(built) == (0 if no_refetch else 1)
+
+
+# ---------- issue #31 review round 2 ----------
+
+
+@pytest.mark.asyncio
+async def test_a_failed_removal_write_still_releases_the_unbilled_read(monkeypatch):
+    import backend.target_refetch
+
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+
+    def locked(*args, **kwargs):
+        raise _DatabaseLocked()
+
+    monkeypatch.setattr(backend.target_refetch, "_delete_post_text_sync", locked)
+    reads_before = _x_reads()
+
+    await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        refetch=_refetcher(LookupX({"3101": "gone"}), removal_wait_seconds=0),
+    )
+
+    assert _x_reads() == reads_before  # X billed nothing for the gone post
+    assert _stored_card("review:t:3101")["text_removed"] is True  # the retry recorded it
+
+
+@pytest.mark.asyncio
+async def test_a_committed_removal_stays_reported_as_removed_when_a_later_retry_fails(monkeypatch):
+    import backend.activities.store_activities as store
+    import backend.target_refetch
+    from temporalio.exceptions import ApplicationError
+
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+    reviews, _ = load_stored_reviews(db, TOPICS_31)
+
+    def pending(*args, **kwargs):
+        raise ApplicationError("synthetic", type=store.WAL_CHECKPOINT_PENDING_ERROR)
+
+    def locked(*args, **kwargs):
+        raise _DatabaseLocked()
+
+    monkeypatch.setattr(backend.target_refetch, "_delete_post_text_sync", pending)
+    monkeypatch.setattr(store, "_delete_post_text_sync", locked)
+    refetch = _refetcher(LookupX({"3101": "gone"}), removal_attempts=2, removal_wait_seconds=0)
+
+    _, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, refetch=refetch,
+    )
+
+    assert dict(excluded) == {"removed_at_refetch": 1}
+    assert (refetch.checkpoint_pending, refetch.removal_failed) == (1, 0)
+
+
+def test_a_checkpoint_pending_at_start_is_reported_until_one_completes(monkeypatch):
+    import backend.database
+
+    results = iter([False, True])
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: next(results))
+    refetch = _refetcher(LookupX({}))
+
+    refetch.checkpoint_at_start()
+    assert refetch.incomplete_removals == 1
+    assert refetch.summary()["refetch_wal_checkpoint_pending"] == 1
+    refetch.checkpoint_at_end()
+    assert refetch.incomplete_removals == 0
+
+    def locked():
+        raise _DatabaseLocked()
+
+    monkeypatch.setattr(backend.database, "checkpoint_wal", locked)
+    refetch.checkpoint_at_start()
+    refetch.checkpoint_at_end()
+    assert refetch.incomplete_removals == 1
+
+
+def test_the_script_exits_with_an_error_when_a_removal_is_unfinished(tmp_path, monkeypatch):
+    import backend.database
+
+    redraft_harness = _script()
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: False)  # a reader holds an old snapshot
+
+    async def fake_refetcher(args, settings, cap, db):
+        refetch = harness.Refetcher(LookupX({}), "t", _not_running, cap, 0.005)
+        refetch.checkpoint_at_start()
+        return refetch
+
+    monkeypatch.setattr(redraft_harness, "_refetcher", fake_refetcher)
+    monkeypatch.setattr(redraft_harness, "_settings", lambda: SimpleNamespace(
+        openai_api_key="synthetic", openai_base_url=None, openai_model="m", claim_gate_max_attempts=2,
+        inference_input_token_cost_usd=1e-6, inference_output_token_cost_usd=1e-6,
+    ))
+    exported = tmp_path / "settings.json"
+    exported.write_text(json.dumps({"watches": {}, "review_topics": {}}))
+    monkeypatch.setattr(sys, "argv", [
+        "redraft_harness.py", "run", "--db", str(_make_db(tmp_path / "cards.db")), "--settings", str(exported),
+        "--out-root", str(tmp_path / "out"), "--label", "t",
+    ])
+
+    with pytest.raises(SystemExit, match="Unfinished removals"):
+        redraft_harness.main()
+    summary = (tmp_path / "out" / "t" / "summary.md").read_text()
+    assert "| refetch_wal_checkpoint_pending | `1` |" in summary

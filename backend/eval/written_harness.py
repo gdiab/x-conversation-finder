@@ -659,6 +659,17 @@ def _error_type(e: BaseException) -> str:
     return name if isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,63}", name) else "other"
 
 
+def _checkpoint_completed() -> bool:
+    """The app's WAL checkpoint; an error (a locked database) counts as not
+    completed."""
+    from backend.database import checkpoint_wal
+
+    try:
+        return bool(checkpoint_wal())
+    except Exception:
+        return False
+
+
 class Refetcher:
     """Asks X whether a stored review's post still exists, once per post per
     run, through the app's eval re-fetch (refetch_stored_card_target):
@@ -733,10 +744,28 @@ class Refetcher:
         self.checkpoint_pending = 0
         self.removal_failed = 0
 
+        # The database's WAL checkpoint failed when the run started (an
+        # earlier removal's checkpoint may still be pending)
+        self.startup_checkpoint_pending = False
+
     @property
     def incomplete_removals(self) -> int:
-        """Removals X asked for that did not fully complete in this run."""
-        return self.checkpoint_pending + self.removal_failed
+        """Removals that did not fully complete: X asked for them in this
+        run, or (a failed checkpoint at start) an earlier run's may wait."""
+        return self.checkpoint_pending + self.removal_failed + int(self.startup_checkpoint_pending)
+
+    def checkpoint_at_start(self) -> None:
+        """Retry a checkpoint an earlier run (or the app) left pending: a
+        later run leaves an already-removed card out, so it never retries
+        that card's checkpoint otherwise."""
+        self.startup_checkpoint_pending = not _checkpoint_completed()
+
+    def checkpoint_at_end(self) -> None:
+        """One more checkpoint when one is pending; a completed TRUNCATE
+        checkpoint copies the whole WAL, so it settles every pending one."""
+        if (self.checkpoint_pending or self.startup_checkpoint_pending) and _checkpoint_completed():
+            self.checkpoint_pending = 0
+            self.startup_checkpoint_pending = False
 
     async def __call__(self, review: StoredReview) -> str:
         post_id = str(review.post.id)
@@ -766,7 +795,9 @@ class Refetcher:
         except Exception as e:
             if post_id in self._x_said_gone or getattr(e, "type", None) == WAL_CHECKPOINT_PENDING_ERROR:
                 # X said gone (or the removal already committed): finish the removal
-                outcome = await self._finish_removal(review)
+                outcome = await self._finish_removal(
+                    review, getattr(e, "type", None) == WAL_CHECKPOINT_PENDING_ERROR,
+                )
             else:
                 # A type name only: an error message can quote the response
                 self.failures[_error_type(e)] += 1
@@ -776,7 +807,7 @@ class Refetcher:
             self._by_post[post_id] = outcome
         return outcome
 
-    async def _finish_removal(self, review: StoredReview) -> str:
+    async def _finish_removal(self, review: StoredReview, first_error_committed: bool = False) -> str:
         """Record the removal through the app's removal path, as the re-fetch
         does (same idempotency key), retrying; no further X lookup."""
         import asyncio
@@ -790,6 +821,7 @@ class Refetcher:
         )
 
         last: Optional[BaseException] = None
+        committed = first_error_committed
         for attempt in range(self._removal_attempts):
             if attempt:
                 await asyncio.sleep(self._removal_wait_seconds)
@@ -802,7 +834,9 @@ class Refetcher:
                 return "removed"
             except Exception as e:
                 last = e
-        if isinstance(last, ApplicationError) and last.type == WAL_CHECKPOINT_PENDING_ERROR:
+                if isinstance(e, ApplicationError) and e.type == WAL_CHECKPOINT_PENDING_ERROR:
+                    committed = True  # a later failure does not undo it
+        if committed:
             # The removal committed; the old pages may stay in the -wal file
             self.checkpoint_pending += 1
             return "removed"
@@ -824,7 +858,7 @@ class Refetcher:
         return {
             "refetch_outcomes": dict(sorted(self.outcomes.items())),
             "refetch_failure_types": dict(sorted(self.failures.items())),
-            "refetch_wal_checkpoint_pending": self.checkpoint_pending,
+            "refetch_wal_checkpoint_pending": self.checkpoint_pending + int(self.startup_checkpoint_pending),
             "refetch_removal_failed": self.removal_failed,
         }
 

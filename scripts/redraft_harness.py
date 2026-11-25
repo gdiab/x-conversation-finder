@@ -129,18 +129,13 @@ async def _refetcher(args, settings, cap, db: Path):
     except Exception as e:
         sys.exit(f"The re-fetch asks Temporal whether each card's Review still runs; connecting failed: "
                  f"{type(e).__name__}")
-    # A checkpoint an earlier run left pending (a reader held an old
-    # snapshot): try it again, as every later removal does
-    from backend.database import checkpoint_wal
-
-    if not checkpoint_wal():
-        print("note: the database's WAL checkpoint did not complete (a reader holds an old snapshot)",
-              file=sys.stderr)
     run_key = f"harness:{args.label}:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
-    return Refetcher(
+    refetch = Refetcher(
         HttpXClient(bearer_token=settings.x_bearer_token), run_key,
         temporal_review_is_running(temporal), cap, settings.x_post_read_cost,
     )
+    refetch.checkpoint_at_start()
+    return refetch
 
 
 def _settings():
@@ -293,6 +288,8 @@ async def run(args) -> None:
             is_removed=is_removed, refetch=refetch,
         )
     finally:
+        if refetch is not None:
+            refetch.checkpoint_at_end()
         # Also when the run failed: no cached plan of a removed post is kept,
         # and earlier reports get the removals recorded since they were written
         prune_removed_plans(plans, is_removed)
@@ -317,10 +314,12 @@ async def run(args) -> None:
         safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))
     if refetch is not None and refetch.incomplete_removals:
         sys.exit(
-            f"{refetch.removal_failed} removal(s) X asked for could not be recorded (the post text is still "
-            f"stored), and {refetch.checkpoint_pending} removal(s) committed with the WAL checkpoint pending "
-            "(old pages can stay in the -wal file until a checkpoint completes). Run the harness again "
-            "(the re-fetch retries them), or restart the API process if a reader holds an old snapshot."
+            f"Unfinished removals: {refetch.removal_failed} removal(s) X asked for could not be recorded (the post "
+            "text is still stored; the next run looks the post up again and records it), and "
+            f"{refetch.checkpoint_pending + int(refetch.startup_checkpoint_pending)} WAL checkpoint(s) did not "
+            "complete (a removal committed, but old pages can stay in the -wal file; the next run retries the "
+            "checkpoint at start). A checkpoint completes once no reader holds an old snapshot: restart the "
+            "API process if a rerun does not clear it."
         )
     if not (swept_again and swept):
         sys.exit("Some reports could not be checked for recorded removals (see above)")
