@@ -23,6 +23,9 @@ POST_TEXT_REMOVED = "[removed - post deleted]"
 
 # Issue #9: skip reason for a pending Review whose target post returned 404 on
 # the re-fetch at approve time. The frontend shows "Post removed" for it.
+# issue #23: delete_post_text could not truncate the WAL yet; retried
+WAL_CHECKPOINT_PENDING_ERROR = "WalCheckpointPending"
+
 POST_REMOVED_SKIP_REASON = "Post removed: the target post was deleted or is no longer visible on X"
 
 
@@ -692,18 +695,21 @@ async def store_card(input: StoreCardInput) -> bool:
     workflow_id = input.card.workflow_id if input.card else activity.info().workflow_id
     activity.logger.info(f"Storing card {workflow_id} (key: {input.idempotency_key})")
     
-    if input.card is None:
-        # issue #23: compose here, where activity.info() is available
-        card = await asyncio.to_thread(_compose_card, workflow_id, input.ref)
-        if input.ref.make_current and input.ref.evidence_slot != "evidence":
-            from backend import review_docs
+    from backend.review_docs import text_safe_db_errors
 
-            await asyncio.to_thread(
-                review_docs.save_doc, workflow_id, input.ref.post_id, review_docs.EVIDENCE_SLOT, card.evidence
-            )
-        input = StoreCardInput(card=card, idempotency_key=input.idempotency_key)
-    # B3: Run sync DB work in thread pool
-    result = await asyncio.to_thread(_store_card_sync, input)
+    with text_safe_db_errors():  # issue #23: a failed write's parameters hold the text
+        if input.card is None:
+            # issue #23: compose here, where activity.info() is available
+            card = await asyncio.to_thread(_compose_card, workflow_id, input.ref)
+            if input.ref.make_current and input.ref.evidence_slot != "evidence":
+                from backend import review_docs
+
+                await asyncio.to_thread(
+                    review_docs.save_doc, workflow_id, input.ref.post_id, review_docs.EVIDENCE_SLOT, card.evidence
+                )
+            input = StoreCardInput(card=card, idempotency_key=input.idempotency_key)
+        # B3: Run sync DB work in thread pool
+        result = await asyncio.to_thread(_store_card_sync, input)
     
     activity.logger.info(f"Stored card {workflow_id}")
     return result
@@ -732,6 +738,9 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         # transaction, so a stale edit (below) writes neither the card nor them
         evidence_value = input.evidence
         workflow_id = input.workflow_id
+        # issue #23: a retry of an edit write that already committed
+        # (same edit_seq) must not apply the edit to the evidence twice
+        edit_already_applied = input.edit_seq is not None and input.edit_seq == (card_db.edit_seq or 0)
         # QA R13: Check edit_seq - ignore stale writes
         if input.edit_seq is not None:
             stored_edit_seq = card_db.edit_seq or 0
@@ -772,7 +781,7 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
         
         # issue #23: documents named instead of carried
         if input.evidence_slot or input.edit_text_slot:
-            evidence_value = _apply_text_free_update(db, card_db, input)
+            evidence_value = _apply_text_free_update(db, card_db, input, edit_already_applied)
         if input.post_anyway_failing_from_gate:
             card_db.post_anyway_failing_sentences = [
                 r.get("sentence") for r in (card_db.edited_text_gate_results or [])
@@ -870,8 +879,11 @@ async def update_card(input: UpdateCardInput) -> bool:
         f"Updating card {input.workflow_id} (key: {input.idempotency_key})"
     )
     
-    # B3: Run sync DB work in thread pool
-    result = await asyncio.to_thread(_update_card_sync, input)
+    from backend.review_docs import text_safe_db_errors
+
+    # B3: Run sync DB work in thread pool (issue #23: errors without data)
+    with text_safe_db_errors():
+        result = await asyncio.to_thread(_update_card_sync, input)
     
     if not result:
         activity.logger.error(f"Card {input.workflow_id} not found")
@@ -881,7 +893,9 @@ async def update_card(input: UpdateCardInput) -> bool:
     return result
 
 
-def _apply_text_free_update(db, card_db: ReviewCardDB, input: UpdateCardInput) -> Evidence:
+def _apply_text_free_update(
+    db, card_db: ReviewCardDB, input: UpdateCardInput, edit_already_applied: bool = False
+) -> Evidence:
     """The document-backed part of update_card (issue #23). Returns the
     evidence whose draft goes on the card.
 
@@ -904,9 +918,10 @@ def _apply_text_free_update(db, card_db: ReviewCardDB, input: UpdateCardInput) -
         return evidence
     text = review_docs.load_doc_in(db, workflow_id, post_id, input.edit_text_slot, str)
     evidence = review_docs.load_doc_in(db, workflow_id, post_id, current, Evidence)
-    evidence.draft.text = text
-    evidence.draft.steers_applied.append(MANUAL_EDIT_STEER)
-    review_docs.save_doc_in(db, workflow_id, post_id, current, evidence)
+    if not edit_already_applied:
+        evidence.draft.text = text
+        evidence.draft.steers_applied.append(MANUAL_EDIT_STEER)
+        review_docs.save_doc_in(db, workflow_id, post_id, current, evidence)
     results: List[Any] = []
     if input.edit_results_slot:
         results = review_docs.load_doc_in(
@@ -1042,9 +1057,16 @@ def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
     # issue #23: secure_delete zeroes the freed space; the checkpoint copies
     # the WAL into the database file and truncates it, so the old pages do
     # not survive in the -wal file
+    # A reader holding an old snapshot can keep the checkpoint from
+    # completing: the removal (already committed, and idempotent) fails with
+    # a retryable error, and Temporal retries it until the checkpoint is done.
     from backend.database import checkpoint_wal
 
-    checkpoint_wal()
+    if not checkpoint_wal():
+        raise ApplicationError(
+            "Post text removed; the WAL checkpoint is pending (a reader holds an old snapshot)",
+            type=WAL_CHECKPOINT_PENDING_ERROR,
+        )
     return card_db is not None
 
 
@@ -1076,7 +1098,10 @@ async def delete_post_text(input: DeletePostTextInput) -> bool:
     )
     
     # B3: Run sync DB work in thread pool
-    result = await asyncio.to_thread(_delete_post_text_sync, input)
+    from backend.review_docs import text_safe_db_errors
+
+    with text_safe_db_errors():
+        result = await asyncio.to_thread(_delete_post_text_sync, input)
     
     if result:
         activity.logger.info(f"Deleted post text for {input.workflow_id}")

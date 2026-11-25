@@ -168,18 +168,19 @@ def _sqlite_secure_delete(dbapi_connection, connection_record) -> None:
         cursor.close()
 
 
-# Issue #23: attempts of the checkpoint after a removal. A reader holding an
-# old snapshot (the API process) can keep the WAL from being reset; each
-# attempt waits for SQLite's busy timeout.
-WAL_CHECKPOINT_ATTEMPTS = 5
+# Issue #23: attempts of the checkpoint per removal attempt. A reader holding
+# an old snapshot (the API process) can keep the WAL from being reset; the
+# attempt waits for SQLite's busy timeout (5 s), and delete_post_text then
+# fails retryably, so Temporal retries the removal until it completes.
+WAL_CHECKPOINT_ATTEMPTS = 1
 
 
 def checkpoint_wal() -> bool:
     """Copy the WAL into the database file and truncate the WAL to zero bytes
     (issue #23: after a removal, the old pages must not survive in the -wal
     file). Returns whether the checkpoint completed; a reader that keeps an
-    old snapshot can make it incomplete, and the next removal's checkpoint, or
-    SQLite's automatic one, finishes the job.
+    old snapshot can make it incomplete (delete_post_text then fails
+    retryably).
     """
     engine = get_engine()
     if "sqlite" not in str(engine.url):

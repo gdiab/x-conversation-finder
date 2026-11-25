@@ -465,9 +465,11 @@ async def test_a_failing_edit_needs_post_anyway_which_is_recorded(make_review_in
             cause = _rejection(refused.value)
             assert cause.type == POST_ANYWAY_REQUIRED_ERROR
             # issue #23: the workflow holds no sentences; the API adds the stored ones
-            assert cause.details[0] == {"gate_state": "failed", "failing_sentences": []}
+            details = cause.details[0]
+            assert (details["gate_state"], details["failing_sentences"]) == ("failed", [])
+            assert set(details["results_ref"]) == {"check_slot"}  # a slot name, no text
             from backend.api import stored_failing_sentences
-            assert stored_failing_sentences(workflow_id) == [FAILING_EDIT]
+            assert stored_failing_sentences(workflow_id, details["results_ref"]) == [FAILING_EDIT]
 
             assert await handle.execute_update(
                 "approve", args=[APPROVE_URL, str(uuid.uuid4()), True, shown]

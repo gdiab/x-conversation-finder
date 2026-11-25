@@ -17,12 +17,16 @@ deletes every document of the post. Reads and writes after that raise
 PostRemoved, the same error type the Review workflow already handles.
 """
 
+import functools
 import hashlib
 import json
+import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, List, Optional, Type, TypeVar
 
 from sqlalchemy import text as sql_text
+from sqlalchemy.exc import SQLAlchemyError
 from temporalio.converter import DataConverter, value_to_type
 from temporalio.exceptions import ApplicationError
 
@@ -30,6 +34,35 @@ from backend.database import ReviewDocDB, StoredPostDB, get_db
 from backend.models import Post
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
+DATABASE_ERROR_TYPE = "DatabaseError"
+
+
+@contextmanager
+def text_safe_db_errors():
+    """Replace a database error with one that carries no data.
+
+    SQLAlchemy puts a failed statement's parameters in its message (the
+    post, a draft, a card). An activity failure's message is recorded in
+    Temporal history, so the original goes to the worker log only. The
+    replacement is retryable, as the database error was.
+    """
+    try:
+        yield
+    except SQLAlchemyError as e:
+        logger.exception("Database error (issue #23: details kept out of workflow history)")
+        raise ApplicationError(
+            f"Database error ({type(e).__name__}); the details are in the worker log",
+            type=DATABASE_ERROR_TYPE,
+        ) from None
+
+
+def _text_safe(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with text_safe_db_errors():
+            return fn(*args, **kwargs)
+    return wrapper
 
 # The error type the Review workflow maps to "post removed" (review.POST_REMOVED_ERROR)
 POST_REMOVED_ERROR_TYPE = "PostRemoved"
@@ -41,9 +74,17 @@ DOC_MISSING_ERROR_TYPE = "ReviewDocMissing"
 EVIDENCE_SLOT = "evidence"  # the Review's current evidence (research, plan, accepted draft)
 
 
-def founder_text_slot(kind: str, client_request_id: str) -> str:
-    """Where the API stores a founder's edit or nudge text ("edit" or "nudge")."""
-    return f"founder:{kind}:{client_request_id}"
+def founder_text_slot(kind: str, client_request_id: str, digest: str) -> str:
+    """Where the API stores a founder's edit or nudge text ("edit" or
+    "nudge"). Named by the text's digest too, so a retry of the request with
+    other text cannot replace the text an update is already checking."""
+    return f"founder:{kind}:{client_request_id}:{digest}"
+
+
+def drafted_slot(slot: str) -> str:
+    """The draft as draft_reply stored it, before the claim gate rewrote it
+    (the gate reads this copy, so a retried gate sees the same input)."""
+    return f"{slot}#drafted"
 
 
 def failures_slot(slot: str) -> str:
@@ -108,6 +149,7 @@ def _post_removed(db, post_id: str) -> bool:
     return _post_removal_recorded(db, post_id)
 
 
+@_text_safe
 def post_removed(post_id: str) -> bool:
     db = get_db()
     try:
@@ -118,6 +160,7 @@ def post_removed(post_id: str) -> bool:
 
 # ---------- posts ----------
 
+@_text_safe
 def store_posts(posts: Iterable[Post]) -> List[str]:
     """Store the posts a search found; return their ids in order.
 
@@ -144,6 +187,7 @@ def store_posts(posts: Iterable[Post]) -> List[str]:
         db.close()
 
 
+@_text_safe
 def load_post(post_id: str, what: str = "not reading it") -> Post:
     """The stored post; raises PostRemoved once its removal is recorded."""
     db = get_db()
@@ -182,6 +226,7 @@ def _load_row(db, workflow_id: str, post_id: str, slot: str, what: str):
     return row
 
 
+@_text_safe
 def load_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T], what: str = "not reading it") -> T:
     """A Review document; PostRemoved once the post's removal is recorded."""
     db = get_db()
@@ -193,6 +238,7 @@ def load_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T], what
         db.close()
 
 
+@_text_safe
 def find_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T]) -> Optional[T]:
     """A Review document, or None if there is none (or the post was removed)."""
     db = get_db()
@@ -205,6 +251,7 @@ def find_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T]) -> O
         db.close()
 
 
+@_text_safe
 def save_doc(workflow_id: str, post_id: str, slot: str, value: Any, first_wins: bool = False) -> Any:
     """Write a Review document; refused (PostRemoved) once the post's removal
     is recorded, so a late write cannot bring the text back.
@@ -247,11 +294,12 @@ def load_doc_in(db, workflow_id: str, post_id: str, slot: str, type_hint: Type[T
     return from_json(_load_row(db, workflow_id, post_id, slot, "not reading it").data, type_hint)
 
 
+@_text_safe
 def store_founder_text(workflow_id: str, post_id: str, kind: str, client_request_id: str, text: str) -> str:
     """Store a founder's edit or nudge text for the Review to read (the API
     calls this before the update). Returns the slot the update names."""
-    slot = founder_text_slot(kind, client_request_id)
-    save_doc(workflow_id, post_id, slot, text)
+    slot = founder_text_slot(kind, client_request_id, text_digest(text))
+    save_doc(workflow_id, post_id, slot, text, first_wins=True)
     return slot
 
 

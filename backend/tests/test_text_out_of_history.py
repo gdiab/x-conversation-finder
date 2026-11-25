@@ -346,3 +346,144 @@ def test_the_recorded_histories_carry_the_post_and_the_new_ones_do_not():
     history = WorkflowHistory.from_json(workflow_id, (FIXTURES / fixture).read_text())
     texts = list(_decoded_strings(json.loads(history.to_json())))
     assert any("eventual consistency" in t for t in texts)
+
+
+# ---------- review round 1 (retries, failures, busy readers) ----------
+
+def test_a_founder_text_is_stored_once_per_request_and_text(make_review_input):
+    """A retry of an edit with other text gets its own slot: the text an
+    update is checking cannot be replaced under it."""
+    from backend.review_docs import load_doc, store_founder_text
+
+    review_input = make_review_input(post=marker_post())
+    first = store_founder_text("review:test:1", review_input.post_id, "edit", "r1", "First text.")
+    again = store_founder_text("review:test:1", review_input.post_id, "edit", "r1", "First text.")
+    other = store_founder_text("review:test:1", review_input.post_id, "edit", "r1", "Other text.")
+    assert first == again != other
+    assert load_doc("review:test:1", review_input.post_id, first, str) == "First text."
+    assert load_doc("review:test:1", review_input.post_id, other, str) == "Other text."
+
+
+def test_a_database_error_reaches_history_without_its_data():
+    """SQLAlchemy puts a failed statement's parameters in its message; an
+    activity failure's message is recorded in history."""
+    from sqlalchemy.exc import IntegrityError
+    from temporalio.exceptions import ApplicationError
+    from backend.review_docs import DATABASE_ERROR_TYPE, text_safe_db_errors
+
+    with pytest.raises(ApplicationError) as raised:
+        with text_safe_db_errors():
+            raise IntegrityError("INSERT INTO review_docs ...", {"data": f"a draft about {MARKER}"}, Exception("x"))
+    assert raised.value.type == DATABASE_ERROR_TYPE
+    assert not raised.value.non_retryable
+    assert MARKER not in str(raised.value) and raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+
+
+@pytest.mark.asyncio
+async def test_a_removal_is_retried_until_its_checkpoint_completes(make_review_input, test_db_isolation):
+    """A reader holding an old snapshot keeps the WAL from being truncated:
+    the removal fails retryably and completes once the reader is gone."""
+    import sqlite3
+    from temporalio.exceptions import ApplicationError
+    from backend.activities.store_activities import (
+        WAL_CHECKPOINT_PENDING_ERROR,
+        DeletePostTextInput,
+        _delete_post_text_sync,
+    )
+    from backend.review_docs import save_doc
+
+    db_path = Path(test_db_isolation)
+    # The author is kept on removal (issue #9), so the word is only in the text
+    plain_author = Author(id="author_9", username="pat_dev", name="Pat", followers_count=5000)
+    review_input = make_review_input(post=replace(marker_post(), url="", author=plain_author))
+    save_doc("review:test:1001_busy", review_input.post_id, "evidence", f"a draft about {MARKER}")
+    reader = sqlite3.connect(db_path, timeout=0.1)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM review_docs").fetchone()  # holds a snapshot
+    removal = DeletePostTextInput(workflow_id="review:test:1001_busy", idempotency_key="k", post_id="1001")
+    try:
+        with pytest.raises(ApplicationError) as pending:
+            _delete_post_text_sync(removal)
+        assert pending.value.type == WAL_CHECKPOINT_PENDING_ERROR and not pending.value.non_retryable
+    finally:
+        reader.rollback()
+        reader.close()
+    _delete_post_text_sync(removal)  # the retry
+    assert MARKER.encode() not in _sqlite_bytes(db_path)
+
+
+@pytest.mark.asyncio
+async def test_a_retried_claim_gate_gates_the_same_draft(make_review_input):
+    """The gate rewrites the draft it gates; a retry (worker restart after
+    the write) reads the copy draft_reply stored and returns the same result."""
+    from temporalio.testing import ActivityEnvironment
+    from backend.activities.claim_gate_activity import ClaimGateInput, claim_gate
+    from backend.activities.reply_activities import DraftReplyInput, ReplyActivities
+    from backend.adapters import FakeReplyAgent
+    from backend.activities.reply_activities import PlanReplyInput, ResearchPostInput
+
+    review_input = make_review_input()
+    env = ActivityEnvironment()  # workflow id "test"
+    reply = ReplyActivities(FakeReplyAgent(), draft_mode="assembled")
+    await env.run(reply.research_post, ResearchPostInput(
+        post=None, topic="reliability", product_brief=review_input.product_brief, idempotency_key="r",
+        post_id=review_input.post_id,
+    ))
+    await env.run(reply.plan_reply, PlanReplyInput(
+        post=None, evidence=None, idempotency_key="p", post_id=review_input.post_id, attempt=1,
+    ))
+    drafted = await env.run(reply.draft_reply, DraftReplyInput(
+        evidence=None, idempotency_key="d", product_brief=review_input.product_brief,
+        post_id=review_input.post_id, source_slot="evidence", out_slot="draft:attempt1",
+    ))
+    assert drafted.has_segments
+    gate = ClaimGateInput(segments=[], founder_materials=[], idempotency_key="g",
+                          post_id=review_input.post_id, slot="draft:attempt1")
+    first = await env.run(claim_gate, gate)
+    second = await env.run(claim_gate, gate)
+    assert first.passed and second == first
+
+
+@pytest.mark.asyncio
+async def test_an_edit_whose_card_write_failed_can_be_retried(make_review_input):
+    """The Review's state changes only once the edit's card write committed;
+    a failed write frees the request id, so a retry saves the edit."""
+    from temporalio import activity
+    from temporalio.exceptions import ApplicationError
+    from backend.activities.store_activities import update_card as real_update_card
+
+    fail = {"edit": True}
+
+    @activity.defn(name="update_card")
+    async def flaky_update_card(input):
+        from backend.activities.store_activities import UpdateCardInput
+        from temporalio.converter import value_to_type
+        input = value_to_type(UpdateCardInput, input)
+        if input.edit_text_slot and fail["edit"]:
+            raise ApplicationError("simulated card write failure", non_retryable=True)
+        return await real_update_card(input)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        worker = _worker(env, x_client=MarkerXClient(), draft_mode="assembled")
+        worker._config["activities"] = [
+            a for a in worker._config["activities"] if getattr(a, "__temporal_activity_definition").name != "update_card"
+        ] + [flaky_update_card]
+        async with type(worker)(env.client, **{k: v for k, v in worker._config.items() if k != "client"}):
+            handle = await _start_review(env, make_review_input, "edit_retry_23")
+            card = await wait_for_card_ready(handle)
+            before = card["evidence"]["draft"]["text"]
+            request_id = str(uuid.uuid4())
+            with pytest.raises(WorkflowUpdateFailedError):
+                await handle.execute_update("edit", args=["What is your stack?", request_id])
+            state = await handle.query("get_card")
+            assert state["draft_sha256"] == text_digest(before) and state["edited_text_gate_state"] is None
+            assert (await query_card(handle))["evidence"]["draft"]["text"] == before
+
+            fail["edit"] = False
+            assert await handle.execute_update("edit", args=["What is your stack?", request_id]) == "What is your stack?"
+            state = await handle.query("get_card")
+            assert state["draft_sha256"] == text_digest("What is your stack?")
+            card = await query_card(handle)
+            assert card["evidence"]["draft"]["text"] == "What is your stack?"
+            assert card["evidence"]["draft"]["steers_applied"].count("manual_edit") == 1

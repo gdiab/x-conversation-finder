@@ -265,6 +265,13 @@ class ReviewWorkflow:
         self._edit_result_count = 0
         self._edit_failing_count = 0
         self._post_anyway_from_gate = False
+        # The stored results of the current edit's check, by slot name
+        # ({"results_slot"} or {"check_slot"}); approve's post_anyway
+        # rejection names them so the API shows that check's sentences
+        self._edit_results_ref: Optional[dict] = None
+        # The edit_seq of the edit whose write committed last: a write that
+        # finishes later with a lower seq is stale (update_card ignores it)
+        self._committed_edit_seq = 0
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -1435,6 +1442,8 @@ class ReviewWorkflow:
                 failing = [r.sentence for r in (self.edited_text_gate_results or []) if not r.passed]
                 failing_count = self._edit_failing_count if self._text_free else len(failing)
                 details = {"gate_state": self.edited_text_gate_state, "failing_sentences": failing}
+                if self._text_free and self._edit_results_ref:
+                    details["results_ref"] = dict(self._edit_results_ref)
                 if self.edited_text_gate_state == "failed":
                     raise _rejection(
                         f"Edited text has {failing_count} failing sentence(s). "
@@ -1636,6 +1645,11 @@ class ReviewWorkflow:
             self._edit_in_flight_count += 1
             try:
                 return await self._edit_text_free(client_request_id, text_ref)
+            except Exception:
+                # Not saved: a retry with the same request id runs again
+                # rather than report success through the dedupe path
+                self._edit_requests.discard(client_request_id)
+                raise
             finally:
                 self._edit_in_flight_count -= 1
         
@@ -1779,11 +1793,12 @@ class ReviewWorkflow:
             results_slot = written_check = ""
             result_count = failing_count = 0
 
-        self._draft_sha256 = text_ref["sha256"]
-        self.edited_text_gate_state = gate_state
-        self._edit_result_count = result_count
-        self._edit_failing_count = failing_count
+        # The seq is taken when the check finishes, so the last edit to
+        # finish wins (QA R12); the workflow's state changes only once its
+        # card write committed, and only for the newest seq, so it always
+        # describes the stored card
         self._edit_seq += 1
+        edit_seq = self._edit_seq
         try:
             await workflow.execute_activity(
                 update_card,
@@ -1791,7 +1806,7 @@ class ReviewWorkflow:
                     workflow_id=workflow_id,
                     idempotency_key=f"{workflow_id}:update:edit:{client_request_id}",
                     edited_text_gate_state=gate_state,
-                    edit_seq=self._edit_seq,
+                    edit_seq=edit_seq,
                     post_id=self.input.post_id,
                     edit_text_slot=text_slot,
                     edit_results_slot=results_slot,
@@ -1804,6 +1819,16 @@ class ReviewWorkflow:
             if isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR:
                 raise _rejection(POST_REMOVED_SKIP_REASON, POST_REMOVED_ERROR)
             raise
+        if edit_seq > self._committed_edit_seq:
+            self._committed_edit_seq = edit_seq
+            self._draft_sha256 = text_ref["sha256"]
+            self.edited_text_gate_state = gate_state
+            self._edit_result_count = result_count
+            self._edit_failing_count = failing_count
+            self._edit_results_ref = (
+                {"results_slot": results_slot} if results_slot
+                else {"check_slot": written_check} if written_check else None
+            )
         return self._draft_sha256
 
     @edit.validator
@@ -1945,6 +1970,7 @@ class ReviewWorkflow:
         self.edited_text_gate_results = None
         self.edited_text_gate_state = None
         self._edit_result_count = self._edit_failing_count = 0
+        self._edit_results_ref = None
         return self._draft_sha256
     
     async def _run_nudge(self, instruction: str, client_request_id: str) -> str:

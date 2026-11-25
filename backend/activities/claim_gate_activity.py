@@ -608,7 +608,11 @@ async def claim_gate(input: ClaimGateInput) -> Union[ClaimGateResult, GateSummar
     from backend.models import Evidence
 
     workflow_id = activity.info().workflow_id
-    evidence = review_docs.load_doc(workflow_id, input.post_id, input.slot, Evidence, "not gating the draft")
+    # The draft as draft_reply stored it: a retry after this activity saved
+    # its result (worker restart) gates the same input, never its own output
+    evidence = review_docs.load_doc(
+        workflow_id, input.post_id, review_docs.drafted_slot(input.slot), Evidence, "not gating the draft"
+    )
     draft = evidence.draft
     plan_rows = (
         [[PLAN_FAILURE_MARKER, r] for r in draft.plan_conformance_failures]

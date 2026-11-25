@@ -392,6 +392,9 @@ class ReplyActivities:
             key_features=input.key_features,
         ))
         review_docs.save_doc(workflow_id, input.post_id, input.out_slot, drafted)
+        # The claim gate reads this copy, not out_slot (which it rewrites), so a
+        # retried gate activity gates the same draft
+        review_docs.save_doc(workflow_id, input.post_id, review_docs.drafted_slot(input.out_slot), drafted)
         if not drafted.draft:
             marker = "[reply]" if written else PLAN_FAILURE_MARKER
             review_docs.save_doc(
