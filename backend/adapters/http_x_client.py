@@ -80,9 +80,9 @@ class HttpXClient(XClientPort):
             max_results: Maximum number of results (10-100, clamped)
         
         Returns:
-            SearchResult: the converted posts, the newest post ID in the
-            response and its billable read count (every post object in
-            `data`, issue #17)
+            SearchResult: the converted posts, the newest converted post ID
+            (None if none converted) and the billable read count (every post
+            object in `data`, issue #17)
         
         Raises:
             httpx.HTTPError: On API errors
@@ -148,7 +148,7 @@ class HttpXClient(XClientPort):
         
         # Parse tweets
         for tweet in data["data"]:
-            author = authors_by_id.get(tweet.get("author_id"))
+            author = authors_by_id.get(tweet["author_id"])
             if not author:
                 # S-7: If author not in includes, skip this tweet rather than using placeholder
                 # (Real X API should always include authors when expansions=author_id)

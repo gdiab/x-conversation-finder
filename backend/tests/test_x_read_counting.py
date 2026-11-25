@@ -142,17 +142,22 @@ async def test_http_search_counts_posts_dropped_for_a_missing_author(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_http_search_counts_a_post_without_author_id(monkeypatch):
+async def test_search_post_without_author_id_fails_and_keeps_the_reservation(monkeypatch):
+    """A post without author_id fails the search (unchanged), so the poll is
+    retried rather than its cursor moving past the post; X may have billed
+    the response, so the reservation stays counted."""
     tweet = _tweet("9004", "a1")
     del tweet["author_id"]
-    body = {"data": [tweet], "includes": {"users": [_user("a1")]}}
+    body = {"data": [tweet, _tweet("9005", "a1")], "includes": {"users": [_user("a1")]}}
     _serve(monkeypatch, lambda request: httpx.Response(200, json=body, request=request))
+    activities = XActivities(HttpXClient("synthetic-token"))
 
-    result = await HttpXClient("synthetic-token").search_recent("reliability")
-
-    assert result.posts == []
-    assert result.billable_reads == 1
-    assert result.newest_id is None
+    with pytest.raises(KeyError):
+        await _env().run(
+            activities.search_recent,
+            SearchRecentInput(query="reliability", max_results=10, idempotency_key="k"),
+        )
+    assert _reads() == 10
 
 
 @pytest.mark.asyncio
