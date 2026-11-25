@@ -199,10 +199,11 @@ export async function approveReview(
   workflowId: string, 
   postedUrl: string, 
   clientRequestId: string,
-  postAnyway: boolean = false,
-  // The draft text the founder saw: the server refuses (409 draft_changed)
-  // if the current draft differs, so an approve never applies to an unseen draft
-  draftText: string | null = null,
+  postAnyway: boolean,
+  // The draft the founder saw (its text and edited-text gate state), required
+  // by the API: the server refuses (409 draft_changed) if the current draft
+  // or its gate result differs, so an approve never applies to an unseen draft
+  shown: { text: string; gateState: string | null },
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/reviews/${workflowId}/approve`, {
     method: 'POST',
@@ -211,7 +212,8 @@ export async function approveReview(
       posted_url: postedUrl,
       client_request_id: clientRequestId,
       post_anyway: postAnyway,
-      draft_text: draftText,
+      draft_text: shown.text,
+      draft_gate_state: shown.gateState,
     }),
   });
   

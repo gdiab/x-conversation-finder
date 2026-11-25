@@ -19,11 +19,13 @@ beforeEach(() => {
   fetchMock.mockReset();
 });
 
+const SHOWN = { text: 'Shown synthetic draft.', gateState: null };
+
 describe('approveReview', () => {
-  it('posts the URL, request id and post_anyway=false by default', async () => {
+  it('posts the URL, request id, post_anyway and the draft shown', async () => {
     fetchMock.mockResolvedValue(new Response('{"message":"ok"}', { status: 200 }));
 
-    await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1');
+    await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', false, SHOWN);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
@@ -33,23 +35,29 @@ describe('approveReview', () => {
       posted_url: 'https://x.example/me/status/9',
       client_request_id: 'req_1',
       post_anyway: false,
-      draft_text: null,
+      draft_text: 'Shown synthetic draft.',
+      draft_gate_state: null,
     });
   });
 
-  it('posts the draft text the founder saw, for the server to check', async () => {
+  it('posts the draft the founder saw (text and gate state), for the server to check', async () => {
     fetchMock.mockResolvedValue(new Response('{"message":"ok"}', { status: 200 }));
 
-    await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', false, 'Shown synthetic draft.');
+    await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', true, {
+      text: 'Shown synthetic draft.',
+      gateState: 'failed',
+    });
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(JSON.parse(init?.body as string).draft_text).toBe('Shown synthetic draft.');
+    const body = JSON.parse(init?.body as string);
+    expect(body.draft_text).toBe('Shown synthetic draft.');
+    expect(body.draft_gate_state).toBe('failed');
   });
 
   it('posts post_anyway=true when the founder overrides the edit gate', async () => {
     fetchMock.mockResolvedValue(new Response('{"message":"ok"}', { status: 200 }));
 
-    await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', true);
+    await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', true, SHOWN);
 
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init?.body as string).post_anyway).toBe(true);
@@ -68,7 +76,7 @@ describe('approveReview', () => {
       ),
     );
 
-    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1').catch((e) => e);
+    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', false, SHOWN).catch((e) => e);
     expect(err).toBeInstanceOf(ReviewApiError);
     expect(err).not.toBeInstanceOf(PostRemovedError);
     expect(err.status).toBe(409);
@@ -85,7 +93,7 @@ describe('approveReview', () => {
       new Response('{"code":"post_removed","detail":"Post removed"}', { status: 409, statusText: 'Conflict' }),
     );
 
-    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1').catch((e) => e);
+    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', false, SHOWN).catch((e) => e);
     expect(err).toBeInstanceOf(PostRemovedError);
     expect(err.code).toBe('post_removed');
   });
@@ -95,7 +103,7 @@ describe('approveReview', () => {
       new Response('{"code":"not_ready","detail":"Cannot approve before the draft card is ready"}', { status: 409 }),
     );
 
-    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1').catch((e) => e);
+    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', false, SHOWN).catch((e) => e);
     expect(err).toBeInstanceOf(ReviewApiError);
     expect(err.code).toBe('not_ready');
     expect(err.retryLater).toBe(true);
@@ -104,7 +112,7 @@ describe('approveReview', () => {
   it('falls back to the status text when the body is not JSON', async () => {
     fetchMock.mockResolvedValue(new Response('<html>bad gateway</html>', { status: 502, statusText: 'Bad Gateway' }));
 
-    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1').catch((e) => e);
+    const err = await approveReview('review-wf-1', 'https://x.example/me/status/9', 'req_1', false, SHOWN).catch((e) => e);
     expect(err).toBeInstanceOf(ReviewApiError);
     expect(err.code).toBeNull();
     expect(err.message).toBe('Failed to approve review: Bad Gateway');

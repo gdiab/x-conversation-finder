@@ -79,9 +79,11 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     const draftAtRequest = shownDraftRef.current;
     
     try {
-      await approveReview(
-        card.workflow_id, postedUrl, approveRequestId.current, postAnyway, card.evidence.draft?.text ?? null,
-      );
+      // No draft shown means nothing to approve; the server refuses '' as changed
+      await approveReview(card.workflow_id, postedUrl, approveRequestId.current, postAnyway, {
+        text: card.evidence.draft?.text ?? '',
+        gateState: card.edited_text_gate_state,
+      });
       approveRequestId.current = null; // Reset for next action
       onUpdate();
     } catch (err) {

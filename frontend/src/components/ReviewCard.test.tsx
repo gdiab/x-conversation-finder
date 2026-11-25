@@ -191,7 +191,8 @@ describe('ReviewCard: approve flow', () => {
       'https://x.example/me/status/9',
       expect.stringMatching(/^req_/),
       false,
-      card.evidence.draft?.text, // the draft the founder saw; the server checks it
+      // the draft the founder saw; the server checks it
+      { text: card.evidence.draft?.text ?? '', gateState: card.edited_text_gate_state },
     );
     expect(onUpdate).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Edited text requires acknowledgement/)).not.toBeInTheDocument();

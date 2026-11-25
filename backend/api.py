@@ -190,9 +190,13 @@ class ApproveRequest(BaseModel):
     posted_url: str
     client_request_id: str
     post_anyway: bool = False  # Per ADR-0006 Amendment E
-    # The draft text the founder saw (issue #15 review); a mismatch is 409
-    # draft_changed. Optional so direct API callers without it still work.
-    draft_text: Optional[str] = None
+    # The draft the founder saw (issue #15 review): its text and its
+    # edited-text gate state (null if never edited). A mismatch is 409
+    # draft_changed. Required, so no caller approves a draft unchecked.
+    # (The workflow argument stays optional: approvals recorded before it
+    # replay with three arguments, and validators do not run on replay.)
+    draft_text: str
+    draft_gate_state: Optional[str] = None
 
 
 class SkipRequest(BaseModel):
@@ -306,7 +310,12 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
         handle = temporal_client.get_workflow_handle(workflow_id)
         result = await handle.execute_update(
             "approve",
-            args=[request.posted_url, request.client_request_id, request.post_anyway, request.draft_text]
+            args=[
+                request.posted_url,
+                request.client_request_id,
+                request.post_anyway,
+                {"text": request.draft_text, "gate_state": request.draft_gate_state},
+            ]
         )
         
         return {"message": result}

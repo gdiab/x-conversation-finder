@@ -178,14 +178,14 @@ The review endpoints (`approve`, `edit`, `nudge`, `confirm_posted`, `skip`, `GET
 | `post_anyway_required` | 409 | the edited text failed the re-gate; also `gate_state` and `failing_sentences`. Approve again with `post_anyway=true` |
 | `not_ready` | 409 | the pending card is not stored yet; try again in a moment. The card row is written inside `store_card` slightly before the workflow marks the card ready, so the UI can briefly show a card this rejects |
 | `busy` | 409 | another edit, nudge or approval is running; try again after it |
-| `draft_changed` | 409 | approve's `draft_text` (the draft the founder saw) is not the current draft; the UI reloads the card. Checked before `post_anyway`, so an override always acknowledges the shown draft's failures |
+| `draft_changed` | 409 | approve's `draft_text` and `draft_gate_state` (the draft the founder saw) are not the current draft and gate result; the UI reloads the card. Checked before `post_anyway`, so an override always acknowledges the shown draft's failures |
 | `post_removed` | 409 | the target post is gone: approve's re-fetch found it gone and the review is skipped, or a nudge was refused because another Review of the post recorded its removal (`draft_reply` refuses, wrapped in `ActivityError`) |
 | `invalid_state` / `invalid_request` | 409 / 400 | not allowed in this status / bad input (422 with FastAPI's `errors` for a malformed body) |
 | `rejected` | 422 | an update handler refused it (a nudged draft failed the gate, a URL that is not a reply to the post) |
 | `not_found` | 404 | no such workflow, or it has ended (updates and signals) |
 | `server_error` | 500 | not the Review's decision: an activity failed, Temporal is unreachable or not connected |
 
-The UI sends the draft text it shows with every approve. A caller that sends none is not checked.
+Approve requires `draft_text` (and takes `draft_gate_state`): the draft the caller shows. The UI sends both with every approve.
 
 Approve, edit and nudge are rejected as `not_ready` until the pending card is stored, so no update writes to a card row that does not exist yet. Until a card row (pending or skipped) is stored, `GET /api/reviews/{id}` returns `{"status": "researching" | "planning" | "drafting", "in_progress": true, "evidence": null, ...}` instead of a 404 (`status` is `skipped` after a founder skip during research), with no post or evidence: a removal recorded by another Review of the post can be applied only against the stored row.
 

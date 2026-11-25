@@ -703,7 +703,7 @@ class ReviewWorkflow:
         posted_url: str,
         client_request_id: str,
         post_anyway: bool = False,
-        expected_draft_text: Optional[str] = None,
+        expected_draft: Optional[dict] = None,
     ) -> str:
         """
         Approve update - founder will post this.
@@ -714,9 +714,9 @@ class ReviewWorkflow:
         Per ADR-0006 Amendment E: If edited text failed re-gate, requires post_anyway=True.
         Validator rejects approve without post_anyway when edited text fails gate.
 
-        expected_draft_text (issue #15 review): the draft the founder saw; only
-        the validator reads it. Approvals recorded with three arguments replay
-        with the default.
+        expected_draft (issue #15 review): {"text", "gate_state"} of the draft
+        the founder saw; only the validator reads it. Approvals recorded with
+        three arguments replay with the default.
         """
         # Deduplicate (B9: per-handler set)
         if client_request_id in self._approve_requests:
@@ -847,7 +847,7 @@ class ReviewWorkflow:
         posted_url: str,
         client_request_id: str,
         post_anyway: bool = False,
-        expected_draft_text: Optional[str] = None,
+        expected_draft: Optional[dict] = None,
     ) -> None:
         """
         Validator for approve Update.
@@ -886,12 +886,20 @@ class ReviewWorkflow:
             )
 
         # issue #15 review: the founder approves the draft they saw (ADR-0004),
-        # and a post_anyway acknowledges that draft's failures. If the draft
+        # and a post_anyway acknowledges that draft's gate result. If either
         # changed since (an edit or nudge from elsewhere, a reload that has
-        # not arrived), refuse rather than approve a draft nobody has seen.
-        # Callers that send no text (older clients) are not checked.
-        current_text = self.evidence.draft.text if self.evidence and self.evidence.draft else None
-        if expected_draft_text is not None and expected_draft_text != current_text:
+        # not arrived, the same text re-gated after a "not_checked"), refuse
+        # rather than approve what nobody has seen. The re-gate of a given
+        # text is deterministic apart from "not_checked", so text and gate
+        # state identify the result. Callers that send none are not checked.
+        current = {
+            "text": self.evidence.draft.text if self.evidence and self.evidence.draft else None,
+            "gate_state": self.edited_text_gate_state,
+        }
+        if expected_draft is not None and (
+            expected_draft.get("text") != current["text"]
+            or expected_draft.get("gate_state") != current["gate_state"]
+        ):
             raise _rejection(
                 "The draft changed since it was shown. Review the current draft and approve again.",
                 DRAFT_CHANGED_ERROR,
