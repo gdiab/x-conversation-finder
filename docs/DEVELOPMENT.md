@@ -170,7 +170,8 @@ call is counted per Temporal activity attempt:
 - A 4xx status (including 429, except 408) releases the reservation: the
   provider refused the request, so no completion or posts were returned. 408,
   5xx, timeouts, connection errors and crashes leave it counted at the reserved
-  amount. `lookup_post` settles to 1 read when a post is returned, 0 when not.
+  amount. `lookup_post` counts 1 read per attempt even when it returns None:
+  the HTTP adapter returns None for a 404 and for post data it cannot convert.
 - Output that hits the max output tokens (`finish_reason == "length"`) fails
   research and draft without retry (`InferenceOutputTruncated`); the call stays
   counted. A truncated plan parses as an empty plan and is re-planned.

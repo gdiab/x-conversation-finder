@@ -607,8 +607,9 @@ async def test_lookup_rejected_request_releases_the_read_and_retry_counts_one():
 
 
 @pytest.mark.asyncio
-async def test_lookup_not_found_releases_the_read(monkeypatch):
-    """The real HTTP adapter turns a 404 into None; no post returned, no read billed."""
+async def test_lookup_returning_none_stays_counted(monkeypatch):
+    """The real HTTP adapter turns a 404 into None, and also post data it cannot
+    convert (no author expansion), which X billed. None therefore keeps 1 read."""
     from backend.adapters.http_x_client import HttpXClient
 
     def handler(request):
@@ -626,5 +627,7 @@ async def test_lookup_not_found_releases_the_read(monkeypatch):
 
     assert result is None
     budget = get_today_budget()
-    assert budget["x_reads"] == 0
-    assert budget["x_cost_usd"] == pytest.approx(0.0)
+    assert budget["x_reads"] == 1
+    assert budget["x_cost_usd"] == pytest.approx(get_settings().x_post_read_cost)
+    (recon,) = _reconciliations("x_reads")
+    assert recon.actual_amount == 1

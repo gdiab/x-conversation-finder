@@ -183,8 +183,9 @@ class XActivities:
         
         Idempotent: same post_id is cached.
         Returns None if post is deleted (404).
-        Budget: reserves 1 post read; settles to 1 when a post is returned and to
-        0 when none is (issue #8: X bills per post returned).
+        Budget: 1 post read per attempt, also when None is returned (the adapter
+        cannot tell a 404 from unconvertible post data). An attempt X refused
+        with a 4xx status is released (issue #8).
         """
         activity.logger.info(f"Looking up post {input.post_id} (key: {input.idempotency_key})")
         
@@ -217,19 +218,19 @@ class XActivities:
                 )
             raise
         
-        # Issue #8: X bills per post returned. A found post is 1 read; no post
-        # (404 or a response without data) returned nothing, so release the read.
+        # Issue #8: close the reservation at 1 read. None is kept counted too:
+        # the HTTP adapter returns None both for a 404 and for a response whose
+        # post data it could not convert (e.g. no author expansion), which X
+        # billed. Only a refused request (4xx exception, above) is released.
         reconcile_x_reads(
             reserved_reads=1,
-            actual_reads=1 if post else 0,
+            actual_reads=1,
             reservation_date=reservation_date,
             workflow_id=activity.info().workflow_id,
             workflow_run_id=activity.info().workflow_run_id,
             activity_id=activity.info().activity_id,
             cost_per_read=settings.x_post_read_cost,
         )
-        if not post:
-            cost_usd = 0.0
         if post:
             activity.logger.info(f"Found post {input.post_id} by @{post.author.username}, cost ${cost_usd:.4f}")
         else:
