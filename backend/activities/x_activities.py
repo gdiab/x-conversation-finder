@@ -8,21 +8,30 @@ from temporalio import activity
 
 from backend.models import Post
 from backend.ports import XClientPort
-from backend.budget import reserve_x_budget, reconcile_x_reads, release_x_reservation, BudgetExceeded
+from backend.budget import (
+    reserve_x_budget,
+    reconcile_x_reads,
+    release_x_reservation,
+    request_never_sent,
+    BudgetExceeded,
+)
 from backend.config import get_settings
 from temporalio.exceptions import ApplicationError
 
 
-def x_rejected_request(exc: BaseException) -> bool:
-    """True when the X API refused the request with a 4xx status (issue #8).
+def x_billed_nothing(exc: BaseException) -> bool:
+    """True when X returned nothing billable for the request (issue #8): X
+    refused it with a 4xx status, or the connection was never established.
 
     X bills per post returned, and a refused request returns none, so the
     attempt's reservation is released. The HTTP adapter's base URL is fixed to
     the X API, so a 4xx comes from X itself, not from a gateway. The HTTP adapter raises
     httpx.HTTPStatusError, or a RateLimitError ApplicationError for 429.
-    408, 5xx, timeouts and connection errors return False: the request may
+    408, 5xx, read timeouts and other errors return False: the request may
     have been served, so the reservation stays counted.
     """
+    if request_never_sent(exc):
+        return True
     if isinstance(exc, ApplicationError):
         return exc.type == "RateLimitError"
     if isinstance(exc, httpx.HTTPStatusError):
@@ -143,7 +152,7 @@ class XActivities:
                 max_results=input.max_results,
             )
         except Exception as e:
-            if x_rejected_request(e):
+            if x_billed_nothing(e):
                 release_x_reservation(
                     reserved_reads=reserved_reads,
                     reservation_date=reservation_date,
@@ -211,7 +220,7 @@ class XActivities:
         try:
             post = await self._x_client.lookup_post(input.post_id)
         except Exception as e:
-            if x_rejected_request(e):
+            if x_billed_nothing(e):
                 release_x_reservation(
                     reserved_reads=1,
                     reservation_date=reservation_date,
@@ -279,7 +288,7 @@ class XActivities:
                 max_results=max_results,
             )
         except Exception as e:
-            if x_rejected_request(e):
+            if x_billed_nothing(e):
                 release_x_reservation(
                     reserved_reads=max_results,
                     reservation_date=reservation_date,

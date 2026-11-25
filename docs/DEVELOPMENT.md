@@ -172,15 +172,17 @@ call is counted per Temporal activity attempt:
   error: `OPENAI_BASE_URL` may be a gateway, so a status proves nothing about
   upstream billing. An X request that X refused with a 4xx status (including
   429, except 408) is released: X bills per post returned and the X base URL is
-  fixed in code. 408, 5xx, timeouts, connection errors and crashes stay counted.
+  fixed in code. A request whose connection was never established
+  (`httpx.ConnectError`/`ConnectTimeout`, also as the cause of an OpenAI SDK
+  error) is released for both. 408, 5xx, read timeouts and crashes stay counted.
 - X search reserves `billable_max_results(max_results)`: the HTTP adapter clamps
   the request to X's 10-100 range, and the reservation covers what is sent.
 - A reservation that is already closed refuses to authorize another request
   (`ReservationClosed`). `lookup_post` counts 1 read per attempt even when it returns None:
   the HTTP adapter returns None for a 404 and for post data it cannot convert.
 - Output that hits the max output tokens (`finish_reason == "length"`) fails
-  research and draft without retry (`InferenceOutputTruncated`); the call stays
-  counted. A truncated plan parses as an empty plan and is re-planned.
+  research, plan and draft without retry (`InferenceOutputTruncated`); the call
+  stays counted.
 - The OpenAI client runs with `max_retries=0`: Temporal's retry policy owns
   retries, so each retried request is reserved and counted.
 - `FakeReplyAgent` makes no paid calls and reserves nothing.

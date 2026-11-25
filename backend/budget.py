@@ -19,6 +19,8 @@ Issue #8: every paid attempt is counted.
   in code, so a 4xx comes from X itself. Inference errors are never released:
   openai_base_url can point at a gateway whose status says nothing about
   upstream billing. 5xx, timeouts and crashes stay counted.
+- An attempt whose connection was never established (request_never_sent) is
+  released, for X and inference alike: the request did not reach the provider.
 - Inference reservations are sized from an upper bound on the prompt's tokens
   plus the call's max output tokens (prompt_token_bound, InferenceMeter), not
   from fixed estimates.
@@ -28,6 +30,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import httpx
 from sqlalchemy import text
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -514,7 +517,8 @@ def release_x_reservation(
 ) -> float:
     """Release an X reservation whose request returned no posts (issue #8).
 
-    For an attempt X refused with a 4xx status. X bills per post returned. Reconciles the
+    For an attempt X refused with a 4xx status, or whose connection was never
+    established (request_never_sent). X bills per post returned. Reconciles the
     reservation to zero reads. Do not call it for 5xx, timeouts or connection
     errors, where the request may have been served; those stay counted.
     """
@@ -556,8 +560,49 @@ def reconcile_inference_tokens(
     """
     return _close_inference_reservation(
         reserved_input, reserved_output, actual_input, actual_output, reservation_date,
-        workflow_id, workflow_run_id, activity_id, attempt, call_index,
+        workflow_id, workflow_run_id, activity_id, attempt, call_index, released=False,
     )
+
+
+def release_inference_reservation(
+    reserved_input: int,
+    reserved_output: int,
+    reservation_date: str,
+    workflow_id: str,
+    workflow_run_id: str,
+    activity_id: str,
+    attempt: Optional[int] = None,
+    call_index: int = 1,
+) -> float:
+    """Release an inference reservation whose request was never sent (issue #8).
+
+    Only for a failure that proves the request did not reach the provider
+    (request_never_sent). Refunds the reservation and takes the call off the
+    day's inference_calls count. Idempotent with reconcile_inference_tokens
+    (same key). Returns 0.0.
+    """
+    return _close_inference_reservation(
+        reserved_input, reserved_output, 0, 0, reservation_date,
+        workflow_id, workflow_run_id, activity_id, attempt, call_index, released=True,
+    )
+
+
+def request_never_sent(exc: BaseException) -> bool:
+    """True when exc proves the request never reached the provider (issue #8).
+
+    The connection was never established: httpx.ConnectError (DNS failure,
+    refused, TLS handshake) or httpx.ConnectTimeout, raised directly or as the
+    cause of an SDK error (openai wraps them in APIConnectionError /
+    APITimeoutError). Read, write and pool timeouts, error statuses and all
+    other failures return False: the request may have been sent and billed.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return True
+        exc = exc.__cause__
+    return False
 
 
 def _close_inference_reservation(
@@ -571,6 +616,7 @@ def _close_inference_reservation(
     activity_id: str,
     attempt: Optional[int],
     call_index: int,
+    released: bool,
 ) -> float:
     settings = get_settings()
     attempt = _resolve_attempt(attempt)
@@ -638,6 +684,9 @@ def _close_inference_reservation(
             )
         
         ledger.inference_cost_usd = max(0.0, new_cost)
+        if released:
+            # The call was counted when reserved; it was never sent.
+            ledger.inference_calls = max(0, (ledger.inference_calls or 0) - 1)
         ledger.last_updated = datetime.now(timezone.utc).isoformat()
         
         # Record reconciliation for idempotency
@@ -705,8 +754,9 @@ class InferenceCall:
     """One paid inference call's reservation, and how it was closed.
 
     status: "open" (reserved; stays counted at the reserved amount, also when
-    the request failed), "settled" (reconciled to the provider's usage) or
-    "kept" (no usable usage reported, reservation kept).
+    the request failed), "settled" (reconciled to the provider's usage),
+    "kept" (no usable usage reported, reservation kept) or "released" (the
+    request was never sent).
     """
 
     meter: "InferenceMeter"
@@ -749,6 +799,25 @@ class InferenceCall:
         return self.cost_usd
 
 
+    def release(self) -> None:
+        """Refund the reservation: the request was never sent (request_never_sent)."""
+        if self.status != "open":
+            return
+        m = self.meter
+        release_inference_reservation(
+            reserved_input=self.reserved_input,
+            reserved_output=self.reserved_output,
+            reservation_date=self.reservation_date,
+            workflow_id=m.workflow_id,
+            workflow_run_id=m.workflow_run_id,
+            activity_id=m.activity_id,
+            attempt=m.attempt,
+            call_index=self.call_index,
+        )
+        self.status = "released"
+        self.cost_usd = 0.0
+
+
 @dataclass
 class InferenceMeter:
     """Meters the paid inference calls one activity attempt makes (issue #8).
@@ -758,7 +827,8 @@ class InferenceMeter:
     output tokens it sends, then settles the call. Each call gets
     its own reservation key (attempt + call index), so a retried attempt or a
     second call in one attempt is counted, never folded into an earlier one.
-    A call that fails keeps its reservation counted.
+    A call that fails keeps its reservation counted, unless the connection was
+    never established (request_never_sent).
     """
 
     workflow_id: str

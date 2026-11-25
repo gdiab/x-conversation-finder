@@ -57,7 +57,8 @@ class ReplyAgentPort(ABC):
         `feedback` carries the previous attempt's validation errors when the
         plan is re-requested. Adapters must not raise on malformed model output:
         return what was parsed (unknown or missing values as ""/None) so that
-        validation records the reasons.
+        validation records the reasons. Output cut off at the max output tokens
+        is a configuration error and may raise (issue #8).
         """
         pass
     

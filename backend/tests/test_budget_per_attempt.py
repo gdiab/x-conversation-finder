@@ -35,6 +35,7 @@ from backend.budget import (
     get_today_budget,
     ReservationClosed,
     meter_inference,
+    request_never_sent,
     reconcile_inference_tokens,
     reserve_inference_budget,
     reserve_x_budget,
@@ -278,7 +279,7 @@ async def test_missing_or_partial_usage_keeps_the_reservation(usage, sample_post
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["research_post", "draft_reply"])
+@pytest.mark.parametrize("name", ["research_post", "plan_reply", "draft_reply"])
 async def test_truncated_output_fails_without_retry_and_stays_counted(name, sample_post):
     agent, _ = _agent([(PAYLOADS[name], (USAGE_IN, 400), "length")])
     fn, arg = _activity_call(name, ReplyActivities(agent), sample_post)
@@ -306,6 +307,60 @@ async def test_real_client_refuses_a_call_outside_a_metered_attempt(sample_post,
     assert info.value.type == "UnmeteredInferenceCall"
     assert sent == []
     assert agent.client.max_retries == 0
+
+
+def _openai_connection_error(cause: BaseException) -> openai.APIConnectionError:
+    """Shaped as openai's client raises it: `raise APIConnectionError(...) from err`."""
+    request = httpx.Request("POST", "https://api.openai.invalid/v1/chat/completions")
+    cls = openai.APITimeoutError if isinstance(cause, httpx.TimeoutException) else openai.APIConnectionError
+    err = cls(request=request)
+    err.__cause__ = cause
+    return err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", [
+    httpx.ConnectError("synthetic: connection refused"),
+    httpx.ConnectTimeout("synthetic: connect timeout"),
+])
+async def test_connection_never_established_releases_the_attempt(cause, sample_post):
+    agent, _ = _agent([_openai_connection_error(cause), PLAN_JSON])
+    fn, arg = _activity_call("plan_reply", ReplyActivities(agent), sample_post)
+
+    with pytest.raises(openai.APIConnectionError):
+        await _env(attempt=1).run(fn, arg)
+    budget = get_today_budget()
+    assert budget["inference_calls"] == 0
+    assert budget["inference_cost_usd"] == pytest.approx(0.0)
+
+    await _env(attempt=2).run(fn, arg)
+    budget = get_today_budget()
+    assert budget["inference_calls"] == 1
+    assert budget["inference_cost_usd"] == pytest.approx(_actual_cost())
+
+
+@pytest.mark.asyncio
+async def test_read_timeout_after_sending_keeps_the_attempt_counted(sample_post):
+    agent, _ = _agent([_openai_connection_error(httpx.ReadTimeout("synthetic: no response"))])
+    fn, arg = _activity_call("plan_reply", ReplyActivities(agent), sample_post)
+
+    with pytest.raises(openai.APITimeoutError):
+        await _env(attempt=1).run(fn, arg)
+    (reservation,) = _reservations("inference")
+    assert reservation.reconciled == 0
+    assert get_today_budget()["inference_calls"] == 1
+
+
+def test_request_never_sent_only_for_connection_failures():
+    request = httpx.Request("GET", "https://api.x.invalid/2/tweets/search/recent")
+    assert request_never_sent(httpx.ConnectError("x", request=request))
+    assert request_never_sent(httpx.ConnectTimeout("x", request=request))
+    assert request_never_sent(_openai_connection_error(httpx.ConnectError("x")))
+    assert not request_never_sent(httpx.ReadTimeout("x", request=request))
+    assert not request_never_sent(httpx.RemoteProtocolError("x", request=request))
+    assert not request_never_sent(_openai_connection_error(httpx.ReadTimeout("x")))
+    assert not request_never_sent(_status_error(503))
+    assert not request_never_sent(RuntimeError("x"))
 
 
 @pytest.mark.asyncio
@@ -404,6 +459,12 @@ async def test_admission_near_the_cap_tracks_the_prompt_not_a_fixed_estimate(sam
 
 
 def test_small_call_near_the_cap_is_not_refused_by_a_fixed_estimate(monkeypatch):
+    """Issue #8 acceptance, at the meter: a call whose own bound is below the old
+    fixed research estimate (500 in / 200 out) is admitted where that estimate is
+    refused. No application activity can show this end to end: a true upper
+    bound on its prompt (UTF-8 bytes) plus its configured max output exceeds
+    the old fixed estimates, so the activity-level test above shows instead
+    that admission tracks each call's own size."""
     settings = get_settings()
     old_fixed_cost = 500 * settings.inference_input_token_cost_usd + 200 * settings.inference_output_token_cost_usd
     small_messages = [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "Short."}]
@@ -673,3 +734,14 @@ async def test_http_search_reserves_what_the_request_can_be_billed_for(monkeypat
         )
     assert sent == [10]
     assert reserved == [10]
+
+
+@pytest.mark.asyncio
+async def test_search_connection_never_established_releases_reads():
+    request = httpx.Request("GET", "https://api.x.invalid/2/tweets/search/recent")
+    activities = XActivities(ScriptedXClient([httpx.ConnectError("synthetic", request=request)]))
+    arg = SearchRecentInput(query="synthetic", max_results=10, idempotency_key="k")
+
+    with pytest.raises(httpx.ConnectError):
+        await _env(attempt=1).run(activities.search_recent, arg)
+    assert get_today_budget()["x_reads"] == 0

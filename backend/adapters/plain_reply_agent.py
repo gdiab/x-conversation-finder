@@ -11,7 +11,7 @@ from typing import Any, List, Optional
 from openai import AsyncOpenAI
 from temporalio.exceptions import ApplicationError
 
-from backend.budget import current_inference_meter, prompt_token_bound
+from backend.budget import current_inference_meter, prompt_token_bound, request_never_sent
 from backend.config import get_settings
 from backend.models import (
     Evidence,
@@ -208,9 +208,10 @@ class PlainReplyAgent(ReplyAgentPort):
         the call is reserved right before the request, sized from an upper bound
         on the prompt's tokens and the max output tokens sent with it, then
         reconciled to the reported usage. A failed request (any error status,
-        timeout, connection error, cancellation) keeps its reservation counted:
+        read timeout, cancellation) keeps its reservation counted:
         openai_base_url may be a gateway, so a status does not prove that no
-        upstream work was billed.
+        upstream work was billed. Only a connection that was never established
+        (backend.budget.request_never_sent) releases it.
         """
         max_output_tokens = self._max_output_tokens[call]
         meter = current_inference_meter()
@@ -224,15 +225,20 @@ class PlainReplyAgent(ReplyAgentPort):
         reservation = (
             meter.reserve(prompt_token_bound(messages), max_output_tokens) if meter else None
         )
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
-            max_completion_tokens=max_output_tokens,
-            # Without JSON mode, models wrap long answers in ```json fences,
-            # which json.loads rejects.
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_completion_tokens=max_output_tokens,
+                # Without JSON mode, models wrap long answers in ```json fences,
+                # which json.loads rejects.
+                response_format={"type": "json_object"},
+            )
+        except Exception as e:
+            if reservation and request_never_sent(e):
+                reservation.release()
+            raise
         if reservation:
             usage = getattr(response, "usage", None)
             reservation.settle(
@@ -399,6 +405,9 @@ Return a JSON object with exactly these keys:
             ],
             temperature=0.3,
         )
+        # A truncated plan is a configuration error, not malformed model output:
+        # re-planning with the same limit would pay for the same truncation.
+        self._raise_if_truncated("plan", response)
 
         try:
             result = json.loads(response.choices[0].message.content)
