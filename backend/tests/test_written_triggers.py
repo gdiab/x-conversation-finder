@@ -264,6 +264,41 @@ def test_a_key_feature_is_matched_as_normalized_whole_words():
     assert TRIGGER_FEATURE_TERM not in _kinds("The queue filled up with dead jobs.", terms=terms)
 
 
+@pytest.mark.parametrize("term,sentence", [
+    ("Delivery status", "Delivery statuses stay visible."),
+    ("Delivery statuses", "The delivery status stays visible."),
+    ("Approval process", "Approval processes differ per team."),
+    ("Approval processes", "The approval process is the hard part."),
+    ("Audit log", "Audit logs help there."),
+    ("Audit logs", "An audit log helps there."),
+    ("Dead-letter box", "Dead letter boxes fill up."),
+    ("Retry policy", "Retry policies matter here."),
+    ("Retry policies", "A retry policy matters here."),
+    ("Safe house", "Safe houses are rare."),
+    ("Bus topology", "Buses topology is odd wording."),
+    ("Team address", "Team addresses change."),
+])
+def test_a_key_feature_matches_its_plain_plural_and_singular(term, sentence):
+    """Whichever form the founder entered: -s, -es (also after s, ss and us) and -ies."""
+    assert _matches(sentence, TRIGGER_FEATURE_TERM, terms=[term]) == [term]
+
+
+@pytest.mark.parametrize("term,sentence", [
+    ("Delivery status", "The delivery state stays visible."),
+    ("Audit log", "We audit login attempts by hand."),
+    ("It", "Its shape is odd."),  # a stem keeps at least three letters
+    ("Bus", "Bu is not a word."),
+    ("Replay", "Replaying events by hand gets old fast."),
+])
+def test_plural_folding_does_not_match_other_words(term, sentence):
+    assert TRIGGER_FEATURE_TERM not in _kinds(sentence, terms=[term])
+
+
+def test_the_product_name_is_not_plural_folded():
+    """Only key features are: "Relays" is not the product "Relay"."""
+    assert TRIGGER_PRODUCT_NAME not in _kinds("Relays are old hardware.", name="Relay", aliases=[], terms=[])
+
+
 def test_a_long_key_feature_is_kept_and_only_adds_a_check():
     """The API refuses an entry of more than six words. One that reaches the
     gate another way is not cut: it can only add a sentence to the checked set."""

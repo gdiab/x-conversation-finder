@@ -151,31 +151,42 @@ def _word_spans(folded: str) -> List[Tuple[str, int, int]]:
     return [(m.group(), m.start(), m.end()) for m in _WORD_RE.finditer(folded)]
 
 
-def _singular(word: str) -> str:
-    """Fold a plain plural, so "guarantee" matches the term "guarantees" and
-    "delivery" matches "deliveries". A tolerance, not a stemmer."""
+def _plural_forms(word: str) -> frozenset:
+    """The word, and every word it may be the plain plural of: without its
+    "s", without its "es", and with "ies" read as "y" (a stem keeps at least
+    three letters). Two words are the same term word when their forms share
+    one, so "delivery" matches "deliveries", "status" matches "statuses",
+    "process" matches "processes" and "house" matches "houses", whichever of
+    the two the founder entered.
+
+    A tolerance, not a stemmer: no rule decides which reading of "-ses" is
+    right, so both are kept. It can match two unrelated words ("new" and
+    "news"); that only adds a sentence to the checked set.
+    """
+    forms = {word}
     if len(word) > 4 and word.endswith("ies"):
-        return word[:-3] + "y"
-    if len(word) > 4 and word.endswith(("xes", "zes", "ches", "shes")):
-        return word[:-2]
-    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]
-    return word
+        forms.add(word[:-3] + "y")
+    if len(word) > 4 and word.endswith("es"):
+        forms.add(word[:-2])
+    if len(word) > 3 and word.endswith("s"):
+        forms.add(word[:-1])
+    return frozenset(forms)
 
 
 def _phrase_matches(words: Sequence[Tuple[str, int, int]], phrase: str, *, plural: bool) -> List[Tuple[int, int]]:
-    """Character spans where the phrase's words occur as consecutive whole words."""
+    """Character spans where the phrase's words occur as consecutive whole
+    words. With `plural`, a word also matches its plain plural or singular."""
     wanted = _WORD_RE.findall(_fold(phrase))
     if not wanted:
         return []
-    if plural:
-        wanted = [_singular(w) for w in wanted]
+
+    def same(word: str, other: str) -> bool:
+        return bool(_plural_forms(word) & _plural_forms(other)) if plural else word == other
+
     spans = []
     for i in range(len(words) - len(wanted) + 1):
         window = [w for w, _, _ in words[i:i + len(wanted)]]
-        if plural:
-            window = [_singular(w) for w in window]
-        if window == wanted:
+        if all(same(w, o) for w, o in zip(window, wanted)):
             spans.append((words[i][1], words[i + len(wanted) - 1][2]))
     return spans
 
