@@ -331,6 +331,12 @@ def _writer_fields(writer: Optional[tuple]) -> dict:
 RUN_SLOT = "#run"
 
 
+def run_superseded(db, workflow_id: str) -> bool:
+    """Whether the running activity's run was replaced by a later run of
+    the same workflow id: then it writes nothing (cards included)."""
+    return _superseded(db, workflow_id, current_writer())
+
+
 def _superseded(db, workflow_id: str, writer: Optional[tuple]) -> bool:
     """Whether `writer` belongs to a run that a later run of the same
     workflow id has replaced (a timed-out activity of a closed Review whose
@@ -348,8 +354,8 @@ def _write_blocked(db, workflow_id: str, row, writer: Optional[tuple]) -> bool:
 @_text_safe
 def claim_run(workflow_id: str, post_id: str) -> bool:
     """Make the running activity's workflow run the owner of this workflow
-    id's documents; called by a run's first activity (research_post) before
-    it writes. A new run (a Review started again under the same id) retires
+    id's documents; called at the start of a run's first activity
+    (research_post), before its model call. A new run (a Review started again under the same id) retires
     the previous owner and deletes its documents. Returns False for a run
     already retired: its late activity then writes nothing."""
     writer = current_writer()

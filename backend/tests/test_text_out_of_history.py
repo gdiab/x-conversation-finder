@@ -651,3 +651,29 @@ def test_a_retired_runs_late_attempt_writes_nothing(make_review_input):
         assert not review_docs.claim_run(wid, post_id)
         review_docs.save_doc(wid, post_id, "evidence", "late old write")
     assert review_docs.load_doc(wid, post_id, "evidence", str) == "new run evidence"
+
+
+def test_a_retired_run_writes_no_card(make_review_input):
+    """A retired run's store_card and update_card are dropped (review round 8)."""
+    from unittest import mock
+    from backend import review_docs
+    from backend.activities.store_activities import (
+        StoreCardInput, UpdateCardInput, _store_card_sync, _update_card_sync, get_stored_card,
+    )
+    from backend.database import ReviewCardDB, get_db
+
+    review_input = make_review_input()
+    wid = "review:test:1001_retired_card"
+    db = get_db()
+    db.add(ReviewCardDB(workflow_id=wid, post_data={"id": review_input.post_id, "text": "t"}, evidence_data={},
+                        status="pending", created_at="t", updated_at="t"))
+    db.commit()
+    db.close()
+    with mock.patch.object(review_docs, "current_writer", return_value=("old", 1, 1)):
+        assert review_docs.claim_run(wid, review_input.post_id)
+    with mock.patch.object(review_docs, "current_writer", return_value=("new", 1, 1)):
+        assert review_docs.claim_run(wid, review_input.post_id)
+    with mock.patch.object(review_docs, "current_writer", return_value=("old", 5, 1)):
+        _update_card_sync(UpdateCardInput(workflow_id=wid, idempotency_key="k", status="skipped", skip_reason="old"))
+        assert not review_docs.claim_run(wid, review_input.post_id)
+    assert get_stored_card(wid)["status"] == "pending"

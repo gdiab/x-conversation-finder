@@ -683,6 +683,10 @@ def _store_card_in_transaction(input: StoreCardInput, make_current: bool) -> boo
         # commit (as backend/budget.py does), so a removal cannot interleave
         # with this write, e.g. a timed-out attempt's thread still running
         db.execute(sql_text("BEGIN IMMEDIATE"))
+        # issue #23: a run replaced by a later run of the workflow id writes nothing
+        if review_docs.run_superseded(db, input.card.workflow_id):
+            db.commit()
+            return True
         if make_current:
             post_id = input.card.post.id
             if review_docs.doc_written_later(db, input.card.workflow_id, review_docs.EVIDENCE_SLOT):
@@ -772,6 +776,11 @@ def _update_card_in_transaction(input: UpdateCardInput) -> bool:
         # transaction, so a stale edit (below) writes neither the card nor them
         evidence_value = input.evidence
         workflow_id = input.workflow_id
+        # issue #23: a run replaced by a later run of the workflow id writes nothing
+        from backend import review_docs as _docs
+
+        if _docs.run_superseded(db, workflow_id):
+            return True
         if input.writer_slot:
             from backend import review_docs
 

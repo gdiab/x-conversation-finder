@@ -150,6 +150,11 @@ class ReplyActivities:
         reported usage. Raises BudgetExceeded (non-retryable) at the cap.
         """
         text_free = input.post is None
+        if text_free and not review_docs.claim_run(activity.info().workflow_id, input.post_id):
+            # issue #23: this run was replaced by a later run of the same
+            # workflow id (a restarted watch); it is closed and writes nothing
+            raise ApplicationError("A later run of this Review owns its documents", type="RunSuperseded",
+                                   non_retryable=True)
         post = review_docs.load_post(input.post_id, "not researching it") if text_free else input.post
         activity.logger.info(
             f"Researching post {post.id} for topic '{input.topic}' "
@@ -178,13 +183,11 @@ class ReplyActivities:
         )
         
         if text_free:
-            # The run's first write: this run takes over the workflow id's
-            # documents from an earlier run (a Review started again by a
-            # restarted watch); a retired run's late attempt writes nothing
-            if review_docs.claim_run(activity.info().workflow_id, post.id):
-                review_docs.save_doc(
-                    activity.info().workflow_id, post.id, review_docs.EVIDENCE_SLOT, evidence
-                )
+            # The run claimed the workflow id's documents above, before the
+            # model call; a retired run's write is dropped (save_doc)
+            review_docs.save_doc(
+                activity.info().workflow_id, post.id, review_docs.EVIDENCE_SLOT, evidence
+            )
             return ResearchSummary(
                 confidence_score=evidence.confidence_score,
                 skip_reason=evidence.skip_reason,
