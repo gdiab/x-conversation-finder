@@ -151,6 +151,11 @@ def test_the_port_and_the_activity_input_have_no_field_for_the_post_the_plan_or_
     assert {f.name for f in dataclasses.fields(CheckWrittenDraftInput)} == {
         "text", "product_brief", "product_name", "idempotency_key", "product_aliases", "key_features",
         "mention_product", "post_id",
+        # issue #23: where the text is read from (a draft's slot or a founder
+        # edit's), the check's cache kind and the draft to record it on. The
+        # activity reads only the draft text from the slot; the request below
+        # is still built from that text alone.
+        "source_slot", "source_is_founder_text", "kind", "record_slot",
     }
     assert list(ClaimCheckerPort.check.__code__.co_varnames[:3]) == ["self", "request", "idempotency_key"]
 

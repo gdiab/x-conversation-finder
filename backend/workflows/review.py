@@ -9,7 +9,7 @@ Per ADR-0002:
 - Follow-up timer after confirmation
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, List
 import asyncio
@@ -56,6 +56,9 @@ INVALID_STATE_ERROR = "InvalidState"  # not allowed in the Review's current stat
 INVALID_REQUEST_ERROR = "InvalidRequest"  # bad input (empty text, malformed URL)
 POST_REMOVED_ERROR = "PostRemoved"  # approve's re-fetch found the target post gone
 DRAFT_CHANGED_ERROR = "DraftChanged"  # approve named a draft that is no longer current
+# issue #23: a text-free nudge's redraft failed its check; the reasons quote
+# the draft, so they are stored (backend.review_docs) and the API adds them
+NUDGE_REJECTED_ERROR = "NudgeRejected"
 
 
 def _rejection(message: str, error_type: str, *details) -> ApplicationError:
@@ -97,8 +100,14 @@ with workflow.unsafe.imports_passed_through():
         DeletePostTextInput,
         POST_REMOVED_SKIP_REASON,
         redact_removed_card,
+        CardRef,
     )
     from backend.config.confidence import CONFIDENCE_THRESHOLD
+    # issue #23: text kept out of history
+    from backend.models.summaries import DraftSummary, GateSummary, PostLookup, ResearchSummary
+    from backend.review_docs import EVIDENCE_SLOT, check_slot, edit_results_slot, text_digest
+    from backend.gate.failures import NUDGE_REJECTED_PREFIX, gate_skip_reason, gate_steer
+    from backend.activities.written_check_activities import record_written_check
 
 
 @dataclass(frozen=True)
@@ -130,9 +139,16 @@ class ReviewConfig:
 
 @dataclass
 class ReviewInput:
-    """Input for Review workflow."""
+    """Input for Review workflow.
+
+    Issue #23 (George's decision, 2026-11-25, option A): a TopicWatch starts
+    each Review with post=None and the post's id, and the activities read the
+    stored post, so no post text enters the Review's history. A Review whose
+    input carries the post (every history recorded before) runs as before.
+    The mode follows from the recorded input, so replay picks the same path.
+    """
     
-    post: Post
+    post: Optional[Post]
     topic: str
     product_brief: str
     account: str
@@ -147,11 +163,15 @@ class ReviewInput:
     # field, the only source of feature terms. None on Reviews started by a
     # watch without it: no feature terms, and the card says so.
     key_features: Optional[List[str]] = None
+    # issue #23: the target post's id; set from `post` when that is given
+    post_id: str = ""
     
     def __post_init__(self):
         """Default config if not provided."""
         if self.config is None:
             object.__setattr__(self, 'config', ReviewConfig())
+        if self.post is not None and not self.post_id:
+            self.post_id = self.post.id
 
 
 @workflow.defn(name="Review")
@@ -234,6 +254,17 @@ class ReviewWorkflow:
         # (issue #15), and a repeated text costs no second call. A check that
         # could not run raises and is not kept: that text is checked again.
         self._written_checks: dict = {}
+        # --- issue #23: a Review started with only a post id keeps its text
+        # in the database. The workflow then holds what it branches on: the
+        # draft's digest, mode and product decision, and the edit's counts.
+        self._text_free = False
+        self._has_draft = False
+        self._draft_sha256 = ""
+        self._draft_mode: Optional[str] = None
+        self._mention_product: Optional[bool] = None
+        self._edit_result_count = 0
+        self._edit_failing_count = 0
+        self._post_anyway_from_gate = False
 
     def _build_card(self, workflow_id: str, post: Post, created_at: str) -> ReviewCard:
         """Helper to build a ReviewCard from current state (R4-B1: convert enum to str)."""
@@ -456,18 +487,8 @@ class ReviewWorkflow:
         claim_gate mirrors the outcome, so everything that reads a draft's
         gate verdict (the card, the skip path) works for both modes.
         """
-        # The drafter's own hints stay on the draft as provenance; the check
-        # never saw them. replace(): the result is kept for reuse, unchanged.
-        hints = list(draft.written.drafter_hints) if draft.written else []
-        draft.sentence_checks = list(result.sentences)
-        draft.written = replace(result.info, drafter_hints=hints)
-        draft.plan_conformance_failures = list(result.plan_failures)
-        draft.claim_gate = ClaimGateResult(
-            passed=result.passed,
-            segments=[],
-            failed_sentences=[(sentence, reason) for sentence, reason in result.failures],
-            reasoning=result.reasoning,
-        )
+        # One implementation with the text-free check activity (issue #23)
+        record_written_check(draft, result)
 
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
         """Draft and check the reply; None if the post is skipped.
@@ -523,12 +544,8 @@ class ReviewWorkflow:
             claim_gate_attempts += 1
             
             # Build steer from the last attempt's per-sentence failures
-            steer = None
-            if claim_gate_attempts > 1 and last_failures:
-                reasons = []
-                for sentence, reason in last_failures[:3]:  # Limit to first 3 for brevity
-                    reasons.append(f"'{sentence[:50]}...': {reason}")
-                steer = f"Previous draft failed claim gate. Fix these issues: {'; '.join(reasons)}"
+            # (shared with the text-free draft_reply, issue #23)
+            steer = gate_steer(last_failures) if claim_gate_attempts > 1 else None
             
             # Draft reply
             evidence = await workflow.execute_activity(
@@ -637,13 +654,7 @@ class ReviewWorkflow:
         
         # Skip if the draft failed after retries
         # Record the per-sentence reasons from the last attempt
-        skip_reason = "Not enough evidence - claim gate failed after regeneration"
-        if last_failures:
-            failure_summary = "; ".join(
-                f"{sentence[:30]}... ({reason})"
-                for sentence, reason in last_failures[:3]
-            )
-            skip_reason = f"Not enough evidence: {failure_summary}"
+        skip_reason = gate_skip_reason(last_failures)
         
         self.status = "skipped"
         self.skipped = True
@@ -661,6 +672,282 @@ class ReviewWorkflow:
         self._card_stored = True
 
         return None
+
+    # ---------- issue #23: Reviews that keep text out of their history ----------
+    #
+    # A Review started with post=None (by a TopicWatch since issue #23) never
+    # holds the post, the evidence or a draft. Each activity reads what it
+    # needs from the database (backend/review_docs.py) by the Review's slot
+    # names and returns a summary. Slots:
+    # - "evidence": the current evidence (research, then the plan, then the
+    #   accepted draft, then edits and accepted nudges);
+    # - "draft:attemptN", "nudge:<request id>": draft candidates.
+    # The steps and their failure handling are the ones above; the comments
+    # there apply.
+
+    def _card_ref(self, status: str, skip_reason: Optional[str] = None, **fields) -> CardRef:
+        return CardRef(
+            post_id=self.input.post_id,
+            evidence_slot=fields.pop("evidence_slot", EVIDENCE_SLOT),
+            status=status,
+            created_at=self.created_at,
+            updated_at=workflow.now().isoformat(),
+            skip_reason=skip_reason,
+            **fields,
+        )
+
+    async def _store_card_ref(self, key: str, ref: CardRef) -> None:
+        await workflow.execute_activity(
+            store_card,
+            StoreCardInput(card=None, idempotency_key=key, ref=ref),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+        )
+        self._card_stored = True
+
+    def _mark_skipped(self, reason: str) -> None:
+        self.status = "skipped"
+        self.skipped = True
+        self.skip_reason = reason
+        workflow.logger.info(f"Skipped: {reason}")
+
+    async def _draft_card_text_free(self, workflow_id: str) -> bool:
+        """Research, plan, draft and store the pending card; False if skipped.
+
+        A removal recorded meanwhile (another account's Review of the post, or
+        the eval re-fetch) makes the next activity refuse with PostRemoved:
+        the Review then ends as skipped "post removed" (see
+        _draft_and_validate), at any of these steps.
+        """
+        try:
+            if not await self._research_text_free(workflow_id):
+                return False
+            self._stage = "planning"
+            if not await self._plan_text_free(workflow_id):
+                return False
+            self._stage = "drafting"
+            slot = await self._draft_text_free(workflow_id)
+            if slot is None:
+                return False
+            await self._store_card_ref(
+                f"{workflow_id}:store:pending",
+                # A founder skip during drafting is kept, as _build_card does
+                self._card_ref(self.status, self.skip_reason, evidence_slot=slot, make_current=True),
+            )
+            return True
+        except ActivityError as e:
+            cause = e.cause
+            if not (isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR):
+                raise
+        workflow.logger.warning(f"Post {self.input.post_id} was removed while its reply was prepared; skipping")
+        self._mark_skipped(POST_REMOVED_SKIP_REASON)
+        self._has_draft = False
+        self._post_text_removed = True
+        await self._store_card_ref(
+            f"{workflow_id}:store:post_removed",
+            self._card_ref("skipped", POST_REMOVED_SKIP_REASON, evidence_skip_reason=True, drop_draft=True),
+        )
+        return False
+
+    async def _research_text_free(self, workflow_id: str) -> bool:
+        input = self.input
+        summary = await workflow.execute_activity(
+            "research_post",
+            ResearchPostInput(
+                post=None,
+                topic=input.topic,
+                product_brief=input.product_brief,
+                idempotency_key=f"{input.post_id}:research",
+                post_id=input.post_id,
+            ),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
+            retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+            result_type=ResearchSummary,
+        )
+        workflow.logger.info(f"Research complete: confidence={summary.confidence_score:.2f}")
+        # issue #4: a rule's reason (code-written), or the threshold
+        skip_reason = summary.skip_reason
+        if not skip_reason and summary.confidence_score < input.confidence_threshold:
+            skip_reason = f"Low confidence: {summary.confidence_score:.2f} < {input.confidence_threshold}"
+        if not skip_reason:
+            return True
+        self._mark_skipped(skip_reason)
+        await self._store_card_ref(
+            f"{workflow_id}:store:skip", self._card_ref("skipped", skip_reason, evidence_skip_reason=True)
+        )
+        return False
+
+    async def _plan_text_free(self, workflow_id: str) -> bool:
+        """issue #5's plan step; plan_reply writes the plan into the evidence."""
+        input = self.input
+        result: Optional[PlanReplyResult] = None
+        feedback: Optional[List[str]] = None
+        attempts = 0
+        while attempts < REPLY_PLAN_MAX_ATTEMPTS:
+            attempts += 1
+            result = await workflow.execute_activity(
+                "plan_reply",
+                PlanReplyInput(
+                    post=None,
+                    evidence=None,
+                    idempotency_key=f"{input.post_id}:plan:attempt{attempts}",
+                    feedback=feedback,
+                    product_name=input.product_name,
+                    post_id=input.post_id,
+                    attempt=attempts,
+                ),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+                result_type=PlanReplyResult,
+            )
+            if not result.errors:
+                break
+            # The errors are code-written and never quote the post
+            # (backend/planning/reply_plan_check.py)
+            workflow.logger.warning(f"Reply plan invalid on attempt {attempts}: {result.errors}")
+            feedback = list(result.errors)
+        self._draft_mode = result.draft_mode
+        self._mention_product = result.mention_product
+        if not result.errors and not result.skip_reason:
+            return True
+        if result.errors:
+            skip_reason = f"Reply plan invalid after {attempts} attempts: " + "; ".join(result.errors[:3])
+            store_key = f"{workflow_id}:store:plan_invalid"
+        else:
+            skip_reason = result.skip_reason
+            store_key = f"{workflow_id}:store:plan_skip"
+        self._mark_skipped(skip_reason)
+        await self._store_card_ref(store_key, self._card_ref("skipped", skip_reason, evidence_skip_reason=True))
+        return False
+
+    def _draft_input_text_free(self, key: str, source: str, out: str, **steer) -> DraftReplyInput:
+        input = self.input
+        return DraftReplyInput(
+            evidence=None,
+            idempotency_key=key,
+            product_brief=input.product_brief,
+            product_name=input.product_name,
+            product_aliases=input.product_aliases,
+            key_features=input.key_features,
+            post_id=input.post_id,
+            source_slot=source,
+            out_slot=out,
+            **steer,
+        )
+
+    async def _draft_text_free(self, workflow_id: str) -> Optional[str]:
+        """_draft_and_check without the text: returns the slot of the
+        accepted draft, or None after storing the skipped card."""
+        input = self.input
+        attempts = 0
+        source = EVIDENCE_SLOT  # each redraft starts from the last attempt's result
+        failed_slot = ""  # the last attempt whose failures are stored
+        slot = EVIDENCE_SLOT
+        while attempts < input.config.claim_gate_max_attempts:
+            attempts += 1
+            slot = f"draft:attempt{attempts}"
+            draft = await workflow.execute_activity(
+                "draft_reply",
+                self._draft_input_text_free(
+                    f"{input.post_id}:draft:attempt{attempts}",
+                    source,
+                    slot,
+                    steer_from_slot=failed_slot if attempts > 1 else "",
+                ),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+                result_type=DraftSummary,
+            )
+            source = slot
+            if draft.draft_mode == DRAFT_MODE_WRITTEN:
+                if draft.has_draft:
+                    check = await self._written_check_text_free(
+                        slot, "draft", f"{input.post_id}:check:attempt{attempts}", self._mention_product,
+                        record=True,
+                    )
+                    if check.passed:
+                        workflow.logger.info(f"Written draft passed its check on attempt {attempts}")
+                        self._accept_draft(check.text_sha256)
+                        return slot
+                    workflow.logger.warning(f"Written draft failed its check on attempt {attempts}")
+                failed_slot = slot  # draft_reply stored a missing draft as a failure
+                continue
+            if draft.has_draft and draft.has_segments:
+                gate = await self._gate_text_free(slot, f"{input.post_id}:gate:attempt{attempts}")
+                failed_slot = slot
+                if gate.passed and gate.plan_failure_count == 0:
+                    workflow.logger.info(f"Claim gate passed on attempt {attempts}")
+                    self._accept_draft(gate.text_sha256)
+                    return slot
+                workflow.logger.warning(
+                    f"Draft failed on attempt {attempts}: {gate.failure_count} failures, "
+                    f"{gate.plan_failure_count} reply-plan failures"
+                )
+            elif not draft.has_draft or draft.plan_failure_count:
+                # issue #5: redrafted, not ended; the gate records "not run"
+                if draft.has_draft:
+                    await self._gate_text_free(slot, f"{input.post_id}:gate:attempt{attempts}")
+                failed_slot = slot
+                workflow.logger.warning(f"Draft does not follow the reply plan on attempt {attempts}")
+            else:
+                workflow.logger.error("No draft or segments generated")
+                break
+        self._mark_skipped(gate_skip_reason([]))
+        await self._store_card_ref(
+            f"{workflow_id}:store:gate_fail",
+            self._card_ref(
+                "skipped", gate_skip_reason([]), evidence_slot=slot, skip_reason_from_slot=failed_slot
+            ),
+        )
+        return None
+
+    def _accept_draft(self, digest: str) -> None:
+        self._has_draft = True
+        self._draft_sha256 = digest
+
+    async def _gate_text_free(self, slot: str, key: str) -> GateSummary:
+        return await workflow.execute_activity(
+            claim_gate,
+            ClaimGateInput(
+                segments=[], founder_materials=[], idempotency_key=key, post_id=self.input.post_id, slot=slot
+            ),
+            start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
+            result_type=GateSummary,
+        )
+
+    async def _written_check_text_free(
+        self,
+        source_slot: str,
+        kind: str,
+        key: str,
+        mention_product: Optional[bool],
+        record: bool = False,
+        founder_text: bool = False,
+    ) -> GateSummary:
+        """check_written_draft on a stored text. The activity keeps the first
+        finished result per (kind, text digest), as _written_checks does."""
+        input = self.input
+        return await workflow.execute_activity(
+            "check_written_draft",
+            CheckWrittenDraftInput(
+                text="",
+                product_brief=input.product_brief,
+                product_name=input.product_name,
+                idempotency_key=key,
+                product_aliases=input.product_aliases,
+                key_features=input.key_features,
+                mention_product=mention_product,
+                post_id=input.post_id,
+                source_slot=source_slot,
+                source_is_founder_text=founder_text,
+                kind=kind,
+                record_slot=source_slot if record else "",
+            ),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+            retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+            result_type=GateSummary,
+        )
+
+    # ---------- end issue #23 block ----------
 
     async def _wait_for_decision(self, workflow_id: str) -> Optional[str]:
         """Wait for human decision (approve/skip). Returns None if timed out."""
@@ -725,10 +1012,12 @@ class ReviewWorkflow:
     @workflow.run
     async def run(self, input: ReviewInput) -> str:
         """Run the review workflow."""
-        workflow.logger.info(f"Starting review for post {input.post.id}")
+        workflow.logger.info(f"Starting review for post {input.post_id}")
         
         # Determinism: Store input for access in handlers
         self.input = input
+        # issue #23: fixed by the recorded input (see ReviewInput)
+        self._text_free = input.post is None
         
         # R4-NN5: Store for get_card query
         self.workflow_id = workflow.info().workflow_id
@@ -737,6 +1026,23 @@ class ReviewWorkflow:
         workflow_id = self.workflow_id
         created_at = self.created_at
         
+        if self._text_free:
+            # issue #23: steps 1-2 and the pending card, without the text
+            if not await self._draft_card_text_free(workflow_id):
+                return "skipped"
+            self._card_ready = True
+        else:
+            result = await self._draft_card(workflow_id, created_at)
+            if result is not None:
+                return result
+        
+        return await self._after_card_stored(workflow_id)
+
+    async def _draft_card(self, workflow_id: str, created_at: str) -> Optional[str]:
+        """Steps 1-2 and the pending card for a Review whose input carries the
+        post (histories recorded before issue #23). None once the card is
+        stored, else the workflow result."""
+        input = self.input
         # Step 1: Research
         evidence = await self._research_post(workflow_id, created_at)
         if evidence is None:
@@ -768,7 +1074,11 @@ class ReviewWorkflow:
         )
         self._card_ready = True
         self._card_stored = True
-        
+        return None
+
+    async def _after_card_stored(self, workflow_id: str) -> str:
+        """Steps 3-6, for both kinds of Review."""
+        input = self.input
         # Step 3: Wait for human decision
         result = await self._wait_for_decision(workflow_id)
         if result:
@@ -787,6 +1097,8 @@ class ReviewWorkflow:
                 posted_url=self.posted_url,
                 post_anyway=self.post_anyway,
                 post_anyway_failing_sentences=self.post_anyway_failing_sentences,
+                # issue #23: the failing sentences are read from the card
+                post_anyway_failing_from_gate=True if self._post_anyway_from_gate else None,
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
@@ -831,6 +1143,33 @@ class ReviewWorkflow:
         
         # Step 6: Check for follow-up replies (capped)
         workflow.logger.info("Follow-up timer fired, checking for replies")
+        
+        if self._text_free:
+            # issue #23: the replies (other people's posts) go straight to the card
+            count = await workflow.execute_activity(
+                "check_followup",
+                CheckFollowupInput(
+                    reply_post_id=self.reply_post_id,
+                    idempotency_key=f"{workflow_id}:followup",
+                    store_on_card=True,
+                ),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_medium_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+                result_type=int,
+            )
+            workflow.logger.info(f"Found {count} follow-up replies")
+            # The query reports this state over the stored row (issue #23)
+            self.status = "followup_due"
+            await workflow.execute_activity(
+                update_card,
+                UpdateCardInput(
+                    workflow_id=workflow_id,
+                    idempotency_key=f"{workflow_id}:update:followup_due",
+                    status="followup_due",
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            return "followup_due"
         
         followup_posts = await workflow.execute_activity(
             "check_followup",
@@ -916,7 +1255,10 @@ class ReviewWorkflow:
         self.post_anyway = post_anyway if post_anyway else None
         
         # If post_anyway was used, record the failing sentences
-        if post_anyway and self.edited_text_gate_results:
+        if post_anyway and self._text_free and self._edit_result_count:
+            # issue #23: update_card reads them from the card
+            self._post_anyway_from_gate = True
+        elif post_anyway and self.edited_text_gate_results:
             failing = [r.sentence for r in self.edited_text_gate_results if not r.passed]
             self.post_anyway_failing_sentences = failing
             workflow.logger.info(f"Approved with post_anyway: {len(failing)} failing sentences")
@@ -957,17 +1299,19 @@ class ReviewWorkflow:
         post = await workflow.execute_activity(
             "lookup_post",
             LookupPostInput(
-                post_id=self.input.post.id,
+                post_id=self.input.post_id,
                 idempotency_key=f"{workflow_id}:refetch_target:{key}",
+                # issue #23: only whether it is there
+                summary_only=self._text_free,
             ),
             # Longer than HttpXClient's 30 s request timeout
             start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
-            result_type=Optional[Post],
+            result_type=Optional[PostLookup] if self._text_free else Optional[Post],
         )
         if post is not None:
             return True
-        workflow.logger.warning(f"Target post {self.input.post.id} not found on re-fetch (404); removing its text")
+        workflow.logger.warning(f"Target post {self.input.post_id} not found on re-fetch (404); removing its text")
         await self._remove_target_post_text()
         return False
 
@@ -988,11 +1332,12 @@ class ReviewWorkflow:
             DeletePostTextInput(
                 workflow_id=workflow_id,
                 idempotency_key=f"{workflow_id}:delete_text:target",
-                post_id=self.input.post.id,
+                post_id=self.input.post_id,
             ),
             start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
         )
         self._post_text_removed = True
+        self._has_draft = self._has_draft and not self._text_free
         # Pending, or skipped by the founder during the re-fetch (the main loop
         # waits for this handler): either way the card ends as "post removed".
         if self.status not in ("pending", "skipped"):
@@ -1068,14 +1413,7 @@ class ReviewWorkflow:
         # edits, _written_checks, so this holds there too: a null gate state
         # names the one check of that draft text, a non-null one the one
         # check of that edited text.) Callers that send none are not checked.
-        current = {
-            "text": self.evidence.draft.text if self.evidence and self.evidence.draft else None,
-            "gate_state": self.edited_text_gate_state,
-        }
-        if expected_draft is not None and (
-            expected_draft.get("text") != current["text"]
-            or expected_draft.get("gate_state") != current["gate_state"]
-        ):
+        if expected_draft is not None and not self._names_current_draft(expected_draft):
             raise _rejection(
                 "The draft changed since it was shown. Review the current draft and approve again.",
                 DRAFT_CHANGED_ERROR,
@@ -1091,12 +1429,15 @@ class ReviewWorkflow:
         if self.edited_text_gate_state:
             # C: Require post_anyway=True for both failed and not_checked states
             if self.edited_text_gate_state in ["failed", "not_checked"] and not post_anyway:
-                # issue #15: the details carry what the UI's override prompt shows
+                # issue #15: the details carry what the UI's override prompt
+                # shows. issue #23: a text-free Review does not hold the
+                # sentences; the API adds them from the stored card.
                 failing = [r.sentence for r in (self.edited_text_gate_results or []) if not r.passed]
+                failing_count = self._edit_failing_count if self._text_free else len(failing)
                 details = {"gate_state": self.edited_text_gate_state, "failing_sentences": failing}
                 if self.edited_text_gate_state == "failed":
                     raise _rejection(
-                        f"Edited text has {len(failing)} failing sentence(s). "
+                        f"Edited text has {failing_count} failing sentence(s). "
                         f"Set post_anyway=true to approve anyway.",
                         POST_ANYWAY_REQUIRED_ERROR,
                         details,
@@ -1109,6 +1450,25 @@ class ReviewWorkflow:
                         details,
                     )
     
+    def _names_current_draft(self, expected: dict) -> bool:
+        """Whether approve's expected_draft names the current draft and gate
+        state (issue #15 review). issue #23: the API sends the draft's
+        digest ("text_sha256"), so the text stays out of history; a Review
+        that holds its draft text compares the digest of it. A caller that
+        sends "text" is compared on the text, as before."""
+        if expected.get("gate_state") != self.edited_text_gate_state:
+            return False
+        if self._text_free:
+            current_digest = self._draft_sha256 if self._has_draft else None
+            if "text_sha256" in expected:
+                return expected.get("text_sha256") == current_digest
+            text = expected.get("text")
+            return (text_digest(text) if text is not None else None) == current_digest
+        current = self.evidence.draft.text if self.evidence and self.evidence.draft else None
+        if "text_sha256" in expected:
+            return expected.get("text_sha256") == (text_digest(current) if current is not None else None)
+        return expected.get("text") == current
+
     @workflow.signal
     async def skip(self, reason: str, client_request_id: str):
         """Skip signal - founder declines to post."""
@@ -1161,10 +1521,12 @@ class ReviewWorkflow:
             LookupPostInput(
                 post_id=reply_post_id,
                 idempotency_key=f"{workflow.info().workflow_id}:confirm:{reply_post_id}",
+                # issue #23: the founder's reply is a post too; only its conversation is needed
+                summary_only=self._text_free,
             ),
             start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
             retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
-            result_type=Optional[Post],
+            result_type=Optional[PostLookup] if self._text_free else Optional[Post],
         )
         
         if not reply_post:
@@ -1199,10 +1561,11 @@ class ReviewWorkflow:
         # Verify it's a reply to our target post
         # For real X API, check in_reply_to_user_id or conversation_id
         # For fake client, check conversation_id matches
-        if reply_post.conversation_id != self.evidence.post_id:
+        target_id = self.input.post_id if self._text_free else self.evidence.post_id
+        if reply_post.conversation_id != target_id:
             raise ApplicationError(
                 f"Post {reply_post_id} (conversation_id={reply_post.conversation_id}) "
-                f"is not a reply to target post {self.evidence.post_id}",
+                f"is not a reply to target post {target_id}",
                 non_retryable=True,
             )
         
@@ -1241,7 +1604,7 @@ class ReviewWorkflow:
             raise _rejection(f"Invalid X post URL: {reply_url}", INVALID_REQUEST_ERROR)
     
     @workflow.update
-    async def edit(self, new_text: str, client_request_id: str) -> str:
+    async def edit(self, new_text: str, client_request_id: str, text_ref: Optional[dict] = None) -> str:
         """
         Edit update - founder edits the draft text.
         
@@ -1254,14 +1617,27 @@ class ReviewWorkflow:
         QA R12: Concurrent edits resolve as last-writer-wins by finish order. Each edit
         runs its gate independently; the last to complete sets the final draft.text and
         gate state. This is documented in ADR-0006.
+
+        issue #23: a text-free Review is sent new_text="" and text_ref
+        {"slot", "sha256"}: the API stored the text in the database first.
+        It returns the edited draft's digest instead of its text. Edits
+        recorded with two arguments replay with the default.
         """
         # Deduplicate (B9: per-handler set)
         if client_request_id in self._edit_requests:
             workflow.logger.info(f"Ignoring duplicate edit: {client_request_id}")
+            if self._text_free:
+                return self._draft_sha256
             return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
         
         workflow.logger.info(f"Received edit update: {len(new_text)} chars")
         self._edit_requests.add(client_request_id)
+        if self._text_free:
+            self._edit_in_flight_count += 1
+            try:
+                return await self._edit_text_free(client_request_id, text_ref)
+            finally:
+                self._edit_in_flight_count -= 1
         
         workflow_id = workflow.info().workflow_id
         
@@ -1356,8 +1732,82 @@ class ReviewWorkflow:
             # S-3 + B3: Decrement counter (was bool, now counter)
             self._edit_in_flight_count -= 1
     
+    async def _edit_text_free(self, client_request_id: str, text_ref: dict) -> str:
+        """The edit for a text-free Review (issue #23): as above, with the
+        text, the check results and the draft in the database."""
+        workflow_id = workflow.info().workflow_id
+        text_slot = text_ref["slot"]
+        results_slot = written_check = ""
+        result_count = failing_count = 0
+        try:
+            if self._draft_mode == DRAFT_MODE_WRITTEN:
+                check = await self._written_check_text_free(
+                    text_slot, "edit", f"{workflow_id}:edit_check:{client_request_id}", None, founder_text=True
+                )
+                has_failures = not check.passed or check.failing_count > 0
+                written_check = check_slot("edit", check.text_sha256)
+            else:
+                results_slot = edit_results_slot(client_request_id)
+                check = await workflow.execute_activity(
+                    verify_edited_text,
+                    EditedTextGateInput(
+                        edited_text="",
+                        gated_segments=[],
+                        founder_materials=[],
+                        idempotency_key=f"{workflow_id}:edit_gate:{client_request_id}",
+                        post_id=self.input.post_id,
+                        text_slot=text_slot,
+                        evidence_slot=EVIDENCE_SLOT,
+                        results_slot=results_slot,
+                    ),
+                    start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_medium_sec),
+                    retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
+                    result_type=GateSummary,
+                )
+                has_failures = check.failing_count > 0
+            gate_state = "failed" if has_failures else "passed"
+            result_count, failing_count = check.result_count, check.failing_count
+            workflow.logger.info(
+                f"Edit gate: {result_count - failing_count}/{result_count} sentences passed (state: {gate_state})"
+            )
+        except ActivityError as e:
+            cause = e.cause
+            if isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR:
+                raise _rejection(POST_REMOVED_SKIP_REASON, POST_REMOVED_ERROR)
+            workflow.logger.error(f"Edit gate activity failed: {e}")
+            gate_state = "not_checked"
+            results_slot = written_check = ""
+            result_count = failing_count = 0
+
+        self._draft_sha256 = text_ref["sha256"]
+        self.edited_text_gate_state = gate_state
+        self._edit_result_count = result_count
+        self._edit_failing_count = failing_count
+        self._edit_seq += 1
+        try:
+            await workflow.execute_activity(
+                update_card,
+                UpdateCardInput(
+                    workflow_id=workflow_id,
+                    idempotency_key=f"{workflow_id}:update:edit:{client_request_id}",
+                    edited_text_gate_state=gate_state,
+                    edit_seq=self._edit_seq,
+                    post_id=self.input.post_id,
+                    edit_text_slot=text_slot,
+                    edit_results_slot=results_slot,
+                    edit_check_slot=written_check,
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+        except ActivityError as e:
+            cause = e.cause
+            if isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR:
+                raise _rejection(POST_REMOVED_SKIP_REASON, POST_REMOVED_ERROR)
+            raise
+        return self._draft_sha256
+
     @edit.validator
-    def validate_edit(self, new_text: str, client_request_id: str) -> None:
+    def validate_edit(self, new_text: str, client_request_id: str, text_ref: Optional[dict] = None) -> None:
         """Validator for edit Update - checks state and input. S-1: Reject edits once approved. S-4: Fix AttributeError."""
         # S-4: Use string comparison, not .value (status is already a string)
         if self.status == "approved":
@@ -1370,7 +1820,7 @@ class ReviewWorkflow:
         # issue #20: the draft exists before the card row is stored; an edit
         # accepted then would write update_card to a row that does not exist
         # yet, and the stored card would keep the unedited draft
-        if not self._card_ready or not self.evidence or not self.evidence.draft:
+        if not self._card_ready or not self._holds_draft():
             raise _rejection("Cannot edit before the draft card is ready", NOT_READY_ERROR)
 
         # issue #5: a nudge in flight would overwrite this edit (or be
@@ -1383,15 +1833,41 @@ class ReviewWorkflow:
         if self._approve_in_flight_count > 0:
             raise _rejection("Cannot edit while an approval is in progress. Retry after it completes.", BUSY_ERROR)
 
-        if not new_text or not new_text.strip():
-            raise _rejection("New text cannot be empty", INVALID_REQUEST_ERROR)
+        self._validate_text_arg(new_text, text_ref, "New text")
     
+    def _holds_draft(self) -> bool:
+        """Whether there is a draft to edit, nudge or approve."""
+        if self._text_free:
+            return self._has_draft
+        return bool(self.evidence and self.evidence.draft)
+
+    def _validate_text_arg(self, text: str, text_ref: Optional[dict], name: str) -> None:
+        """An edit's text or a nudge's instruction: given in the update, or
+        (issue #23, text-free Reviews only) stored by the API and named by
+        text_ref {"slot", "sha256"}."""
+        if self._text_free:
+            if text:
+                raise _rejection(f"{name} must be stored, not sent in the update", INVALID_REQUEST_ERROR)
+            if not (
+                isinstance(text_ref, dict)
+                and isinstance(text_ref.get("slot"), str) and text_ref["slot"]
+                and isinstance(text_ref.get("sha256"), str) and len(text_ref["sha256"]) == 64
+            ):
+                raise _rejection(f"{name} cannot be empty", INVALID_REQUEST_ERROR)
+            return
+        if text_ref is not None:
+            raise _rejection(f"{name} must be sent in the update", INVALID_REQUEST_ERROR)
+        if not text or not text.strip():
+            raise _rejection(f"{name} cannot be empty", INVALID_REQUEST_ERROR)
+
     @workflow.update
-    async def nudge(self, instruction: str, client_request_id: str) -> str:
+    async def nudge(self, instruction: str, client_request_id: str, text_ref: Optional[dict] = None) -> str:
         """Nudge update - steer a redraft."""
         # Deduplicate (B9: per-handler set)
         if client_request_id in self._nudge_requests:
             workflow.logger.info(f"Ignoring duplicate nudge: {client_request_id}")
+            if self._text_free:
+                return self._draft_sha256
             return self.evidence.draft.text if self.evidence and self.evidence.draft else ""
         
         workflow.logger.info(f"Received nudge update: {len(instruction)} chars")
@@ -1399,9 +1875,77 @@ class ReviewWorkflow:
         
         self._nudge_in_flight_count += 1
         try:
+            if self._text_free:
+                try:
+                    return await self._nudge_text_free(client_request_id, text_ref)
+                except Exception:
+                    # as _run_nudge under a plan: a failed nudge runs again on retry
+                    self._nudge_requests.discard(client_request_id)
+                    raise
             return await self._run_nudge(instruction, client_request_id)
         finally:
             self._nudge_in_flight_count -= 1
+
+    async def _nudge_text_free(self, client_request_id: str, text_ref: dict) -> str:
+        """_nudge_with_plan for a text-free Review (issue #23). Every such
+        Review ran the plan step. The redraft is stored in its own slot and
+        becomes the current evidence only after it passed and the card was
+        written. A rejection's reasons quote the redraft: they stay in the
+        database and the API adds them (NUDGE_REJECTED_ERROR). Returns the
+        new draft's digest."""
+        input = self.input
+        slot = f"nudge:{client_request_id}"
+        try:
+            draft = await workflow.execute_activity(
+                "draft_reply",
+                self._draft_input_text_free(
+                    f"{input.post_id}:nudge:{client_request_id}", EVIDENCE_SLOT, slot, steer_slot=text_ref["slot"]
+                ),
+                start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+                retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+                result_type=DraftSummary,
+            )
+            digest = draft.text_sha256
+            if draft.draft_mode == DRAFT_MODE_WRITTEN:
+                rejected = not draft.has_draft
+                if draft.has_draft:
+                    check = await self._written_check_text_free(
+                        slot, "draft", f"{input.post_id}:nudge_check:{client_request_id}",
+                        self._mention_product, record=True,
+                    )
+                    rejected = check.failure_count > 0
+            else:
+                rejected = not draft.has_draft or draft.plan_failure_count > 0
+                if draft.has_draft:
+                    gate = await self._gate_text_free(slot, f"{input.post_id}:nudge_gate:{client_request_id}")
+                    digest = gate.text_sha256
+                    rejected = rejected or (draft.has_segments and not gate.passed)
+            if rejected:
+                raise ApplicationError(
+                    f"{NUDGE_REJECTED_PREFIX}", {"slot": slot}, type=NUDGE_REJECTED_ERROR, non_retryable=True
+                )
+            workflow_id = workflow.info().workflow_id
+            await workflow.execute_activity(
+                update_card,
+                UpdateCardInput(
+                    workflow_id=workflow_id,
+                    idempotency_key=f"{workflow_id}:update:nudge:{client_request_id}",
+                    clear_edited_text_gate=True,
+                    post_id=input.post_id,
+                    evidence_slot=slot,
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+        except ActivityError as e:
+            cause = e.cause
+            if isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR:
+                raise _rejection(POST_REMOVED_SKIP_REASON, POST_REMOVED_ERROR)
+            raise
+        self._accept_draft(digest)
+        self.edited_text_gate_results = None
+        self.edited_text_gate_state = None
+        self._edit_result_count = self._edit_failing_count = 0
+        return self._draft_sha256
     
     async def _run_nudge(self, instruction: str, client_request_id: str) -> str:
         """Body of the nudge update (the handler wraps it in the in-flight count)."""
@@ -1538,14 +2082,14 @@ class ReviewWorkflow:
             )
     
     @nudge.validator
-    def validate_nudge(self, instruction: str, client_request_id: str) -> None:
+    def validate_nudge(self, instruction: str, client_request_id: str, text_ref: Optional[dict] = None) -> None:
         """Validator for nudge Update - checks state and input. S-4: Fix .value reference."""
         # S-4: status is already a string, not an enum
         if self.status not in ["pending", "approved"]:
             raise _rejection(f"Cannot nudge in status {self.status}", INVALID_STATE_ERROR)
 
         # issue #20: as for edit, the nudge's update_card needs the stored row
-        if not self._card_ready or not self.evidence or not self.evidence.draft:
+        if not self._card_ready or not self._holds_draft():
             raise _rejection("Cannot nudge before the draft card is ready", NOT_READY_ERROR)
 
         # issue #5: serialize draft changes; a nudge overlapping an edit or
@@ -1559,8 +2103,7 @@ class ReviewWorkflow:
         if self._approve_in_flight_count > 0:
             raise _rejection("Cannot nudge while an approval is in progress. Retry after it completes.", BUSY_ERROR)
 
-        if not instruction or not instruction.strip():
-            raise _rejection("Instruction cannot be empty", INVALID_REQUEST_ERROR)
+        self._validate_text_arg(instruction, text_ref, "Instruction")
     
     @workflow.query
     def get_card(self) -> dict:
@@ -1586,17 +2129,40 @@ class ReviewWorkflow:
         if (
             not self.workflow_id
             or not self.created_at
-            or self.evidence is None
+            or (self.evidence is None and not self._text_free)
             or not self._card_stored
         ):
-            return {
+            state = {
                 "workflow_id": self.workflow_id,
                 "status": self._stage if self.status == "pending" else self.status,
                 "in_progress": True,
                 "created_at": self.created_at,
                 "evidence": None,
             }
+            if self._text_free:
+                # issue #23: tells the API how to send edits and nudges
+                state.update({"text_free": True, "post_id": self.input.post_id})
+            return state
 
+        if self._text_free:
+            # issue #23: the card's content is in the database; the API reads
+            # it there (backend.activities.store_activities.text_free_card)
+            # and applies this state, which can be ahead of the stored row
+            return {
+                "workflow_id": self.workflow_id,
+                "text_free": True,
+                "post_id": self.input.post_id,
+                "status": self.status,
+                "created_at": self.created_at,
+                "posted_url": self.posted_url,
+                "reply_post_id": self.reply_post_id,
+                "post_anyway": self.post_anyway,
+                "edited_text_gate_state": self.edited_text_gate_state,
+                "draft_sha256": self._draft_sha256 if self._has_draft else None,
+                # A founder's reason or a code-written one; a gate failure's
+                # reason quotes the draft and is only on the stored card
+                "skip_reason": self.skip_reason if self.skipped else None,
+            }
         # Use _build_card helper to ensure consistency with ReviewCard structure
         card = self._build_card(self.workflow_id, self.input.post, self.created_at)
         card_dict = card.to_dict()

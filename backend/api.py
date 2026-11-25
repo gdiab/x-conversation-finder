@@ -35,13 +35,18 @@ from backend.workflows.review import (
     POST_ANYWAY_REQUIRED_ERROR,
     POST_REMOVED_ERROR,
     DRAFT_CHANGED_ERROR,
+    NUDGE_REJECTED_ERROR,
 )
 from backend.activities.store_activities import (
     POST_TEXT_REMOVED,
     apply_stored_removal,
     card_post_text_removed,
     get_all_cards,
+    get_stored_card,
+    text_free_card,
 )
+from backend import review_docs
+from backend.gate.failures import DraftFailures, nudge_rejection_message, nudge_rejection_reasons
 from backend.database import init_db
 from backend.gate.written_check import MAX_FEATURE_TERM_WORDS, clean_feature_terms, feature_term_words
 from backend.budget import get_today_budget
@@ -159,6 +164,10 @@ def review_error_response(exc: Exception, action: str, workflow_id: Optional[str
     edit and nudge success responses).
     """
     cause = exc.cause if isinstance(exc, WorkflowUpdateFailedError) else None
+    # issue #23: the API stores an edit or nudge text before the update and
+    # is refused once the post's removal is recorded
+    if isinstance(exc, ApplicationError) and exc.type == POST_REMOVED_ERROR:
+        cause = exc
     # An activity can refuse on purpose too: draft_reply refuses to redraft
     # (nudge) a card whose post was removed by another Review of it. That
     # refusal arrives wrapped in ActivityError; any other activity failure
@@ -178,7 +187,13 @@ def review_error_response(exc: Exception, action: str, workflow_id: Optional[str
                 "gate_state": details.get("gate_state"),
                 "failing_sentences": list(details.get("failing_sentences") or []),
             }
+            if not extra["failing_sentences"] and workflow_id:
+                # issue #23: a text-free Review does not hold the sentences
+                extra["failing_sentences"] = stored_failing_sentences(workflow_id)
         detail = cause.message
+        if cause.type == NUDGE_REJECTED_ERROR and workflow_id:
+            # issue #23: the reasons quote the redraft and are stored, not in history
+            detail = stored_nudge_rejection(workflow_id, cause) or detail
         if code in ("rejected", "post_anyway_required") and workflow_id and card_post_text_removed(workflow_id):
             if code == "rejected":
                 detail = REFUSAL_DETAILS_REMOVED
@@ -191,6 +206,54 @@ def review_error_response(exc: Exception, action: str, workflow_id: Optional[str
     reason = exc.cause if isinstance(exc, WorkflowUpdateFailedError) else exc
     logger.error(f"{action} failed: {reason}", exc_info=exc)
     return error_response(500, "server_error", f"{action} failed: {reason}")
+
+
+def stored_failing_sentences(workflow_id: str) -> List[str]:
+    """The failing sentences of the stored card's edited-text check (issue #23)."""
+    card = get_stored_card(workflow_id) or {}
+    return [
+        r.get("sentence") for r in (card.get("edited_text_gate_results") or [])
+        if isinstance(r, dict) and not r.get("passed")
+    ]
+
+
+def stored_nudge_rejection(workflow_id: str, cause: ApplicationError) -> Optional[str]:
+    """A text-free nudge rejection's message with its stored reasons (issue #23)."""
+    details = cause.details[0] if cause.details and isinstance(cause.details[0], dict) else {}
+    card = get_stored_card(workflow_id)
+    slot = details.get("slot")
+    if not card or not isinstance(slot, str):
+        return None
+    failures = review_docs.find_doc(
+        workflow_id, card["post"]["id"], review_docs.failures_slot(slot), DraftFailures
+    )
+    return nudge_rejection_message(nudge_rejection_reasons(failures)) if failures else None
+
+
+async def send_founder_text(handle, workflow_id: str, update: str, kind: str, text: str, client_request_id: str):
+    """Send an edit or a nudge (issue #23).
+
+    A Review that keeps text out of its history (its get_card says
+    "text_free") is sent a reference: the text is stored in the database
+    first, and the update names its slot and digest. Any other Review is
+    sent the text, as before. Returns (update result, text_free).
+    """
+    state = await handle.query("get_card")
+    if not state.get("text_free"):
+        return await handle.execute_update(update, args=[text, client_request_id]), False
+    text_ref = None
+    if text and text.strip():
+        slot = review_docs.store_founder_text(workflow_id, state["post_id"], kind, client_request_id, text)
+        text_ref = {"slot": slot, "sha256": review_docs.text_digest(text)}
+    return await handle.execute_update(update, args=["", client_request_id, text_ref]), True
+
+
+def stored_draft_text(workflow_id: str) -> Optional[str]:
+    """The draft text on the stored card (issue #23: a text-free Review's
+    edit and nudge return a digest)."""
+    card = get_stored_card(workflow_id) or {}
+    draft = (card.get("evidence") or {}).get("draft") or {}
+    return draft.get("text")
 
 
 MAX_PRODUCT_NAME_CHARS = 80
@@ -409,7 +472,11 @@ async def approve_review(workflow_id: str, request: ApproveRequest):
                 request.posted_url,
                 request.client_request_id,
                 request.post_anyway,
-                {"text": request.draft_text, "gate_state": request.draft_gate_state},
+                # issue #23: the draft's digest, not its text, enters the history
+                {
+                    "text_sha256": review_docs.text_digest(request.draft_text),
+                    "gate_state": request.draft_gate_state,
+                },
             ]
         )
         
@@ -446,10 +513,11 @@ async def edit_review(workflow_id: str, request: EditRequest):
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
-        result = await handle.execute_update(
-            "edit",
-            args=[request.new_text, request.client_request_id]
+        result, text_free = await send_founder_text(
+            handle, workflow_id, "edit", "edit", request.new_text, request.client_request_id
         )
+        if text_free:
+            result = stored_draft_text(workflow_id)
         
         # As for a nudge below: if the post's removal was recorded while the
         # edit was checked, the stored card is redacted and the text is not
@@ -472,10 +540,11 @@ async def nudge_review(workflow_id: str, request: NudgeRequest):
     
     try:
         handle = temporal_client.get_workflow_handle(workflow_id)
-        result = await handle.execute_update(
-            "nudge",
-            args=[request.instruction, request.client_request_id]
+        result, text_free = await send_founder_text(
+            handle, workflow_id, "nudge", "nudge", request.instruction, request.client_request_id
         )
+        if text_free:
+            result = stored_draft_text(workflow_id)
         
         # issue #9 / #12: another Review of the post can record its removal
         # while this redraft runs. The card write is stored redacted; the
@@ -507,6 +576,9 @@ async def get_review(workflow_id: str):
         result = await handle.query("get_card")
     except Exception as e:
         return review_error_response(e, "Get review")
+    if result.get("text_free"):
+        # issue #23: the content is on the stored card
+        result = text_free_card(workflow_id, result)
 
     # issue #9: a removal recorded outside this workflow (eval re-fetch,
     # another account's Review of the post) applies to the query too

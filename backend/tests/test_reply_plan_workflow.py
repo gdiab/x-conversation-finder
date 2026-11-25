@@ -26,7 +26,8 @@ from backend.activities.store_activities import get_all_cards, store_card, updat
 from backend.adapters import FakeReplyAgent
 from backend.models import ReplyPlan
 from backend.workflows.review import REPLY_PLAN_PATCH_ID, ReviewWorkflow
-from backend.tests.review_waits import wait_for_card_ready
+from backend.tests.conftest import SAMPLE_POST_TEXT
+from backend.tests.review_waits import wait_for_card_ready, query_card, rejection_message
 
 FIXTURES = Path(__file__).parent / "fixtures"
 QUESTION = "How do you folks handle eventual consistency?"  # from conftest sample_post
@@ -81,13 +82,13 @@ async def test_plan_is_produced_stored_and_passed_to_draft(make_review_input, x_
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan"
+            workflow_id = f"review:test:{review_input.post_id}_plan"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
             await wait_for_card_ready(handle)
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             plan = card["evidence"]["reply_plan"]
             assert plan["reply_type"] == "answer_question"
@@ -112,8 +113,13 @@ async def test_plan_is_produced_stored_and_passed_to_draft(make_review_input, x_
             assert agent.draft_plans[-1].target_point == QUESTION
 
             history = await handle.fetch_history()
-            markers = [e for e in history.events if e.HasField("marker_recorded_event_attributes")]
-            assert markers, "plan step must record its patch marker"
+            # issue #23: a Review started with only a post id is always new,
+            # so its plan step needs no patch marker; the step is scheduled
+            scheduled = [
+                e.activity_task_scheduled_event_attributes.activity_type.name
+                for e in history.events if e.HasField("activity_task_scheduled_event_attributes")
+            ]
+            assert scheduled[:2] == ["research_post", "plan_reply"]
 
             await Replayer(workflows=[ReviewWorkflow]).replay_workflow(history)
 
@@ -130,13 +136,13 @@ async def test_invalid_plan_is_rerequested_once_with_errors(make_review_input, x
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan_retry"
+            workflow_id = f"review:test:{review_input.post_id}_plan_retry"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
             await wait_for_card_ready(handle)
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             assert card["evidence"]["reply_plan_attempts"] == 2
             assert card["evidence"]["reply_plan_errors"] == []
@@ -166,7 +172,7 @@ async def test_invalid_plan_twice_skips_with_reason(make_review_input, x_activit
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan_skip"
+            workflow_id = f"review:test:{review_input.post_id}_plan_skip"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
@@ -175,7 +181,7 @@ async def test_invalid_plan_twice_skips_with_reason(make_review_input, x_activit
             assert len(agent.plan_calls) == 2
             assert agent.draft_plans == [], "draft() must not run after an invalid plan"
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "skipped"
             assert card["skip_reason"].startswith("Reply plan invalid after 2 attempts")
             assert "must be the question being answered" in card["skip_reason"]
@@ -201,13 +207,13 @@ async def test_no_product_mention_gives_claimless_draft_that_passes_gate(make_re
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan_nomention"
+            workflow_id = f"review:test:{review_input.post_id}_plan_nomention"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
             await wait_for_card_ready(handle)
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             draft = card["evidence"]["draft"]
             assert draft["claim_gate"]["passed"] is True
@@ -316,11 +322,11 @@ async def test_draft_with_forbidden_claim_is_redrafted_with_reason(make_review_i
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_plan_redraft", task_queue="test",
+                id=f"review:test:{review_input.post_id}_plan_redraft", task_queue="test",
             )
             await wait_for_card_ready(handle)
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             assert len(agent.draft_plans) == 2
             assert agent.steers[0] is None
@@ -337,11 +343,11 @@ async def test_draft_that_keeps_ignoring_the_plan_is_skipped(make_review_input, 
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_plan_disobey", task_queue="test",
+                id=f"review:test:{review_input.post_id}_plan_disobey", task_queue="test",
             )
             assert await handle.result() == "skipped"
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert "reply plan says not to mention the product" in card["skip_reason"]
             draft = card["evidence"]["draft"]
             # Codex round 4: the claim gate verdict stays truthful (the claim was
@@ -368,10 +374,10 @@ async def test_draft_missing_planned_claim_is_skipped(make_review_input, x_activ
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_plan_noclaim", task_queue="test",
+                id=f"review:test:{review_input.post_id}_plan_noclaim", task_queue="test",
             )
             assert await handle.result() == "skipped"
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert "draft has no claim segment" in card["skip_reason"]
 
 
@@ -394,13 +400,13 @@ async def test_pre_plan_workflow_handles_nudge_edit_approve_without_plan(
     agent = RecordingAgent()
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
-            review_input = make_review_input()
+            review_input = make_review_input(legacy=True)  # pre-plan Reviews predate issue #23
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_preplan_updates", task_queue="test",
+                id=f"review:test:{review_input.post_id}_preplan_updates", task_queue="test",
             )
             await wait_for_card_ready(handle)
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             assert card["evidence"]["reply_plan"] is None
             assert agent.plan_calls == []
@@ -413,7 +419,7 @@ async def test_pre_plan_workflow_handles_nudge_edit_approve_without_plan(
             await handle.execute_update(
                 "approve", args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
             )
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "approved"
             assert agent.draft_plans and all(p is None for p in agent.draft_plans)
 
@@ -428,7 +434,7 @@ async def test_delete_post_text_removes_plan_target_point(make_review_input, x_a
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan_delete"
+            workflow_id = f"review:test:{review_input.post_id}_plan_delete"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
@@ -439,7 +445,7 @@ async def test_delete_post_text_removes_plan_target_point(make_review_input, x_a
     stored = _db_card(workflow_id)
     assert stored["post"]["text"] == "[removed - post deleted]"
     assert stored["evidence"]["reply_plan"]["target_point"] == "[removed - post deleted]"
-    assert review_input.post.text not in str(stored)
+    assert SAMPLE_POST_TEXT not in str(stored)
 
 
 # ---------- nudge under a plan is checked (Codex round 2) ----------
@@ -458,18 +464,18 @@ async def test_nudge_that_breaks_the_plan_is_rejected_and_draft_kept(make_review
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan_nudge_reject"
+            workflow_id = f"review:test:{review_input.post_id}_plan_nudge_reject"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
             await wait_for_card_ready(handle)
-            before = await handle.query("get_card")
+            before = await query_card(handle)
             assert before["evidence"]["draft"]["text"] == "Thanks! What are you using today?"
 
             request_id = str(uuid.uuid4())
             with pytest.raises(WorkflowUpdateFailedError) as excinfo:
                 await handle.execute_update("nudge", args=["Mention the product", request_id])
-            assert "not to mention the product" in str(excinfo.value.cause)
+            assert "not to mention the product" in rejection_message(handle, excinfo.value)
 
             # Codex round 3: retrying the same request id runs the nudge again
             # (it does not report the rejected nudge as a success)
@@ -478,7 +484,7 @@ async def test_nudge_that_breaks_the_plan_is_rejected_and_draft_kept(make_review
                 await handle.execute_update("nudge", args=["Mention the product", request_id])
             assert len(agent.draft_plans) == calls_before + 1
 
-            after = await handle.query("get_card")
+            after = await query_card(handle)
             assert after["status"] == "pending"
             assert after["evidence"]["draft"] == before["evidence"]["draft"]
             assert _db_card(workflow_id)["evidence"]["draft"]["text"] == before["evidence"]["draft"]["text"]
@@ -492,11 +498,11 @@ async def test_nudge_under_plan_is_gated_and_assembled(make_review_input, x_acti
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_plan_nudge_ok", task_queue="test",
+                id=f"review:test:{review_input.post_id}_plan_nudge_ok", task_queue="test",
             )
             await wait_for_card_ready(handle)
             text = await handle.execute_update("nudge", args=["Make it shorter", str(uuid.uuid4())])
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["evidence"]["draft"]["claim_gate"]["passed"] is True
             assert card["evidence"]["draft"]["claim_gate"]["reasoning"].startswith("All ")
             assert text == card["evidence"]["draft"]["text"]
@@ -525,7 +531,7 @@ async def test_nudge_activity_failure_under_plan_can_be_retried(make_review_inpu
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_plan_nudge_flaky", task_queue="test",
+                id=f"review:test:{review_input.post_id}_plan_nudge_flaky", task_queue="test",
             )
             await wait_for_card_ready(handle)
             request_id = str(uuid.uuid4())
@@ -533,7 +539,7 @@ async def test_nudge_activity_failure_under_plan_can_be_retried(make_review_inpu
                 await handle.execute_update("nudge", args=["Make it shorter", request_id])
 
             text = await handle.execute_update("nudge", args=["Make it shorter", request_id])
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert text == card["evidence"]["draft"]["text"]
             assert "Make it shorter" in card["evidence"]["draft"]["steers_applied"]
 
@@ -569,7 +575,7 @@ async def test_reply_404_fails_confirmation_and_keeps_target_post(make_review_in
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_reply_404"
+            workflow_id = f"review:test:{review_input.post_id}_reply_404"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
@@ -583,12 +589,12 @@ async def test_reply_404_fails_confirmation_and_keeps_target_post(make_review_in
                 )
             assert "not found" in str(excinfo.value.cause)
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "approved"
-            assert card["post"]["text"] == review_input.post.text
+            assert card["post"]["text"] == SAMPLE_POST_TEXT
             assert card["evidence"]["reply_plan"]["target_point"] == QUESTION
             stored = _db_card(workflow_id)
-            assert stored["post"]["text"] == review_input.post.text
+            assert stored["post"]["text"] == SAMPLE_POST_TEXT
             assert stored["evidence"]["reply_plan"]["target_point"] == QUESTION
 
             history = await handle.fetch_history()
@@ -620,7 +626,7 @@ async def test_edit_and_approve_are_rejected_while_a_nudge_is_in_flight(make_rev
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan_overlap"
+            workflow_id = f"review:test:{review_input.post_id}_plan_overlap"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
@@ -646,7 +652,7 @@ async def test_edit_and_approve_are_rejected_while_a_nudge_is_in_flight(make_rev
 
             release.set()
             text = await nudge.result()
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["evidence"]["draft"]["text"] == text
             assert _db_card(workflow_id)["evidence"]["draft"]["text"] == text
 
@@ -694,7 +700,7 @@ async def test_failed_confirmation_can_be_retried_with_same_request_id(make_revi
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_confirm_retry", task_queue="test",
+                id=f"review:test:{review_input.post_id}_confirm_retry", task_queue="test",
             )
             await wait_for_card_ready(handle)
             await handle.execute_update(
@@ -719,7 +725,7 @@ async def test_gated_nudge_clears_a_failed_edit_gate(make_review_input, x_activi
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_plan_nudge_clears_edit"
+            workflow_id = f"review:test:{review_input.post_id}_plan_nudge_clears_edit"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
@@ -727,11 +733,11 @@ async def test_gated_nudge_clears_a_failed_edit_gate(make_review_input, x_activi
             await handle.execute_update(
                 "edit", args=["I think ours is way cheaper.", str(uuid.uuid4())]
             )
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_state"] == "failed"
 
             await handle.execute_update("nudge", args=["Make it shorter", str(uuid.uuid4())])
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["edited_text_gate_state"] is None
             assert card["edited_text_gate_results"] is None
             db = get_db()
@@ -746,7 +752,7 @@ async def test_gated_nudge_clears_a_failed_edit_gate(make_review_input, x_activi
             await handle.execute_update(
                 "approve", args=["https://x.com/test/status/999", str(uuid.uuid4()), False]
             )
-            assert (await handle.query("get_card"))["status"] == "approved"
+            assert (await query_card(handle))["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -789,7 +795,7 @@ async def test_legacy_reply_404_branch_still_deletes_and_redacts_query(make_revi
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_legacy_404"
+            workflow_id = f"review:test:{review_input.post_id}_legacy_404"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
@@ -801,7 +807,7 @@ async def test_legacy_reply_404_branch_still_deletes_and_redacts_query(make_revi
                 await handle.execute_update(
                     "confirm_posted", args=["https://x.com/test/status/404404", str(uuid.uuid4())]
                 )
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             stored = _db_card(workflow_id)
             assert card["post"]["text"] == "[removed - post deleted]"
             assert card["evidence"]["reply_plan"]["target_point"] == "[removed - post deleted]"
@@ -831,7 +837,7 @@ async def test_plan_needing_written_drafts_skips_before_drafting(make_review_inp
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_needs_written_{reply_type}"
+            workflow_id = f"review:test:{review_input.post_id}_needs_written_{reply_type}"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test"
             )
@@ -839,7 +845,7 @@ async def test_plan_needing_written_drafts_skips_before_drafting(make_review_inp
 
             assert len(agent.plan_calls) == 1, "a valid plan is not re-requested"
             assert agent.draft_plans == [], "draft() must not run"
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["skip_reason"].startswith("Reply needs written drafts")
             assert "ADR-0006 amendment 2026-11-24" in card["skip_reason"]
             assert card["evidence"]["skip_reason"] == card["skip_reason"]
@@ -874,10 +880,10 @@ async def test_needs_written_drafts_switched_off_drafts_phrase_only(make_review_
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_needs_written_off", task_queue="test",
+                id=f"review:test:{review_input.post_id}_needs_written_off", task_queue="test",
             )
             await wait_for_card_ready(handle)
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             assert card["evidence"]["reply_plan_skip_rule"] is None
             assert all(s["kind"] == "non_claim" for s in card["evidence"]["draft"]["segments"])

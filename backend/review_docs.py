@@ -1,0 +1,275 @@
+"""Post text kept out of Temporal history (issue #23, George's option A).
+
+Workflows carry only ids: the post id, a Review's document slots, digests
+and counts. The text itself (the post, the model's evidence, drafts, check
+results, a founder's edit or nudge) lives in SQLite, where the removal duty
+(ADR-0006, following ADR-0086) can delete it:
+
+- stored_posts: the posts a TopicWatch search found, by post id;
+- review_docs: a Review's working documents, by (workflow_id, slot).
+
+Documents are stored in the JSON shape Temporal's data converter gives the
+same dataclass, so an activity reads back exactly what it would have received
+as a payload.
+
+A removal (delete_post_text) records the post as removed in stored_posts and
+deletes every document of the post. Reads and writes after that raise
+PostRemoved, the same error type the Review workflow already handles.
+"""
+
+import hashlib
+import json
+from datetime import datetime, timezone
+from typing import Any, Iterable, List, Optional, Type, TypeVar
+
+from sqlalchemy import text as sql_text
+from temporalio.converter import DataConverter, value_to_type
+from temporalio.exceptions import ApplicationError
+
+from backend.database import ReviewDocDB, StoredPostDB, get_db
+from backend.models import Post
+
+T = TypeVar("T")
+
+# The error type the Review workflow maps to "post removed" (review.POST_REMOVED_ERROR)
+POST_REMOVED_ERROR_TYPE = "PostRemoved"
+# A document a workflow names is missing, and no removal explains it
+DOC_MISSING_ERROR_TYPE = "ReviewDocMissing"
+
+# Slot names. Each is fixed by the workflow (from its own keys), so replaying
+# a history names the same slots.
+EVIDENCE_SLOT = "evidence"  # the Review's current evidence (research, plan, accepted draft)
+
+
+def founder_text_slot(kind: str, client_request_id: str) -> str:
+    """Where the API stores a founder's edit or nudge text ("edit" or "nudge")."""
+    return f"founder:{kind}:{client_request_id}"
+
+
+def failures_slot(slot: str) -> str:
+    """The (sentence, reason) failures of the draft in `slot`."""
+    return f"{slot}#failures"
+
+
+def check_slot(kind: str, digest: str) -> str:
+    """The written check of a text, by kind ("draft" or "edit") and digest."""
+    return f"check:{kind}:{digest}"
+
+
+def edit_results_slot(client_request_id: str) -> str:
+    """The assembled re-gate results of a founder edit."""
+    return f"edit_results:{client_request_id}"
+
+
+def text_digest(text: Optional[str]) -> str:
+    """The SHA-256 of a text; what the workflow holds instead of the text.
+
+    Also what approve's expected_draft names (issue #15): the API hashes the
+    draft text the founder saw. Deterministic and pure, so the workflow can
+    compute it in a validator on a text it still holds (old histories).
+    """
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def post_removed_error(what: str) -> ApplicationError:
+    return ApplicationError(
+        f"Post removed: the target post was deleted or is no longer visible on X; {what}",
+        type=POST_REMOVED_ERROR_TYPE,
+        non_retryable=True,
+    )
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def to_json(value: Any) -> Any:
+    """The JSON value Temporal's default converter makes of `value`."""
+    payload = DataConverter.default.payload_converter.to_payloads([value])[0]
+    return json.loads(payload.data)
+
+
+def from_json(data: Any, type_hint: Type[T]) -> T:
+    """Decode a stored JSON value as Temporal decodes an activity payload."""
+    return value_to_type(type_hint, data)
+
+
+# ---------- removal state ----------
+
+def _post_removed(db, post_id: str) -> bool:
+    """Whether the post's removal is recorded: on its stored post, or on any
+    stored card of it (the eval re-fetch and other accounts' Reviews record
+    it on cards)."""
+    from backend.activities.store_activities import _post_removal_recorded
+
+    stored = db.get(StoredPostDB, post_id)
+    if stored is not None and (stored.post_data or {}).get("text_removed"):
+        return True
+    return _post_removal_recorded(db, post_id)
+
+
+def post_removed(post_id: str) -> bool:
+    db = get_db()
+    try:
+        return _post_removed(db, post_id)
+    finally:
+        db.close()
+
+
+# ---------- posts ----------
+
+def store_posts(posts: Iterable[Post]) -> List[str]:
+    """Store the posts a search found; return their ids in order.
+
+    A post already stored is refreshed. A post whose removal is recorded is
+    stored without its text (as a removed card keeps its post), so a later
+    search cannot bring the text back and its Review can still store a
+    "post removed" card.
+    """
+    from backend.activities.store_activities import POST_TEXT_REMOVED
+
+    ids = []
+    db = get_db()
+    try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))
+        for post in posts:
+            ids.append(post.id)
+            data = to_json(post)
+            if _post_removed(db, post.id):
+                data.update({"text": POST_TEXT_REMOVED, "text_removed": True})
+            db.merge(StoredPostDB(post_id=post.id, post_data=data, stored_at=_now()))
+        db.commit()
+        return ids
+    finally:
+        db.close()
+
+
+def load_post(post_id: str, what: str = "not reading it") -> Post:
+    """The stored post; raises PostRemoved once its removal is recorded."""
+    db = get_db()
+    try:
+        if _post_removed(db, post_id):
+            raise post_removed_error(what)
+        row = db.get(StoredPostDB, post_id)
+        if row is None:
+            raise ApplicationError(
+                f"Post {post_id} is not stored; a Review started without a TopicWatch search must pass the post",
+                type=DOC_MISSING_ERROR_TYPE,
+                non_retryable=True,
+            )
+        return from_json(row.post_data, Post)
+    finally:
+        db.close()
+
+
+def stored_post_data(db, post_id: str) -> Optional[dict]:
+    row = db.get(StoredPostDB, post_id)
+    return dict(row.post_data) if row is not None else None
+
+
+# ---------- Review documents ----------
+
+def _load_row(db, workflow_id: str, post_id: str, slot: str, what: str):
+    row = db.get(ReviewDocDB, (workflow_id, slot))
+    if row is None:
+        if _post_removed(db, post_id):
+            raise post_removed_error(what)
+        raise ApplicationError(
+            f"Review document {slot!r} of {workflow_id} is missing",
+            type=DOC_MISSING_ERROR_TYPE,
+            non_retryable=True,
+        )
+    return row
+
+
+def load_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T], what: str = "not reading it") -> T:
+    """A Review document; PostRemoved once the post's removal is recorded."""
+    db = get_db()
+    try:
+        if _post_removed(db, post_id):
+            raise post_removed_error(what)
+        return from_json(_load_row(db, workflow_id, post_id, slot, what).data, type_hint)
+    finally:
+        db.close()
+
+
+def find_doc(workflow_id: str, post_id: str, slot: str, type_hint: Type[T]) -> Optional[T]:
+    """A Review document, or None if there is none (or the post was removed)."""
+    db = get_db()
+    try:
+        if _post_removed(db, post_id):
+            return None
+        row = db.get(ReviewDocDB, (workflow_id, slot))
+        return from_json(row.data, type_hint) if row is not None else None
+    finally:
+        db.close()
+
+
+def save_doc(workflow_id: str, post_id: str, slot: str, value: Any, first_wins: bool = False) -> Any:
+    """Write a Review document; refused (PostRemoved) once the post's removal
+    is recorded, so a late write cannot bring the text back.
+
+    first_wins: keep a document already in the slot and return it decoded as
+    `value`'s type (the written check: the first finished check of a text
+    stands, see ReviewWorkflow._written_checks).
+    """
+    db = get_db()
+    try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))
+        if _post_removed(db, post_id):
+            raise post_removed_error("not storing it")
+        if first_wins:
+            existing = db.get(ReviewDocDB, (workflow_id, slot))
+            if existing is not None:
+                db.commit()
+                return from_json(existing.data, type(value))
+        db.merge(ReviewDocDB(
+            workflow_id=workflow_id, slot=slot, post_id=post_id, data=to_json(value), updated_at=_now()
+        ))
+        db.commit()
+        return value
+    finally:
+        db.close()
+
+
+def save_doc_in(db, workflow_id: str, post_id: str, slot: str, value: Any) -> None:
+    """save_doc inside a caller's transaction (update_card's edit_seq check)."""
+    if _post_removed(db, post_id):
+        raise post_removed_error("not storing it")
+    db.merge(ReviewDocDB(
+        workflow_id=workflow_id, slot=slot, post_id=post_id, data=to_json(value), updated_at=_now()
+    ))
+
+
+def load_doc_in(db, workflow_id: str, post_id: str, slot: str, type_hint: Type[T]) -> T:
+    if _post_removed(db, post_id):
+        raise post_removed_error("not reading it")
+    return from_json(_load_row(db, workflow_id, post_id, slot, "not reading it").data, type_hint)
+
+
+def store_founder_text(workflow_id: str, post_id: str, kind: str, client_request_id: str, text: str) -> str:
+    """Store a founder's edit or nudge text for the Review to read (the API
+    calls this before the update). Returns the slot the update names."""
+    slot = founder_text_slot(kind, client_request_id)
+    save_doc(workflow_id, post_id, slot, text)
+    return slot
+
+
+def remove_post_docs(db, post_id: str, workflow_ids: Iterable[str]) -> None:
+    """Removal duty (issue #23), inside delete_post_text's transaction: record
+    the removal on the stored post, replace its text, and delete every
+    working document of the post (by post id, and by the workflows of its
+    cards)."""
+    from backend.activities.store_activities import POST_TEXT_REMOVED
+
+    stored = db.get(StoredPostDB, post_id)
+    if stored is not None:
+        data = dict(stored.post_data or {})
+        data["text"] = POST_TEXT_REMOVED
+        data["text_removed"] = True
+        stored.post_data = data
+    ids = [w for w in workflow_ids if w]
+    query = db.query(ReviewDocDB).filter(ReviewDocDB.post_id == post_id)
+    query.delete(synchronize_session=False)
+    if ids:
+        db.query(ReviewDocDB).filter(ReviewDocDB.workflow_id.in_(ids)).delete(synchronize_session=False)

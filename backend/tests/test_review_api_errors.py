@@ -126,7 +126,7 @@ async def test_approve_after_failed_edit_is_409_post_anyway_required(make_review
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities), api_client(env.client) as http:
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_api_post_anyway"
+            workflow_id = f"review:test:{review_input.post_id}_api_post_anyway"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
             )
@@ -159,7 +159,7 @@ async def test_approve_naming_a_draft_that_is_no_longer_current_is_409_draft_cha
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities), api_client(env.client) as http:
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_api_draft_changed"
+            workflow_id = f"review:test:{review_input.post_id}_api_draft_changed"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
             )
@@ -195,7 +195,7 @@ async def test_requests_during_research_are_not_ready_and_get_reports_the_stage(
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent), api_client(env.client) as http:
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_api_researching"
+            workflow_id = f"review:test:{review_input.post_id}_api_researching"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
             )
@@ -237,7 +237,7 @@ async def test_founder_skip_during_research_shows_no_post_until_the_card_is_stor
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, agent), api_client(env.client) as http:
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_api_skip_researching"
+            workflow_id = f"review:test:{review_input.post_id}_api_skip_researching"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
             )
@@ -254,7 +254,7 @@ async def test_founder_skip_during_research_shows_no_post_until_the_card_is_stor
             assert await handle.result() == "skipped"
             got = (await http.get(f"/api/reviews/{workflow_id}")).json()
             assert got["status"] == "skipped" and "in_progress" not in got
-            assert got["post"]["id"] == review_input.post.id
+            assert got["post"]["id"] == review_input.post_id
             assert _db_card(workflow_id)["status"] == "skipped"
 
 
@@ -279,7 +279,7 @@ async def test_edit_before_the_card_is_stored_is_rejected_then_saved(make_review
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities, store=store.activity()), api_client(env.client) as http:
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_api_edit_before_store"
+            workflow_id = f"review:test:{review_input.post_id}_api_edit_before_store"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
             )
@@ -312,7 +312,7 @@ async def test_invalid_request_invalid_state_and_unknown_review(make_review_inpu
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_activities), api_client(env.client) as http:
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_api_codes"
+            workflow_id = f"review:test:{review_input.post_id}_api_codes"
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input, id=workflow_id, task_queue="test",
             )

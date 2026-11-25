@@ -36,7 +36,7 @@ from backend.activities.store_activities import (
 from backend.gate.reply_fit import assess_reply_fit, check_span, thread_position, verify_materials
 from backend.models import Author, Evidence, FounderMaterial, Post, ReplyFit, ReviewCard
 from backend.workflows.review import ReviewWorkflow
-from backend.tests.review_waits import wait_for_card_ready
+from backend.tests.review_waits import wait_for_card_ready, query_card
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "reply_fit_posts.json").read_text())
 NOW = datetime.fromisoformat(FIXTURE["now"])
@@ -481,7 +481,7 @@ async def _run_review(agent, make_review_input, x_activities, post, suffix):
                 task_queue="test",
             )
             result = await handle.result()
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             return result, card
 
 
@@ -563,7 +563,7 @@ async def test_passing_post_is_drafted(make_review_input, x_activities):
                 id=f"review:test:{post.id}_pass_{uuid.uuid4().hex[:6]}", task_queue="test",
             )
             await wait_for_card_ready(handle)
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
             assert agent.plan_calls == 1
             assert agent.draft_calls == 1
@@ -620,7 +620,7 @@ async def test_legacy_research_result_without_reply_fit_is_not_drafted(make_revi
     @temporal_activity.defn(name="research_post")
     async def legacy_research_post(input: ResearchPostInput) -> Evidence:
         return Evidence(
-            post_id=input.post.id, matched_topic="t", why_it_fits="legacy",
+            post_id=input.post_id, matched_topic="t", why_it_fits="legacy",
             confidence_score=0.95, confidence_inputs={"topic_match_strength": 0.9},
             founder_materials=[FounderMaterial(source="b", passage="p", relevance="r", passage_id="passage_0")],
         )
@@ -646,12 +646,16 @@ async def test_legacy_research_result_without_reply_fit_is_not_drafted(make_revi
         ):
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run,
-                make_review_input(post=post, confidence_threshold=CONFIDENCE_THRESHOLD, product_brief=BRIEF),
+                # A research result recorded before issue #4 exists only in old
+                # histories, whose input carries the post (issue #23)
+                make_review_input(
+                    legacy=True, post=post, confidence_threshold=CONFIDENCE_THRESHOLD, product_brief=BRIEF
+                ),
                 id=f"review:test:legacy_{uuid.uuid4().hex[:6]}",
                 task_queue="test",
             )
             assert await handle.result() == "skipped"
-            card = await handle.query("get_card")
+            card = await query_card(handle)
     assert draft_calls == []
     assert "predates" in card["skip_reason"]
 

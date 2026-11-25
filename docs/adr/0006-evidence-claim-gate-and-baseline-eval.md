@@ -183,3 +183,22 @@ The 2026-11-21 amendment deferred two options to allow more than verbatim quotes
 - *Removal duty.* A written draft is model-written text that can quote the post, so a removal redacts the draft text, each sentence check's sentence and reason, and the edited-text results (`redact_removed_card`). The supporting brief sentences are the founder's own text and stay.
 
 **Decided: switch criterion 1 covers the cases that make a product claim (George, 2026-11-25).** Five cases of the 2026-11-21 edit-path must-REJECT list make no product claim: 'What stack are you on.', 'What stack are you on!', 'I like the idea.', 'I think you are the problem.' and 'Why is the issue the same?'. In 2026-11-21 they failed because they were not fixed phrases. They are out of scope for the claim gate by design: under step 4 a sentence that is not a product claim is not gated against the brief, and the tone of such a sentence is caught by founder review. Criterion 1 as first worded ("every must-REJECT case ... is rejected by steps 2-4") could not hold for them, so it now names the cases that make a product claim. Those are the other twelve, and steps 2-4 reject each of them. `backend/tests/test_written_switch_criteria.py` pins both groups: the twelve as rejected, the five as allowed by design.
+
+## Amendment 2026-11-25: Post text kept out of Temporal history (issue #23)
+
+**Context.** Issue #9 made a removal redact the stored cards. Two copies of the post text survived it: Temporal history (workflow inputs and activity payloads held the post, the evidence and the drafts until history retention deleted the closed workflow; the local dev server keeps histories in `.temporal-dev.db`), and SQLite residue (old pages in the `-wal` file and in free pages).
+
+**Decision (George, 2026-11-25: option A).** Workflows carry ids only. The text lives in SQLite, where a removal can delete it:
+
+1. A TopicWatch search stores the posts it finds (`stored_posts`) and returns their ids; each Review starts with the post id only.
+2. A Review's activities read the post and the Review's working documents (`review_docs`: the evidence, each draft candidate, check results, the founder's edit and nudge text) from SQLite and return summaries: counts, flags, the draft's SHA-256 digest, and reasons that code writes without post text (should-we-reply rules, the confidence threshold, plan validation errors, "post removed").
+3. **Drafts stay out of history too.** A draft is model output that can quote the post, and approve names the draft the founder saw (issue #15). Approve now names it by digest: the API hashes `draft_text` and sends `{"text_sha256", "gate_state"}`. An edit's text and a nudge's instruction are stored by the API first; the update carries the slot and the digest. Edit and nudge return the digest, and the API answers with the stored draft. A failed-check skip reason and a nudge rejection's reasons quote the draft, so they are stored, and the API adds them to its responses.
+4. The `get_card` query of such a Review returns its state only (status, approval fields, digest); the API reads the card from SQLite and applies that state.
+5. A removal (`delete_post_text`) also records the removal on the stored post, replaces its text, and deletes every working document of the post. Any later read or write of them raises `PostRemoved`, so a Review of a removed post now stops at whichever step comes next, research and planning included, in both draft modes, before any model call.
+6. SQLite: `PRAGMA secure_delete=ON` on every connection, and `PRAGMA wal_checkpoint(TRUNCATE)` after each removal.
+
+**Replay.** A Review whose input carries the post (every history recorded before this change) runs the previous code path unchanged; a search result that carries posts starts its Reviews with the post as before. The mode follows from recorded data, so replay always takes the same path. Fixtures recorded on main 06db357 replay in tests.
+
+**What stays in history.** The founder's own text: the brief, the watch query, product name, aliases and key features, and a founder's skip reason. Ids: post, conversation, reply ids and the founder's reply URL. Code-written reasons. Histories recorded before this change keep their text until Temporal's retention deletes them.
+
+**Not changed.** The removal duty's own rules from issue #9 and issue #12: a card keeps the post's author fields, and a founder's edit of an assembled draft is kept as the founder's words. Worker logs are not history and can still print draft sentences.

@@ -1,12 +1,13 @@
 """X API activities with injected client."""
 
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Optional, List, Union
 
 import httpx
 from temporalio import activity
 
 from backend.models import Post
+from backend.models.summaries import PostLookup
 from backend.ports import XClientPort
 from backend.budget import (
     reserve_x_budget,
@@ -61,6 +62,10 @@ class SearchRecentInput:
     max_results: int = 10
     idempotency_key: str = ""
     poll_interval_hours: Optional[int] = None  # For adapter validation (item 3)
+    # Issue #23: store the posts found (backend/review_docs.py) and return
+    # only their ids, so no post content enters the TopicWatch history.
+    # False in inputs recorded before the field existed.
+    store_posts: bool = False
 
 
 @dataclass
@@ -70,6 +75,9 @@ class SearchRecentOutput:
     posts: List[Post]
     newest_id: Optional[str]
     cost_usd: float
+    # Issue #23: with store_posts, the ids of the posts found (stored, in
+    # order) and `posts` is empty. Empty in results recorded before.
+    post_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +86,8 @@ class LookupPostInput:
     
     post_id: str
     idempotency_key: str
+    # Issue #23: return a PostLookup (id and conversation only), not the post
+    summary_only: bool = False
 
 
 @dataclass
@@ -86,6 +96,9 @@ class CheckFollowupInput:
     
     reply_post_id: str
     idempotency_key: str
+    # Issue #23: write the replies to this workflow's card and return their
+    # count, so their text and authors never enter the Review's history
+    store_on_card: bool = False
 
 
 @dataclass
@@ -199,6 +212,15 @@ class XActivities:
         
         activity.logger.info(f"Found {len(posts)} posts, cost ${actual_cost:.4f}")
         
+        if input.store_posts:
+            from backend.review_docs import store_posts
+
+            return SearchRecentOutput(
+                posts=[],
+                newest_id=result.newest_id,
+                cost_usd=actual_cost,
+                post_ids=store_posts(posts),
+            )
         return SearchRecentOutput(
             posts=posts,
             newest_id=result.newest_id,
@@ -206,7 +228,7 @@ class XActivities:
         )
     
     @activity.defn(name="lookup_post")
-    async def lookup_post(self, input: LookupPostInput) -> Optional[Post]:
+    async def lookup_post(self, input: LookupPostInput) -> Optional[Union[Post, PostLookup]]:
         """
         Lookup a single post by ID.
         
@@ -264,14 +286,16 @@ class XActivities:
             cost_per_read=settings.x_post_read_cost,
         )
         if post:
-            activity.logger.info(f"Found post {input.post_id} by @{post.author.username}, cost ${cost_usd:.4f}")
+            activity.logger.info(f"Found post {input.post_id}, cost ${cost_usd:.4f}")
         else:
             activity.logger.info(f"Post {input.post_id} not found (deleted or 404), cost ${cost_usd:.4f}")
         
+        if input.summary_only:
+            return PostLookup(post_id=post.id, conversation_id=post.conversation_id) if post else None
         return post
     
     @activity.defn(name="check_followup")
-    async def check_followup(self, input: CheckFollowupInput) -> List[Post]:
+    async def check_followup(self, input: CheckFollowupInput) -> Union[List[Post], int]:
         """
         Check for replies to a posted reply.
         
@@ -339,6 +363,23 @@ class XActivities:
             f"Found {len(posts)} replies in conversation (cost ${actual_cost:.4f})"
         )
         
+        if input.store_on_card:
+            import asyncio
+            from backend.activities.store_activities import (
+                UpdateCardInput,
+                _update_card_sync,
+                followup_reply_fields,
+            )
+
+            await asyncio.to_thread(
+                _update_card_sync,
+                UpdateCardInput(
+                    workflow_id=activity.info().workflow_id,
+                    idempotency_key=input.idempotency_key,
+                    followup_replies=[followup_reply_fields(p) for p in posts],
+                ),
+            )
+            return len(posts)
         return posts
     
     @activity.defn(name="notify")

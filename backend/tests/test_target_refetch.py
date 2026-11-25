@@ -20,6 +20,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from temporalio.exceptions import ApplicationError
 from temporalio.client import WorkflowHistory, WorkflowUpdateFailedError, WorkflowUpdateStage
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
@@ -38,7 +39,8 @@ from backend.activities.x_activities import XActivities
 from backend.adapters import FakeReplyAgent, FakeXClient
 from backend.budget import get_today_budget, set_kill_switch
 from backend.workflows.review import TARGET_REFETCH_PATCH_ID, ReviewWorkflow
-from backend.tests.review_waits import WAIT_TIMEOUT_SEC, wait_for_card_ready
+from backend.tests.conftest import SAMPLE_POST_TEXT
+from backend.tests.review_waits import WAIT_TIMEOUT_SEC, wait_for_card_ready, query_card
 from backend.tests.test_edit_regate import fetch_history_past_approve
 
 
@@ -46,7 +48,7 @@ async def _wait_for_status(handle, status):
     """Wait until get_card reports the status (signals change it in the
     workflow task that handles them; re-queried every 50 ms)."""
     async def _poll():
-        while (await handle.query("get_card"))["status"] != status:
+        while (await query_card(handle))["status"] != status:
             await asyncio.sleep(0.05)
 
     await asyncio.wait_for(_poll(), WAIT_TIMEOUT_SEC)
@@ -153,16 +155,16 @@ def _scheduled_names(history):
     return [a.activity_type.name for a in _scheduled(history)]
 
 
-async def _start(env, make_review_input, suffix):
-    review_input = make_review_input()
+async def _start(env, make_review_input, suffix, **overrides):
+    review_input = make_review_input(**overrides)
     handle = await env.client.start_workflow(
         ReviewWorkflow.run,
         review_input,
-        id=f"review:test:{review_input.post.id}_{suffix}",
+        id=f"review:test:{review_input.post_id}_{suffix}",
         task_queue="test",
     )
     await wait_for_card_ready(handle)
-    card = await handle.query("get_card")
+    card = await query_card(handle)
     assert card["status"] == "pending", card
     return review_input, handle
 
@@ -176,7 +178,7 @@ async def test_404_on_refetch_redacts_text_and_spans_and_skips(make_review_input
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, client):
             review_input, handle = await _start(env, make_review_input, "refetch_404")
-            before = await handle.query("get_card")
+            before = await query_card(handle)
             # The card quotes the post before the removal (so the test means something)
             assert QUESTION in before["evidence"]["why_it_fits"]
             assert before["evidence"]["reply_plan"]["target_point"] == QUESTION
@@ -191,7 +193,7 @@ async def test_404_on_refetch_redacts_text_and_spans_and_skips(make_review_input
             # does not bill, so the re-fetch counts no read
             assert _x_reads() == reads_before
 
-            for card in (await handle.query("get_card"), _db_card(handle.id)):
+            for card in (await query_card(handle), _db_card(handle.id)):
                 assert card["status"] == "skipped"
                 assert card["skip_reason"] == POST_REMOVED_SKIP_REASON
                 assert card["post"]["text"] == POST_TEXT_REMOVED
@@ -228,7 +230,7 @@ async def test_200_on_refetch_leaves_card_unchanged_and_approves(make_review_inp
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, client):
             review_input, handle = await _start(env, make_review_input, "refetch_200")
-            before = await handle.query("get_card")
+            before = await query_card(handle)
             reads_before = _x_reads()
 
             assert await handle.execute_update(
@@ -237,7 +239,7 @@ async def test_200_on_refetch_leaves_card_unchanged_and_approves(make_review_inp
             # The stored-card checks below need run()'s approval write
             await fetch_history_past_approve(handle)
 
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "approved"
             assert card["post"] == before["post"]
             assert "text_removed" not in card["post"]
@@ -245,7 +247,7 @@ async def test_200_on_refetch_leaves_card_unchanged_and_approves(make_review_inp
             assert card["evidence"]["reply_plan"] == before["evidence"]["reply_plan"]
             stored = _db_card(handle.id)
             assert stored["status"] == "approved"
-            assert stored["post"]["text"] == review_input.post.text
+            assert stored["post"]["text"] == SAMPLE_POST_TEXT
             assert stored["evidence"]["reply_plan"]["target_point"] == QUESTION
 
             # One budgeted X read for the re-fetch (research and plan use no X reads)
@@ -292,15 +294,15 @@ async def test_failed_refetch_fails_approve_and_same_request_id_can_retry(make_r
             request_id = str(uuid.uuid4())
             with pytest.raises(WorkflowUpdateFailedError):
                 await handle.execute_update("approve", args=[APPROVE_URL, request_id, False])
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["status"] == "pending"
-            assert card["post"]["text"] == review_input.post.text
+            assert card["post"]["text"] == SAMPLE_POST_TEXT
             assert _db_card(handle.id)["status"] == "pending"
 
             assert await handle.execute_update("approve", args=[APPROVE_URL, request_id, False]) == "Approved"
             assert client.target_lookups == 4
             await env.sleep(1)
-            assert (await handle.query("get_card"))["status"] == "approved"
+            assert (await query_card(handle))["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -316,9 +318,9 @@ async def test_over_budget_refetch_fails_approve_without_removing_text(make_revi
                 await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
             assert "kill switch" in str(excinfo.value.cause.cause)
             assert client.target_lookups == 0
-            for card in (await handle.query("get_card"), _db_card(handle.id)):
+            for card in (await query_card(handle), _db_card(handle.id)):
                 assert card["status"] == "pending"
-                assert card["post"]["text"] == review_input.post.text
+                assert card["post"]["text"] == SAMPLE_POST_TEXT
                 assert not card["post"].get("text_removed")
             set_kill_switch(False)
 
@@ -349,7 +351,7 @@ async def test_edit_nudge_and_second_approve_rejected_while_refetch_in_flight(ma
             client.release.set()
             assert await approve.result() == "Approved"
             await env.sleep(1)
-            assert (await handle.query("get_card"))["status"] == "approved"
+            assert (await query_card(handle))["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -374,7 +376,7 @@ async def test_skip_during_refetch_waits_for_the_removal(make_review_input):
                 await approve.result()
             assert excinfo.value.cause.type == "PostRemoved"
             assert await handle.result() == "skipped"
-            for card in (await handle.query("get_card"), _db_card(handle.id)):
+            for card in (await query_card(handle), _db_card(handle.id)):
                 assert card["status"] == "skipped"
                 assert card["skip_reason"] == POST_REMOVED_SKIP_REASON
                 assert card["post"]["text_removed"] is True
@@ -405,10 +407,10 @@ async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
             other_input = make_review_input(account="other")
             other = await env.client.start_workflow(
                 ReviewWorkflow.run, other_input,
-                id=f"review:other:{other_input.post.id}_refetch_multi_b", task_queue="test",
+                id=f"review:other:{other_input.post_id}_refetch_multi_b", task_queue="test",
             )
             await wait_for_card_ready(other)
-            assert _db_card(other.id)["post"]["text"] == review_input.post.text
+            assert _db_card(other.id)["post"]["text"] == SAMPLE_POST_TEXT
 
             with pytest.raises(WorkflowUpdateFailedError):
                 await first.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
@@ -419,8 +421,10 @@ async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
             for fragment in POST_FRAGMENTS:
                 assert fragment not in json.dumps(stored_other)
 
-            queried = await other.query("get_card")
-            assert queried["post"]["text"] == review_input.post.text  # workflow state
+            # issue #23: a text-free Review holds no post text; its card is
+            # read from the stored row, which the removal redacted
+            queried = await query_card(other)
+            assert queried["post"]["text_removed"] is True
             redacted = apply_stored_removal(other.id, queried)
             assert redacted["post"]["text_removed"] is True
             assert redacted["status"] == "pending"
@@ -429,15 +433,20 @@ async def test_removal_reaches_every_stored_card_of_the_post(make_review_input):
 
             # A nudge on the other Review must not send its stale evidence on
             drafts_before = len(agent.drafted)
-            with pytest.raises(WorkflowUpdateFailedError):
+            # issue #23: for a text-free Review the instruction is stored
+            # first, which is refused once the removal is recorded (the API
+            # answers 409 post_removed)
+            with pytest.raises((WorkflowUpdateFailedError, ApplicationError)) as refused:
                 await other.execute_update("nudge", args=["Make it shorter", str(uuid.uuid4())])
+            if isinstance(refused.value, ApplicationError):
+                assert refused.value.type == "PostRemoved"
             assert len(agent.drafted) == drafts_before
 
             # A Review whose card is stored after the removal stores it redacted
             late_input = make_review_input(account="late")
             late = await env.client.start_workflow(
                 ReviewWorkflow.run, late_input,
-                id=f"review:late:{late_input.post.id}_refetch_multi_c", task_queue="test",
+                id=f"review:late:{late_input.post_id}_refetch_multi_c", task_queue="test",
             )
             await wait_for_card_ready(late)
             stored_late = _db_card(late.id)
@@ -465,7 +474,7 @@ async def test_approve_is_rejected_until_the_card_is_stored(make_review_input):
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_approve_too_early", task_queue="test",
+                id=f"review:test:{review_input.post_id}_approve_too_early", task_queue="test",
             )
             with pytest.raises(WorkflowUpdateFailedError) as excinfo:
                 await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
@@ -474,7 +483,7 @@ async def test_approve_is_rejected_until_the_card_is_stored(make_review_input):
             assert client.target_lookups == 0
             agent.release.set()
             assert (await wait_for_card_ready(handle))["status"] == "pending"
-            assert _db_card(handle.id)["post"]["text"] == review_input.post.text
+            assert _db_card(handle.id)["post"]["text"] == SAMPLE_POST_TEXT
 
 
 @pytest.mark.asyncio
@@ -487,8 +496,9 @@ async def test_late_store_after_removal_keeps_removed_status(make_review_input):
     client = TargetClient(["gone"])
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, client):
-            review_input, handle = await _start(env, make_review_input, "late_store")
-            pending = await handle.query("get_card")
+            # The stale store below replays a card that carries the post
+            review_input, handle = await _start(env, make_review_input, "late_store", legacy=True)
+            pending = await query_card(handle)
             with pytest.raises(WorkflowUpdateFailedError):
                 await handle.execute_update("approve", args=[APPROVE_URL, str(uuid.uuid4()), False])
             assert _db_card(handle.id)["status"] == "skipped"
@@ -548,9 +558,9 @@ async def test_reply_url_404_keeps_target_text_after_refetch(make_review_input):
                 await handle.execute_update(
                     "confirm_posted", args=["https://x.com/test/status/404404", str(uuid.uuid4())]
                 )
-            for card in (await handle.query("get_card"), _db_card(handle.id)):
+            for card in (await query_card(handle), _db_card(handle.id)):
                 assert card["status"] == "approved"
-                assert card["post"]["text"] == review_input.post.text
+                assert card["post"]["text"] == SAMPLE_POST_TEXT
                 assert not card["post"].get("text_removed")
                 assert card["evidence"]["reply_plan"]["target_point"] == QUESTION
             assert "delete_post_text" not in _scheduled_names(await handle.fetch_history())
@@ -643,8 +653,8 @@ async def test_eval_refetch_leaves_a_live_review_alone(make_review_input):
             ) == "live"
             assert client.target_lookups == 0
             assert _x_reads() == reads_before
-            assert _db_card(handle.id)["post"]["text"] == review_input.post.text
-            assert (await handle.query("get_card"))["post"]["text"] == review_input.post.text
+            assert _db_card(handle.id)["post"]["text"] == SAMPLE_POST_TEXT
+            assert (await query_card(handle))["post"]["text"] == SAMPLE_POST_TEXT
 
 
 @pytest.mark.asyncio
@@ -830,10 +840,10 @@ async def test_model_identifiers_quoting_the_post_are_not_stored(make_review_inp
             review_input = make_review_input()
             handle = await env.client.start_workflow(
                 ReviewWorkflow.run, review_input,
-                id=f"review:test:{review_input.post.id}_quote_as_id", task_queue="test",
+                id=f"review:test:{review_input.post_id}_quote_as_id", task_queue="test",
             )
             assert await handle.result() == "skipped"
-            queried = await handle.query("get_card")
+            queried = await query_card(handle)
     stored = _db_card(handle.id)
     for card in (queried, stored):
         assert card["skip_reason"].startswith("Not enough evidence")

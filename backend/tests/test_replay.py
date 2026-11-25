@@ -16,7 +16,7 @@ from backend.activities import XActivities, ReplyActivities
 from backend.activities.store_activities import store_card, update_card, delete_post_text
 from backend.activities.claim_gate_activity import claim_gate
 from backend.adapters import FakeXClient, FakeReplyAgent
-from backend.tests.review_waits import wait_for_card_ready
+from backend.tests.review_waits import wait_for_card_ready, query_card
 
 
 @pytest.mark.asyncio
@@ -41,7 +41,7 @@ async def test_review_workflow_replay(make_review_input, x_activities, reply_act
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_replay"
+            workflow_id = f"review:test:{review_input.post_id}_replay"
             
             # Run workflow with short followup delay for testing
             handle = await env.client.start_workflow(
@@ -66,7 +66,7 @@ async def test_review_workflow_replay(make_review_input, x_activities, reply_act
             history = await fetch_history_past_approve(handle)
             
             # S6 (QA R14): Assert that history contains phrase_id segments
-            card = await handle.query("get_card")
+            card = await query_card(handle)
             assert card["evidence"]["draft"]["segments"] is not None
             segments = card["evidence"]["draft"]["segments"]
             # At least one non_claim segment should have phrase_id
@@ -167,7 +167,7 @@ async def test_review_workflow_replay_with_skip(make_review_input, x_activities,
             ],
         ):
             review_input = make_review_input()
-            workflow_id = f"review:test:{review_input.post.id}_replay_skip"
+            workflow_id = f"review:test:{review_input.post_id}_replay_skip"
             
             # Run workflow and record history
             handle = await env.client.start_workflow(
