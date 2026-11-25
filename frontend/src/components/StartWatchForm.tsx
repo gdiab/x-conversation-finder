@@ -9,21 +9,41 @@ interface StartWatchFormProps {
   onSuccess: () => void;
 }
 
+/** "Relay, AcmeRelay" -> ["Relay", "AcmeRelay"]; blanks and repeats are dropped. */
+export function parseAlsoCalled(value: string): string[] {
+  const names: string[] = [];
+  for (const part of value.split(',')) {
+    const name = part.trim().replace(/\s+/g, ' ');
+    if (name && !names.some((n) => n.toLowerCase() === name.toLowerCase())) {
+      names.push(name);
+    }
+  }
+  return names;
+}
+
 export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
   const [account, setAccount] = useState('');
   const [topic, setTopic] = useState('');
   const [query, setQuery] = useState('');
   const [productBrief, setProductBrief] = useState('');
+  const [productName, setProductName] = useState('');
+  const [alsoCalled, setAlsoCalled] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSuccess(null);
+
+    // "required" accepts a name made of spaces; the server does not
+    if (!productName.trim()) {
+      setError('Enter the product name.');
+      return;
+    }
     
     setLoading(true);
     setError(null);
-    setSuccess(null);
     
     try {
       const result = await startWatch({
@@ -31,6 +51,8 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
         topic,
         query,
         product_brief: productBrief,
+        product_name: productName.trim(),
+        product_aliases: parseAlsoCalled(alsoCalled),
       });
       
       setSuccess(result.message);
@@ -93,6 +115,40 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
             style={{ width: '100%', padding: '8px' }}
             placeholder="e.g., distributed systems reliability"
           />
+        </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="watch-product-name" style={{ display: 'block', marginBottom: '4px' }}>
+            Product name:
+          </label>
+          <input
+            id="watch-product-name"
+            type="text"
+            value={productName}
+            onChange={(e) => setProductName(e.target.value)}
+            required
+            maxLength={80}
+            style={{ width: '100%', padding: '8px' }}
+            placeholder="e.g., Acme Relay"
+          />
+        </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="watch-also-called" style={{ display: 'block', marginBottom: '4px' }}>
+            Also called (optional):
+          </label>
+          <input
+            id="watch-also-called"
+            type="text"
+            value={alsoCalled}
+            onChange={(e) => setAlsoCalled(e.target.value)}
+            style={{ width: '100%', padding: '8px' }}
+            placeholder="e.g., Relay, AcmeRelay"
+          />
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            Other names people use for the product, separated by commas. In written drafts, a reply
+            sentence that uses the product name or one of these names is checked against your brief.
+          </div>
         </div>
 
         <div style={{ marginBottom: '12px' }}>

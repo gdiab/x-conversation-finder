@@ -18,8 +18,20 @@ from backend.models import (
     ReplyPlan,
 )
 from backend.ports import ReplyAgentPort
+from backend.ports.reply_agent import WrittenDraftRequest
+from backend.models.written import DRAFT_MODE_WRITTEN, DrafterHint, WrittenDraftInfo
 from backend.planning import question_spans
 from backend.gate.sentence_boundary import SPLITTER_VERSION
+
+# issue #12: the fake written draft. Sentences without a product name, we/our,
+# a number, a comparison or a feature term, so only the brief sentence between
+# them is checked as a product claim.
+_FAKE_WRITTEN_OPENER_BY_REPLY_TYPE = {
+    "answer_question": "Good question, and a hard thing to get right.",
+    "add_observation": "That is a hard thing to get right.",
+    "share_experience": "That matches what happens in practice.",
+}
+_FAKE_WRITTEN_CLOSER = "What are you using today?"
 
 # issue #5: the closer the fake draft uses for each planned reply type.
 _FAKE_CLOSER_BY_REPLY_TYPE = {
@@ -263,4 +275,62 @@ class FakeReplyAgent(ReplyAgentPort):
             model_used="fake-model",
         )
         
+        return evidence
+
+    async def draft_written(
+        self,
+        request: WrittenDraftRequest,
+        idempotency_key: Optional[str] = None,
+    ) -> Evidence:
+        """
+        Write a fake reply deterministically (issue #12).
+        
+        A fixed reaction, then (when the plan mentions the product) one brief
+        sentence word for word, then a fixed question. The fake claim checker
+        supports a brief sentence word for word, so the draft passes the check
+        the way a well-behaved model's would. Steers as in draft(): "shorter"
+        drops the question, "technical" picks the third brief sentence.
+        """
+        evidence = request.evidence
+        steer = (request.steer or "").lower()
+        steers = evidence.draft.steers_applied if evidence.draft else []
+        if request.steer:
+            steers = steers + [request.steer]
+
+        sentences = [_FAKE_WRITTEN_OPENER_BY_REPLY_TYPE.get(
+            request.plan.reply_type, _FAKE_WRITTEN_OPENER_BY_REPLY_TYPE["add_observation"]
+        )]
+        hints: List[DrafterHint] = []
+        if request.plan.mention_product is not False and request.brief_sentences:
+            index = 2 if "technical" in steer and len(request.brief_sentences) > 2 else 0
+            claim = request.brief_sentences[index]
+            sentences.append(claim.text)
+            hints.append(DrafterHint(sentence=claim.text, brief_sentence_ids=[claim.id]))
+        if "shorter" not in steer:
+            sentences.append(_FAKE_WRITTEN_CLOSER)
+        text = " ".join(sentences)
+
+        evidence.draft = Draft(
+            text=text,
+            segments=[],
+            claim_gate=ClaimGateResult(
+                passed=False,
+                segments=[],
+                failed_sentences=[],
+                reasoning="Product-claim check not yet run (check_written_draft activity)",
+            ),
+            steers_applied=steers,
+            token_count=len(text.split()),
+            input_tokens=(len(request.post.text) + sum(len(b.text) for b in request.brief_sentences) + 600) // 4,
+            output_tokens=len(text) // 4,
+            model_used="fake-model",
+            mode=DRAFT_MODE_WRITTEN,
+            written=WrittenDraftInfo(
+                product_name=request.product_name,
+                product_aliases=list(request.product_aliases),
+                feature_terms=list(request.feature_terms),
+                brief_sentence_count=len(request.brief_sentences),
+                drafter_hints=hints,
+            ),
+        )
         return evidence

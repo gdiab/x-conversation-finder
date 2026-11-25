@@ -29,6 +29,10 @@ from .claim_gate_activity import (
     claim_gate,
     ClaimGateInput,
 )
+from .written_check_activities import (
+    WrittenCheckActivities,
+    CheckWrittenDraftInput,
+)
 
 __all__ = [
     "XActivities",
@@ -52,4 +56,6 @@ __all__ = [
     "DeletePostTextInput",
     "claim_gate",
     "ClaimGateInput",
+    "WrittenCheckActivities",
+    "CheckWrittenDraftInput",
 ]

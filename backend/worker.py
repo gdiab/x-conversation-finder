@@ -14,8 +14,46 @@ from backend.workflows import ReviewWorkflow, TopicWatchWorkflow
 from backend.activities.x_activities import XActivities
 from backend.activities.reply_activities import ReplyActivities
 from backend.activities.store_activities import store_card, update_card, get_card, delete_post_text
-from backend.activities.claim_gate_activity import claim_gate
-from backend.adapters import FakeXClient, HttpXClient, FakeReplyAgent, PlainReplyAgent
+from backend.activities.claim_gate_activity import claim_gate, verify_edited_text
+from backend.activities.written_check_activities import WrittenCheckActivities
+from backend.adapters import (
+    FakeClaimChecker,
+    FakeReplyAgent,
+    FakeXClient,
+    HttpXClient,
+    PlainClaimChecker,
+    PlainReplyAgent,
+)
+
+
+def build_activities(x_client, reply_agent, claim_checker, draft_mode=None) -> list:
+    """Every activity the Review and TopicWatch workflows call, with its
+    dependencies injected (B5: no module globals). A test compares this list
+    with the activity names the workflows use: a missing registration makes
+    the workflow's call fail at run time only."""
+    x_activities = XActivities(x_client)
+    reply_activities = ReplyActivities(reply_agent, draft_mode=draft_mode)
+    written_check_activities = WrittenCheckActivities(claim_checker)
+    return [
+        x_activities.search_recent,
+        x_activities.lookup_post,
+        x_activities.check_followup,
+        x_activities.notify,
+        reply_activities.research_post,
+        reply_activities.plan_reply,
+        reply_activities.draft_reply,
+        # issue #12: the product-claim check of written drafts and their edits
+        written_check_activities.check_written_draft,
+        # Standalone activity functions
+        store_card,
+        update_card,
+        get_card,
+        delete_post_text,
+        claim_gate,
+        # The assembled edit re-gate. It was missing here before issue #12, so
+        # on a real worker every edit ended as "not_checked".
+        verify_edited_text,
+    ]
 
 
 async def main():
@@ -53,6 +91,7 @@ async def main():
     # Reply agent adapter
     if settings.reply_agent_adapter == "fake":
         reply_agent = FakeReplyAgent()
+        claim_checker = FakeClaimChecker()
     elif settings.reply_agent_adapter == "plain":
         if not settings.openai_api_key:
             logger.error("OPENAI_API_KEY is required when reply_agent_adapter=plain")
@@ -62,6 +101,9 @@ async def main():
             )
         logger.info("Initializing plain reply agent with OpenAI API")
         reply_agent = PlainReplyAgent()
+        # issue #12: the claim checker is its own adapter and its own call. It
+        # uses the same provider and model settings as the drafter.
+        claim_checker = PlainClaimChecker()
     else:
         logger.error(f"Unknown reply_agent_adapter: {settings.reply_agent_adapter}")
         raise ValueError(
@@ -69,9 +111,7 @@ async def main():
             "Valid options: 'fake', 'plain'"
         )
     
-    # Create activity instances with injected dependencies (B5: no module globals)
-    x_activities = XActivities(x_client)
-    reply_activities = ReplyActivities(reply_agent)
+    logger.info(f"Draft mode: {settings.draft_mode}")
     
     logger.info(f"Connecting to Temporal at {settings.temporal_host}")
     
@@ -86,22 +126,7 @@ async def main():
         client,
         task_queue="x-conversation-finder",
         workflows=[ReviewWorkflow, TopicWatchWorkflow],
-        activities=[
-            # Activity class methods (B5: injected deps via constructor)
-            x_activities.search_recent,
-            x_activities.lookup_post,
-            x_activities.check_followup,
-            x_activities.notify,
-            reply_activities.research_post,
-            reply_activities.plan_reply,
-            reply_activities.draft_reply,
-            # Standalone activity functions
-            store_card,
-            update_card,
-            get_card,
-            delete_post_text,
-            claim_gate,
-        ],
+        activities=build_activities(x_client, reply_agent, claim_checker, settings.draft_mode),
     )
     
     logger.info("Worker running with injected adapters")

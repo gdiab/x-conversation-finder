@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
@@ -171,12 +171,46 @@ def review_error_response(exc: Exception, action: str) -> JSONResponse:
     return error_response(500, "server_error", f"{action} failed: {reason}")
 
 
+MAX_PRODUCT_NAME_CHARS = 80
+MAX_PRODUCT_ALIASES = 10
+
+
 class StartWatchRequest(BaseModel):
     """Request to start a topic watch."""
     account: str
     topic: str
     query: str
     product_brief: str
+    # issue #12 (George's decision, 2026-11-24): the Start Watch form's
+    # "Product name" (required) and "Also called" (optional) fields. The
+    # written-draft name trigger reads only these, never the brief text.
+    product_name: str
+    product_aliases: List[str] = Field(default_factory=list)
+
+    @field_validator("product_name")
+    @classmethod
+    def product_name_is_set(cls, value: str) -> str:
+        name = " ".join(value.split())
+        if not name:
+            raise ValueError("Product name is required")
+        if len(name) > MAX_PRODUCT_NAME_CHARS:
+            raise ValueError(f"Product name must be at most {MAX_PRODUCT_NAME_CHARS} characters")
+        return name
+
+    @field_validator("product_aliases")
+    @classmethod
+    def product_aliases_are_names(cls, value: List[str]) -> List[str]:
+        aliases: List[str] = []
+        for alias in value:
+            alias = " ".join(alias.split())
+            if not alias or alias.casefold() in (a.casefold() for a in aliases):
+                continue  # blanks and repeats from the comma-separated field
+            if len(alias) > MAX_PRODUCT_NAME_CHARS:
+                raise ValueError(f"Each alias must be at most {MAX_PRODUCT_NAME_CHARS} characters")
+            aliases.append(alias)
+        if len(aliases) > MAX_PRODUCT_ALIASES:
+            raise ValueError(f"At most {MAX_PRODUCT_ALIASES} aliases")
+        return aliases
 
 
 class StartWatchResponse(BaseModel):
@@ -261,6 +295,8 @@ async def start_watch(request: StartWatchRequest):
                 confidence_threshold=settings.confidence_threshold,
                 config=topic_watch_config,
                 review_config=review_config,
+                product_name=request.product_name,
+                product_aliases=request.product_aliases,
             ),
             id=workflow_id,
             task_queue="x-conversation-finder",
@@ -273,9 +309,14 @@ async def start_watch(request: StartWatchRequest):
     
     except Exception as e:
         if "already exists" in str(e).lower():
+            # A running watch keeps the brief and product name it was started
+            # with (issue #12: stop it first to give it a product name)
             return StartWatchResponse(
                 workflow_id=workflow_id,
-                message=f"Watch already running for topic '{request.topic}'",
+                message=(
+                    f"Watch already running for topic '{request.topic}'. Its product name and "
+                    "brief were not changed; stop the watch first to change them."
+                ),
             )
         raise HTTPException(status_code=500, detail=str(e))
 

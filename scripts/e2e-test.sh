@@ -129,7 +129,8 @@ START_RESPONSE=$(curl -s -X POST http://localhost:8000/api/watch/start \
     "account": "e2e-test",
     "topic": "distributed-systems",
     "query": "distributed systems",
-    "product_brief": "We build tools for reliable distributed systems."
+    "product_brief": "We build tools for reliable distributed systems.",
+    "product_name": "Acme Tools"
   }')
 echo "$START_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$START_RESPONSE"
 echo ""

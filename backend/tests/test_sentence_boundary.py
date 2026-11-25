@@ -187,6 +187,9 @@ def test_workflow_code_never_splits_sentences():
         "split_into_sentences", "ends_with_abbreviation", "insert_claim_sentence",
         "claim_selectability_error", "question_spans", "validate_reply_plan",
         "sentence_boundary", "period_boundary", "legacy_split",
+        # issue #12: the brief split, the triggers and the written check
+        "split_brief", "brief_feature_terms", "find_triggers", "prepare_check",
+        "gate.written_check", "gate.brief",
     )
     workflows = Path(__file__).resolve().parents[1] / "workflows"
     for path in workflows.glob("*.py"):

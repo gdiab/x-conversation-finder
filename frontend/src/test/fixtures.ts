@@ -5,7 +5,7 @@
  * Do not paste real X posts or handles into tests.
  */
 
-import type { ReplyFit, ReplyPlan, ReviewCard } from '../api/client';
+import type { ReplyFit, ReplyPlan, ReviewCard, SentenceCheck } from '../api/client';
 
 type Evidence = ReviewCard['evidence'];
 type Draft = NonNullable<Evidence['draft']>;
@@ -30,6 +30,71 @@ export function makeDraft(overrides: Partial<Draft> = {}): Draft {
     output_tokens: 20,
     ...overrides,
   };
+}
+
+/** One sentence of a written draft's check (issue #12). Defaults: not about the product, passed. */
+export function makeSentenceCheck(overrides: Partial<SentenceCheck> = {}): SentenceCheck {
+  return {
+    sentence: 'That is a hard thing to get right.',
+    passed: true,
+    kind: 'non_claim',
+    reason: '',
+    kept_segment: false,
+    triggers: [],
+    checker_flagged: false,
+    verdict: 'not_a_product_claim',
+    supporting: [],
+    ...overrides,
+  };
+}
+
+/** A supported product claim of the synthetic product "Acme Relay". */
+export function makeSupportedClaim(overrides: Partial<SentenceCheck> = {}): SentenceCheck {
+  return makeSentenceCheck({
+    sentence: 'Acme Relay can retry a failed delivery up to five times.',
+    kind: 'claim',
+    verdict: 'supported',
+    triggers: [
+      { trigger: 'product_name', match: 'Acme Relay' },
+      { trigger: 'number', match: 'five' },
+    ],
+    supporting: [
+      { id: 'b2', text: 'Relay can retry a failed delivery up to five times.', context: 'Acme Relay' },
+    ],
+    ...overrides,
+  });
+}
+
+/** A written draft (issue #12): free text, no segments, a check per sentence. */
+export function makeWrittenDraft(overrides: Partial<Draft> = {}): Draft {
+  const checks = [
+    makeSentenceCheck(),
+    makeSupportedClaim(),
+    makeSentenceCheck({ sentence: 'What does your queue do today?' }),
+  ];
+  return makeDraft({
+    mode: 'written',
+    text: checks.map((c) => c.sentence).join(' '),
+    segments: [],
+    sentence_checks: checks,
+    written: {
+      product_name: 'Acme Relay',
+      product_aliases: ['Relay'],
+      feature_terms: ['Signed deliveries'],
+      checker_called: true,
+      checker_model: 'fake-checker',
+    },
+    claim_gate: {
+      passed: true,
+      segments: [],
+      failed_sentences: [],
+      reasoning: '3 sentence(s) checked: 1 product claim(s) supported by cited brief sentences, 2 not about the product',
+      draft_text: '',
+      claims: [],
+      failed_claims: [],
+    },
+    ...overrides,
+  });
 }
 
 export function makeReplyFit(overrides: Partial<ReplyFit> = {}): ReplyFit {

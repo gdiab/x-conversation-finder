@@ -314,6 +314,23 @@ def sentence_has_unclear_boundary(sentences: List[str], index: int) -> bool:
     return False
 
 
+def merge_at_unclear_boundaries(sentences: List[str]) -> List[str]:
+    """Join consecutive sentences of one split whose boundary is unclear.
+
+    The result breaks only where a sentence certainly ends. Used where a
+    sentence is evidence rather than a quote (the brief sentences of written
+    drafts, issue #12): a merged pair only gives the reader more context, but
+    a fragment could drop a qualifier. Does not change split_into_sentences.
+    """
+    merged: List[str] = []
+    for sentence in sentences:
+        if merged and _boundary_after(merged[-1], sentence) in UNCLEAR:
+            merged[-1] = f"{merged[-1]} {sentence}"
+        else:
+            merged.append(sentence)
+    return merged
+
+
 def ends_with_abbreviation(sentence: str) -> bool:
     """True if the sentence's last word is an abbreviation or initial (not a number).
 

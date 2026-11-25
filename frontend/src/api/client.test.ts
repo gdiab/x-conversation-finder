@@ -9,6 +9,7 @@ import {
   PostRemovedError,
   ReviewApiError,
   skipReview,
+  startWatch,
 } from './client';
 
 // src/test/setup.ts replaces global fetch with a stub that throws; each test
@@ -160,5 +161,48 @@ describe('generateRequestId', () => {
     const second = generateRequestId();
     expect(first).toMatch(/^req_\d+_[a-z0-9]+$/);
     expect(second).not.toBe(first);
+  });
+});
+
+describe('startWatch (issue #12: product name and aliases)', () => {
+  const REQUEST = {
+    account: 'synthetic_founder',
+    topic: 'webhooks',
+    query: 'webhook retries',
+    product_brief: 'Acme Relay delivers webhooks.',
+    product_name: 'Acme Relay',
+    product_aliases: ['Relay'],
+  };
+
+  it('posts the product name and the aliases with the watch', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('{"workflow_id":"watch:synthetic_founder:webhooks","message":"Started"}', { status: 200 }),
+    );
+
+    const result = await startWatch(REQUEST);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/watch/start');
+    expect(JSON.parse(init?.body as string)).toEqual(REQUEST);
+    expect(result.message).toBe('Started');
+  });
+
+  it('reports the API detail when the request is refused', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('{"code":"invalid_request","detail":"Invalid request body"}', {
+        status: 422,
+        statusText: 'Unprocessable Entity',
+      }),
+    );
+
+    await expect(startWatch({ ...REQUEST, product_name: '' })).rejects.toThrow(
+      'Failed to start watch: Invalid request body',
+    );
+  });
+
+  it('falls back to the status text when the error body is not JSON', async () => {
+    fetchMock.mockResolvedValue(new Response('<html>', { status: 502, statusText: 'Bad Gateway' }));
+
+    await expect(startWatch(REQUEST)).rejects.toThrow('Failed to start watch: Bad Gateway');
   });
 });

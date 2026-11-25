@@ -7,6 +7,7 @@ import type { ReviewCard as ReviewCardType } from '../api/client';
 import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId, PostRemovedError, ReviewApiError } from '../api/client';
 import { ReplyFitPanel } from './ReplyFitPanel';
 import { ReplyPlanPanel } from './ReplyPlanPanel';
+import { SentenceCheckList } from './SentenceCheckList';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -55,6 +56,10 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   };
   const draftText = card.evidence.draft?.text;
   useEffect(closePostAnyway, [draftText, card.edited_text_gate_state]);
+  // issue #12: a written draft is the model's free text, checked per sentence
+  // against the brief. An assembled draft is shown by its segments.
+  const written = card.evidence.draft?.mode === 'written';
+  const edited = card.edited_text_gate_state != null;
   // The draft as currently shown, so a rejection that arrives after the card
   // changed is not taken as a rejection of the new draft
   const shownDraft = `${draftText ?? ''}\u0000${card.edited_text_gate_state ?? ''}`;
@@ -316,9 +321,11 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         {card.evidence.founder_materials.length > 0 && (
           <div style={{ marginBottom: '12px' }}>
             <strong>Supporting Material:</strong>
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px', marginBottom: '8px' }}>
-              Sentences starting with unresolved referents (it/this/that/etc.) cannot be selected as claims.
-            </div>
+            {!written && (
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px', marginBottom: '8px' }}>
+                Sentences starting with unresolved referents (it/this/that/etc.) cannot be selected as claims.
+              </div>
+            )}
             {card.evidence.founder_materials.map((material, idx) => {
               // Check if any failed sentences mention unresolved referents in this passage
               const hasUnresolvedReferents = card.evidence.draft?.claim_gate.failed_sentences.some(
@@ -360,7 +367,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
 
         {card.evidence.draft && (
           <div style={{ marginTop: '12px' }}>
-            <strong>Claim Gate:</strong>{' '}
+            <strong>{written ? 'Product claim check:' : 'Claim Gate:'}</strong>{' '}
             <span style={{ color: card.evidence.draft.claim_gate.passed ? 'green' : 'red' }}>
               {card.evidence.draft.claim_gate.passed ? 'PASSED' : 'FAILED'}
             </span>
@@ -403,7 +410,50 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       </div>
 
       {/* Reply Plan (issue #5): shown above the draft */}
-      <ReplyPlanPanel evidence={card.evidence} edited={card.edited_text_gate_state != null} />
+      <ReplyPlanPanel evidence={card.evidence} edited={edited} />
+
+      {/* issue #12: written mode was asked for, but this watch has no product name */}
+      {card.evidence.draft_mode_note && (
+        <div role="note" style={{
+          backgroundColor: '#fff8e1',
+          border: '1px solid #ffe082',
+          padding: '12px',
+          borderRadius: '4px',
+          marginBottom: '20px',
+          fontSize: '14px',
+        }}>
+          {card.evidence.draft_mode_note}
+        </div>
+      )}
+
+      {/* Written draft (issue #12): the check of each sentence replaces the segment display */}
+      {written && card.evidence.draft && (
+        <div style={{ marginBottom: '20px' }}>
+          <h4>Product Claim Check</h4>
+          <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
+            The reply was written by the model. A sentence is checked as a product claim when it names
+            the product
+            {card.evidence.draft.written?.product_name && <> ("{card.evidence.draft.written.product_name}"
+              {(card.evidence.draft.written.product_aliases ?? []).map((alias) => `, "${alias}"`)})</>}
+            , uses we/our/us/ours, contains a number, makes a comparison or uses a feature term from
+            your brief, or when a separate checker reads it as about the product. A product claim must
+            be supported by sentences of your brief.
+          </div>
+          <div style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
+            Feature terms read from your brief:{' '}
+            {(card.evidence.draft.written?.feature_terms ?? []).length > 0
+              ? card.evidence.draft.written?.feature_terms.join(', ')
+              : 'none (the brief has no list under a "features" heading)'}
+          </div>
+          {edited ? (
+            <div style={{ fontSize: '14px', color: '#666' }}>
+              The draft was edited after this check. The check of the edited text is shown below the draft.
+            </div>
+          ) : (
+            <SentenceCheckList checks={card.evidence.draft.sentence_checks ?? []} />
+          )}
+        </div>
+      )}
 
       {/* Segments with Tags */}
       {card.evidence.draft && card.evidence.draft.segments.length > 0 && (
@@ -625,7 +675,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       {/* Edited Text Gate Results (ADR-0006 Amendment E + QA R11 B2/C) */}
       {card.edited_text_gate_results && card.edited_text_gate_results.length > 0 && (
         <div style={{ marginBottom: '20px', borderTop: '1px solid #eee', paddingTop: '20px' }}>
-          <h4>Edited Text Gate Results</h4>
+          <h4>{written ? 'Check of the Edited Text' : 'Edited Text Gate Results'}</h4>
           
           {/* Gate State Badge */}
           {card.edited_text_gate_state && (
@@ -660,9 +710,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           )}
           
           <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
-            Each sentence from the edited text is re-verified against the strict claim gate.
+            {written
+              ? 'Each sentence of the edited text went through the same product-claim check as the draft.'
+              : 'Each sentence from the edited text is re-verified against the strict claim gate.'}
           </div>
-          {card.edited_text_gate_results.map((result, idx) => {
+          {written && <SentenceCheckList checks={card.edited_text_gate_results} />}
+          {!written && card.edited_text_gate_results.map((result, idx) => {
             const isPassed = result.passed;
             const isKept = result.kept_segment;
             

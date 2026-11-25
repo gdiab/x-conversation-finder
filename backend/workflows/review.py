@@ -70,7 +70,9 @@ with workflow.unsafe.imports_passed_through():
         ClaimGateResult,
         ReplyPlan,
         SentenceGateResult,
+        WrittenCheckResult,
     )
+    from backend.models.written import DRAFT_MODE_WRITTEN
     from backend.activities import (
         ResearchPostInput,
         DraftReplyInput,
@@ -80,6 +82,7 @@ with workflow.unsafe.imports_passed_through():
         UpdateCardInput,
         LookupPostInput,
         CheckFollowupInput,
+        CheckWrittenDraftInput,
     )
     from backend.activities.claim_gate_activity import (
         ClaimGateInput,
@@ -92,10 +95,8 @@ with workflow.unsafe.imports_passed_through():
         update_card,
         delete_post_text,
         DeletePostTextInput,
-        POST_TEXT_REMOVED,
         POST_REMOVED_SKIP_REASON,
-        redact_post_text_copies,
-        redact_skip_reason,
+        redact_removed_card,
     )
     from backend.config.confidence import CONFIDENCE_THRESHOLD
 
@@ -137,6 +138,11 @@ class ReviewInput:
     account: str
     confidence_threshold: float = CONFIDENCE_THRESHOLD  # dated in backend/config/confidence.py
     config: ReviewConfig = None
+    # issue #12: the watch's "Product name" and "Also called" fields, for the
+    # written-draft name trigger. Empty on Reviews started by a watch that
+    # predates the fields: they stay in assembled mode.
+    product_name: str = ""
+    product_aliases: Optional[List[str]] = None
     
     def __post_init__(self):
         """Default config if not provided."""
@@ -153,9 +159,11 @@ class ReviewWorkflow:
     
     Steps:
     1. Research the post
-    1b. Plan the reply (issue #5): reply type, target point, product mention
+    1b. Plan the reply (issue #5): reply type, target point, product mention.
+        The plan step also fixes the draft mode (issue #12)
     2. Draft a reply (steered by the plan)
-    3. Run claim gate
+    3. Run claim gate (assembled mode), or the product-claim check of the
+       written text (written mode; ADR-0006 amendment 2026-11-24)
     4. Wait for human (approve/skip/edit/nudge)
     5. If approved, wait for confirm_posted with reply URL
     6. Start follow-up timer (3 days)
@@ -311,6 +319,7 @@ class ReviewWorkflow:
                     evidence=evidence,
                     idempotency_key=f"{input.post.id}:plan:attempt{attempts}",
                     feedback=feedback,
+                    product_name=input.product_name,
                 ),
                 start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
                 retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
@@ -324,6 +333,12 @@ class ReviewWorkflow:
         evidence.reply_plan = result.plan
         evidence.reply_plan_errors = list(result.errors)
         evidence.reply_plan_attempts = attempts
+        # issue #12: the draft mode comes from the plan_reply result, so it is
+        # read from history on replay. A result recorded before the setting
+        # existed has none, and that Review stays assembled: no patch marker
+        # is needed, because every command below depends only on this value.
+        evidence.draft_mode = result.draft_mode
+        evidence.draft_mode_note = result.draft_mode_note
         
         if not result.errors and not result.skip_reason:
             workflow.logger.info(
@@ -357,6 +372,70 @@ class ReviewWorkflow:
         self._card_stored = True
         return None
 
+    def _draft_reply_input(
+        self, evidence: Evidence, steer: Optional[str], key: str, plan: Optional[ReplyPlan]
+    ) -> DraftReplyInput:
+        """Input for draft_reply. A written-mode Review (issue #12) also sends
+        the post, the brief and the product name; any other Review sends what
+        it sent before the mode existed."""
+        if evidence.draft_mode != DRAFT_MODE_WRITTEN:
+            return DraftReplyInput(evidence=evidence, steer=steer, idempotency_key=key, plan=plan)
+        input = self.input
+        return DraftReplyInput(
+            evidence=evidence,
+            steer=steer,
+            idempotency_key=key,
+            plan=plan,
+            draft_mode=DRAFT_MODE_WRITTEN,
+            post=input.post,
+            product_brief=input.product_brief,
+            product_name=input.product_name,
+            product_aliases=input.product_aliases,
+        )
+
+    async def _check_written_text(
+        self, text: str, key: str, mention_product: Optional[bool], hints: Optional[list]
+    ) -> WrittenCheckResult:
+        """Run the product-claim check of a written text (issue #12).
+
+        The activity gets the text, the brief and the product name. It is not
+        given the post or the plan, only the plan's product decision
+        (None for a founder edit).
+        """
+        input = self.input
+        return await workflow.execute_activity(
+            "check_written_draft",
+            CheckWrittenDraftInput(
+                text=text,
+                product_brief=input.product_brief,
+                product_name=input.product_name,
+                idempotency_key=key,
+                product_aliases=input.product_aliases,
+                mention_product=mention_product,
+                hints=hints,
+            ),
+            start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
+            retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
+            result_type=WrittenCheckResult,
+        )
+
+    @staticmethod
+    def _record_written_check(draft, result: WrittenCheckResult) -> None:
+        """Put a written draft's check result on the draft (issue #12).
+
+        claim_gate mirrors the outcome, so everything that reads a draft's
+        gate verdict (the card, the skip path) works for both modes.
+        """
+        draft.sentence_checks = list(result.sentences)
+        draft.written = result.info
+        draft.plan_conformance_failures = list(result.plan_failures)
+        draft.claim_gate = ClaimGateResult(
+            passed=result.passed,
+            segments=[],
+            failed_sentences=[(sentence, reason) for sentence, reason in result.failures],
+            reasoning=result.reasoning,
+        )
+
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
         """
         Draft reply with claim gate validation retries. Returns None if validation fails.
@@ -387,16 +466,42 @@ class ReviewWorkflow:
             # Draft reply
             evidence = await workflow.execute_activity(
                 "draft_reply",
-                DraftReplyInput(
-                    evidence=evidence,
-                    steer=steer,
-                    idempotency_key=f"{input.post.id}:draft:attempt{claim_gate_attempts}",
-                    plan=evidence.reply_plan,
+                self._draft_reply_input(
+                    evidence,
+                    steer,
+                    f"{input.post.id}:draft:attempt{claim_gate_attempts}",
+                    evidence.reply_plan,
                 ),
                 start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
                 retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
                 result_type=Evidence,
             )
+            
+            # issue #12: a written draft is checked by check_written_draft
+            # instead of the claim gate (ADR-0006 amendment 2026-11-24, steps
+            # 2-4). Failure handling is the same: a failed attempt is
+            # redrafted once with the reasons as the steer, then skipped.
+            if evidence.draft_mode == DRAFT_MODE_WRITTEN:
+                if not evidence.draft:
+                    last_failures = [("[reply]", "the draft is missing")]
+                    continue
+                check = await self._check_written_text(
+                    evidence.draft.text,
+                    f"{input.post.id}:check:attempt{claim_gate_attempts}",
+                    evidence.reply_plan.mention_product if evidence.reply_plan else None,
+                    evidence.draft.written.drafter_hints if evidence.draft.written else None,
+                )
+                self._record_written_check(evidence.draft, check)
+                last_failures = [("[reply plan]", r) for r in check.plan_failures] + [
+                    (sentence, reason) for sentence, reason in check.failures
+                ]
+                if check.passed:
+                    workflow.logger.info(f"Written draft passed its check on attempt {claim_gate_attempts}")
+                    return evidence
+                workflow.logger.warning(
+                    f"Written draft failed its check on attempt {claim_gate_attempts}: {check.reasoning}"
+                )
+                continue
             
             # issue #5: does the draft follow the reply plan? The verdict comes
             # from the draft_reply activity result (draft.plan_conformance_failures,
@@ -1104,23 +1209,33 @@ class ReviewWorkflow:
             gate_state = "not_checked"  # Default if activity fails
             
             try:
-                gate_results = await workflow.execute_activity(
-                    verify_edited_text,
-                    EditedTextGateInput(
-                        edited_text=new_text,
-                        gated_segments=self.evidence.draft.segments,
-                        founder_materials=self.evidence.founder_materials,
-                        idempotency_key=f"{workflow_id}:edit_gate:{client_request_id}",
-                    ),
-                    start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_medium_sec),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=self.input.config.activity_max_attempts,
-                    ),
-                    result_type=List[SentenceGateResult],
-                )
-                
-                # Activity succeeded - determine state from results
-                has_failures = any(not r.passed for r in gate_results)
+                if self.evidence.draft_mode == DRAFT_MODE_WRITTEN:
+                    # issue #12: an edit of a written draft runs through the
+                    # same check as the draft (amendment item 5). It is not
+                    # held to the reply plan: the founder decides that.
+                    check = await self._check_written_text(
+                        new_text, f"{workflow_id}:edit_check:{client_request_id}", None, None
+                    )
+                    gate_results = list(check.sentences)
+                    has_failures = not check.passed or any(not r.passed for r in gate_results)
+                else:
+                    gate_results = await workflow.execute_activity(
+                        verify_edited_text,
+                        EditedTextGateInput(
+                            edited_text=new_text,
+                            gated_segments=self.evidence.draft.segments,
+                            founder_materials=self.evidence.founder_materials,
+                            idempotency_key=f"{workflow_id}:edit_gate:{client_request_id}",
+                        ),
+                        start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_medium_sec),
+                        retry_policy=RetryPolicy(
+                            maximum_attempts=self.input.config.activity_max_attempts,
+                        ),
+                        result_type=List[SentenceGateResult],
+                    )
+                    
+                    # Activity succeeded - determine state from results
+                    has_failures = any(not r.passed for r in gate_results)
                 gate_state = "failed" if has_failures else "passed"
                 
                 passed_count = sum(1 for r in gate_results if r.passed)
@@ -1266,11 +1381,11 @@ class ReviewWorkflow:
         """
         redrafted = await workflow.execute_activity(
             "draft_reply",
-            DraftReplyInput(
-                evidence=self.evidence,
-                steer=instruction,
-                idempotency_key=f"{self.evidence.post_id}:nudge:{client_request_id}",
-                plan=plan,
+            self._draft_reply_input(
+                self.evidence,
+                instruction,
+                f"{self.evidence.post_id}:nudge:{client_request_id}",
+                plan,
             ),
             start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
@@ -1306,6 +1421,26 @@ class ReviewWorkflow:
         with the reasons and the current draft stays unchanged.
         """
         draft = redrafted.draft
+        if redrafted.draft_mode == DRAFT_MODE_WRITTEN:
+            # issue #12: the nudged text goes through the written check
+            failures: List[str] = ["the draft is missing"]
+            if draft:
+                check = await self._check_written_text(
+                    draft.text,
+                    f"{redrafted.post_id}:nudge_check:{client_request_id}",
+                    redrafted.reply_plan.mention_product if redrafted.reply_plan else None,
+                    draft.written.drafter_hints if draft.written else None,
+                )
+                self._record_written_check(draft, check)
+                failures = list(check.plan_failures) + [
+                    f"{sentence[:50]}: {reason}" for sentence, reason in check.failures
+                ]
+            if failures:
+                raise ApplicationError(
+                    "Nudged draft rejected; the current draft is unchanged: " + "; ".join(failures[:3]),
+                    non_retryable=True,
+                )
+            return
         failures: List[str] = list(draft.plan_conformance_failures) if draft else ["the draft is missing"]
         if draft and draft.segments:
             gate_result = await workflow.execute_activity(
@@ -1396,9 +1531,7 @@ class ReviewWorkflow:
         card_dict = card.to_dict()
         if self._post_text_removed:
             # issue #5: match the stored card after delete_post_text (X removal
-            # duty): the post text and every evidence copy of it are gone
-            card_dict["post"]["text"] = POST_TEXT_REMOVED
-            card_dict["post"]["text_removed"] = True  # issue #9, as on the stored card
-            card_dict["evidence"] = redact_post_text_copies(card_dict["evidence"])
-            card_dict["skip_reason"] = redact_skip_reason(card_dict.get("skip_reason"))
+            # duty): the post text and every copy of it on the card are gone
+            # (issue #9 marks the post; issue #12 adds a written draft's text)
+            card_dict = redact_removed_card(card_dict)
         return card_dict

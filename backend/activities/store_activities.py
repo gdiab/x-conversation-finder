@@ -9,6 +9,12 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from backend.models import ReviewCard, Evidence
 from backend.models.reply_plan import reply_plan_card_fields
+from backend.models.written import (
+    DRAFT_MODE_WRITTEN,
+    draft_mode_card_fields,
+    sentence_check_card_fields,
+    written_draft_card_fields,
+)
 
 # Placeholder for post text removed under X's removal duty (ADR-0006); the
 # Review workflow's get_card query uses the same value.
@@ -97,6 +103,75 @@ def _index_matches_text(segment: Dict[str, Any], passages: Dict[str, str]) -> bo
     return sentences[index].strip().rstrip(".!?") == text.strip().rstrip(".!?")
 
 
+# Issue #12: the values code writes into a sentence check. On a removal,
+# anything else found in these fields is replaced.
+_KNOWN_TRIGGERS = ("product_name", "first_person_plural", "number", "comparison", "feature_term")
+_KNOWN_VERDICTS = ("supported", "unsupported", "not_a_product_claim", "not_checked")
+
+
+def redact_sentence_check(check: Any) -> Any:
+    """A written-mode sentence check without the text a model wrote (issue #12).
+
+    The sentence is the drafting model's free text (or a founder edit of it)
+    and can quote the post; the reason is the checker's or code's comment on
+    that sentence and can echo it; a trigger's match is a piece of the
+    sentence. Kept: the verdict, which triggers fired, and the supporting
+    brief sentences, which are the founder's own text looked up by code.
+    """
+    from backend.gate.non_claim_set import UNKNOWN_IDENTIFIER
+
+    if not isinstance(check, dict):
+        return check
+    redacted = dict(check)
+    if redacted.get("sentence"):
+        redacted["sentence"] = POST_TEXT_REMOVED
+    if redacted.get("reason"):
+        redacted["reason"] = GATE_DETAILS_REMOVED
+    if redacted.get("kind") not in (None, "claim", "non_claim"):
+        redacted["kind"] = UNKNOWN_IDENTIFIER
+    if redacted.get("verdict") not in (None, *_KNOWN_VERDICTS):
+        redacted["verdict"] = UNKNOWN_IDENTIFIER
+    if isinstance(redacted.get("triggers"), list):
+        redacted["triggers"] = [
+            {
+                "trigger": t.get("trigger") if t.get("trigger") in _KNOWN_TRIGGERS else UNKNOWN_IDENTIFIER,
+                "match": "",
+            }
+            for t in redacted["triggers"]
+            if isinstance(t, dict)
+        ]
+    return redacted
+
+
+def is_written_evidence(evidence_data: Any) -> bool:
+    """Whether a card's evidence dict belongs to a written-mode Review (issue #12)."""
+    if not isinstance(evidence_data, dict):
+        return False
+    draft = evidence_data.get("draft")
+    return evidence_data.get("draft_mode") == DRAFT_MODE_WRITTEN or (
+        isinstance(draft, dict) and draft.get("mode") == DRAFT_MODE_WRITTEN
+    )
+
+
+def redact_edit_results(results: Any, evidence_data: Any) -> Any:
+    """A card's edited-text check results after a removal (issue #12).
+
+    In written mode an edit starts from text a model wrote after reading the
+    post, so its sentences are redacted like the draft's. In assembled mode
+    the edited sentences are the founder's own words and stay, as before.
+    """
+    if not is_written_evidence(evidence_data) or not isinstance(results, list):
+        return results
+    return [redact_sentence_check(r) for r in results]
+
+
+def redact_failing_sentences(sentences: Any, evidence_data: Any) -> Any:
+    """A card's post_anyway failing sentences after a removal; see redact_edit_results."""
+    if not is_written_evidence(evidence_data) or not isinstance(sentences, list):
+        return sentences
+    return [POST_TEXT_REMOVED for _ in sentences]
+
+
 def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
     """A stored draft without model-derived gate details (issue #9).
 
@@ -105,6 +180,11 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
     removed, and the claim-gate details are dropped as a whole (older cards
     can hold echoed model values in any of them). Founder nudges and edits
     are the founder's own text and stay.
+
+    A written draft (issue #12) is different: the model wrote its text after
+    reading the post, so the text goes, with each sentence check's sentence
+    and reason and the drafter's hints. A founder edit of a written draft
+    goes too: it starts from the model's text.
     """
     passages = {
         m.get("passage_id"): m.get("passage") or ""
@@ -132,6 +212,13 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
             "claims": [],
             "failed_claims": [],
         }
+    if redacted.get("mode") == DRAFT_MODE_WRITTEN:
+        if redacted.get("text"):
+            redacted["text"] = POST_TEXT_REMOVED
+        if isinstance(redacted.get("sentence_checks"), list):
+            redacted["sentence_checks"] = [redact_sentence_check(c) for c in redacted["sentence_checks"]]
+        if isinstance(redacted.get("written"), dict):
+            redacted["written"] = {**redacted["written"], "drafter_hints": []}
     return redacted
 
 
@@ -149,7 +236,10 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
     - issue #5: reply_plan.target_point, reply_plan.mention_product_reason,
       and reply_plan.reply_type when it is not one of the known values;
     - issue #9: the draft's model-derived gate details (_redact_draft) and a
-      gate-failure skip reason (redact_skip_reason).
+      gate-failure skip reason (redact_skip_reason);
+    - issue #12: a written draft's text, its sentence checks' sentences and
+      reasons, and the drafter's hints (_redact_draft). The card's edited-text
+      results live outside the evidence: redact_removed_card covers them.
     Pure and deterministic (the workflow calls it from a query).
     """
     from backend.models.reply_plan import REPLY_TYPES
@@ -196,6 +286,31 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
     if evidence_data.get("skip_reason"):
         evidence_data["skip_reason"] = redact_skip_reason(evidence_data["skip_reason"])
     return evidence_data
+
+
+def redact_removed_card(card: Dict[str, Any]) -> Dict[str, Any]:
+    """A card dict (the get_card query's, or a stored card's) after a removal.
+
+    The one place that lists every card field a removal touches: the post
+    text, the evidence copies (redact_post_text_copies), the skip reason and,
+    in written mode (issue #12), the edited-text results and the post_anyway
+    failing sentences. Pure and deterministic (the workflow calls it from a
+    query).
+    """
+    evidence = card.get("evidence")
+    redacted = {
+        **card,
+        "post": {**(card.get("post") or {}), "text": POST_TEXT_REMOVED, "text_removed": True},
+        "evidence": redact_post_text_copies(evidence),
+        "skip_reason": redact_skip_reason(card.get("skip_reason")),
+    }
+    for key, redact in (
+        ("edited_text_gate_results", redact_edit_results),
+        ("post_anyway_failing_sentences", redact_failing_sentences),
+    ):
+        if key in card:
+            redacted[key] = redact(card[key], evidence)
+    return redacted
 from backend.database import get_db, ReviewCardDB
 
 
@@ -360,11 +475,13 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
                 "input_tokens": card.evidence.draft.input_tokens,
                 "output_tokens": card.evidence.draft.output_tokens,
                 "plan_conformance_failures": list(card.evidence.draft.plan_conformance_failures),  # issue #5
+                **written_draft_card_fields(card.evidence.draft),  # issue #12
             } if card.evidence.draft else None,
             "skip_reason": card.evidence.skip_reason,
             # Issue #4: should-we-reply features and checks
             "reply_fit": asdict(card.evidence.reply_fit) if card.evidence.reply_fit else None,
             **reply_plan_card_fields(card.evidence),  # issue #5
+            **draft_mode_card_fields(card.evidence),  # issue #12
         },
         status=status_str,
         created_at=card.created_at,
@@ -376,16 +493,7 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
         followup_replies=card.followup_replies if card.followup_replies else None,
         # Edit re-gate fields (ADR-0006 Amendment E)
         edited_text_gate_results=[
-            {
-                "sentence": r.sentence,
-                "passed": r.passed,
-                "kind": r.kind,
-                "reason": r.reason,
-                "kept_segment": r.kept_segment,
-                "source_passage_id": r.source_passage_id,
-                "sentence_index": r.sentence_index,
-            }
-            for r in card.edited_text_gate_results
+            sentence_check_card_fields(r) for r in card.edited_text_gate_results
         ] if card.edited_text_gate_results else None,
         post_anyway=card.post_anyway,
         post_anyway_failing_sentences=card.post_anyway_failing_sentences,
@@ -577,14 +685,13 @@ def _update_card_sync(input: UpdateCardInput) -> bool:
                     "input_tokens": value.draft.input_tokens,
                     "output_tokens": value.draft.output_tokens,
                     "plan_conformance_failures": list(value.draft.plan_conformance_failures),  # issue #5
+                    **written_draft_card_fields(value.draft),  # issue #12
                 }
             card_db.evidence_data = evidence_data
             flag_modified(card_db, "evidence_data")
         
         if (card_db.post_data or {}).get("text_removed"):
-            card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
-            flag_modified(card_db, "evidence_data")
-            card_db.skip_reason = redact_skip_reason(card_db.skip_reason)
+            _redact_removed_card_db(card_db)
         
         db.commit()
         return True
@@ -664,8 +771,28 @@ async def get_card(input: GetCardInput) -> Optional[Dict]:
     return result
 
 
+def _redact_removed_card_db(card_db: ReviewCardDB) -> None:
+    """Redact every copy of the post text on a stored card but the post's own
+    (redact_removed_card lists the fields). Used when the removal is recorded
+    and on every later write to the card."""
+    redacted = redact_removed_card({
+        "post": card_db.post_data,
+        "evidence": card_db.evidence_data,
+        "skip_reason": card_db.skip_reason,
+        "edited_text_gate_results": card_db.edited_text_gate_results,
+        "post_anyway_failing_sentences": card_db.post_anyway_failing_sentences,
+    })
+    card_db.evidence_data = redacted["evidence"]
+    flag_modified(card_db, "evidence_data")
+    card_db.skip_reason = redacted["skip_reason"]
+    for key in ("edited_text_gate_results", "post_anyway_failing_sentences"):
+        if redacted[key] != getattr(card_db, key):
+            setattr(card_db, key, redacted[key])
+            flag_modified(card_db, key)
+
+
 def _remove_card_post_text(card_db: ReviewCardDB) -> None:
-    """Replace a stored card's post text and every evidence copy of it."""
+    """Replace a stored card's post text and every copy of it on the card."""
     post_data = dict(card_db.post_data)
     post_data["text"] = POST_TEXT_REMOVED
     # issue #9: record the removal on the card (the UI shows "Post removed")
@@ -673,9 +800,7 @@ def _remove_card_post_text(card_db: ReviewCardDB) -> None:
     card_db.post_data = post_data
     flag_modified(card_db, "post_data")
 
-    card_db.evidence_data = redact_post_text_copies(card_db.evidence_data)
-    flag_modified(card_db, "evidence_data")
-    card_db.skip_reason = redact_skip_reason(card_db.skip_reason)
+    _redact_removed_card_db(card_db)
 
 
 def _delete_post_text_sync(input: DeletePostTextInput) -> bool:
@@ -724,12 +849,7 @@ def apply_stored_removal(workflow_id: str, card: Optional[Dict[str, Any]]) -> Op
     stored = _get_card_sync(GetCardInput(workflow_id=workflow_id))
     if not stored or not stored["post"].get("text_removed"):
         return card
-    return {
-        **card,
-        "post": {**card["post"], "text": POST_TEXT_REMOVED, "text_removed": True},
-        "evidence": redact_post_text_copies(card.get("evidence")),
-        "skip_reason": redact_skip_reason(card.get("skip_reason")),
-    }
+    return redact_removed_card(card)
 
 
 @activity.defn(name="delete_post_text")

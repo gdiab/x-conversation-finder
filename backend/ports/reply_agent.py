@@ -12,9 +12,28 @@ stays counted. The activities open the meter.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import List, Optional
 
-from backend.models import Evidence, Post, ReplyPlan
+from backend.models import BriefSentence, Evidence, Post, ReplyPlan
+
+
+@dataclass
+class WrittenDraftRequest:
+    """What the written drafter works from (issue #12).
+
+    Unlike the claim checker (ClaimCheckerPort), the drafter sees the post and
+    the reply plan: its job is to respond to the post's specific point.
+    """
+
+    post: Post
+    evidence: Evidence
+    plan: ReplyPlan
+    brief_sentences: List[BriefSentence]
+    product_name: str
+    product_aliases: List[str] = field(default_factory=list)
+    feature_terms: List[str] = field(default_factory=list)
+    steer: Optional[str] = None
 
 
 class ReplyAgentPort(ABC):
@@ -86,5 +105,30 @@ class ReplyAgentPort(ABC):
         redrafted once, then skipped.
         
         Returns updated evidence.
+        """
+        pass
+    
+    @abstractmethod
+    async def draft_written(
+        self,
+        request: WrittenDraftRequest,
+        idempotency_key: Optional[str] = None,
+    ) -> Evidence:
+        """
+        Write a reply as free text (issue #12; ADR-0006 amendment 2026-11-24).
+        
+        Sets request.evidence.draft to a Draft with mode "written": `text` is
+        the model's reply (at most 3 sentences and 280 characters, at most one
+        product claim), `segments` is empty, and `written.drafter_hints` lists,
+        for each sentence the model says is about the product, the brief
+        sentence ids it says support it. The hints go to the claim checker as
+        suggestions; they are never a verdict. Nothing the drafter returns
+        decides what is checked: the check_written_draft activity splits the
+        text, runs the triggers and asks the independent checker.
+        
+        Adapters must not raise on malformed model output: return what was
+        parsed (an empty text fails the check and is redrafted).
+        
+        Returns the updated evidence.
         """
         pass

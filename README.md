@@ -73,6 +73,7 @@ Per ADR-0006:
 - Confidence is **computed from evidence shape**, never asserted by the model
 - Every product claim must be supported by founder material (claim gate)
 - "Not enough evidence" is a valid skip reason
+- Two draft modes behind `DRAFT_MODE` (2026-11-24 amendment): `assembled` (default; fixed phrases plus one verbatim brief sentence) and `written` (the model writes the reply, and its product claims are checked against the brief by code and an independent checker call). See `docs/DEVELOPMENT.md`, "Draft modes"
 
 ### The Founder Posts by Hand (ADR-0004)
 
