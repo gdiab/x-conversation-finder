@@ -101,6 +101,43 @@ with workflow.unsafe.imports_passed_through():
     from backend.config.confidence import CONFIDENCE_THRESHOLD
 
 
+def redraft_steer(last_failures) -> Optional[str]:
+    """The steer of a redraft after a failed attempt: the first 3 failures,
+    each sentence cut to 50 characters. None when there are no failures.
+
+    The steer is an activity input recorded in workflow history, so its
+    wording must not change. The offline redraft harness (issue #29,
+    backend/eval/written_harness.py) builds the same steer with this function.
+    """
+    if not last_failures:
+        return None
+    reasons = []
+    for sentence, reason in last_failures[:3]:  # Limit to first 3 for brevity
+        reasons.append(f"'{sentence[:50]}...': {reason}")
+    return f"Previous draft failed claim gate. Fix these issues: {'; '.join(reasons)}"
+
+
+def record_written_check(draft, result: WrittenCheckResult) -> None:
+    """Put a written draft's check result on the draft (issue #12).
+
+    claim_gate mirrors the outcome, so everything that reads a draft's
+    gate verdict (the card, the skip path) works for both modes. The offline
+    redraft harness (issue #29) records its checks with this function too.
+    """
+    # The drafter's own hints stay on the draft as provenance; the check
+    # never saw them. replace(): the result is kept for reuse, unchanged.
+    hints = list(draft.written.drafter_hints) if draft.written else []
+    draft.sentence_checks = list(result.sentences)
+    draft.written = replace(result.info, drafter_hints=hints)
+    draft.plan_conformance_failures = list(result.plan_failures)
+    draft.claim_gate = ClaimGateResult(
+        passed=result.passed,
+        segments=[],
+        failed_sentences=[(sentence, reason) for sentence, reason in result.failures],
+        reasoning=result.reasoning,
+    )
+
+
 @dataclass(frozen=True)
 class ReviewConfig:
     """Workflow config passed through input for determinism."""
@@ -451,23 +488,9 @@ class ReviewWorkflow:
 
     @staticmethod
     def _record_written_check(draft, result: WrittenCheckResult) -> None:
-        """Put a written draft's check result on the draft (issue #12).
-
-        claim_gate mirrors the outcome, so everything that reads a draft's
-        gate verdict (the card, the skip path) works for both modes.
-        """
-        # The drafter's own hints stay on the draft as provenance; the check
-        # never saw them. replace(): the result is kept for reuse, unchanged.
-        hints = list(draft.written.drafter_hints) if draft.written else []
-        draft.sentence_checks = list(result.sentences)
-        draft.written = replace(result.info, drafter_hints=hints)
-        draft.plan_conformance_failures = list(result.plan_failures)
-        draft.claim_gate = ClaimGateResult(
-            passed=result.passed,
-            segments=[],
-            failed_sentences=[(sentence, reason) for sentence, reason in result.failures],
-            reasoning=result.reasoning,
-        )
+        """Put a written draft's check result on the draft (issue #12); see
+        record_written_check."""
+        record_written_check(draft, result)
 
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
         """Draft and check the reply; None if the post is skipped.
@@ -523,12 +546,7 @@ class ReviewWorkflow:
             claim_gate_attempts += 1
             
             # Build steer from the last attempt's per-sentence failures
-            steer = None
-            if claim_gate_attempts > 1 and last_failures:
-                reasons = []
-                for sentence, reason in last_failures[:3]:  # Limit to first 3 for brevity
-                    reasons.append(f"'{sentence[:50]}...': {reason}")
-                steer = f"Previous draft failed claim gate. Fix these issues: {'; '.join(reasons)}"
+            steer = redraft_steer(last_failures) if claim_gate_attempts > 1 else None
             
             # Draft reply
             evidence = await workflow.execute_activity(

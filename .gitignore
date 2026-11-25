@@ -64,3 +64,6 @@ htmlcov/
 .temporal/
 .venv/
 backend/.venv*
+
+# Redraft harness output (real post text; issue #29)
+eval-out/
