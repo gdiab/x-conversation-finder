@@ -1555,3 +1555,48 @@ def test_a_relative_database_url_is_the_one_in_the_checkout_holding_env(tmp_path
     assert redraft_harness._app_database(relative).resolve() == app_db.resolve()
     redraft_harness._use_app_database(redraft_harness._app_database(relative))
     assert get_settings().get_resolved_database_url() == f"sqlite:///{app_db.resolve()}"
+
+
+# ---------- issue #31 review round 4 ----------
+
+
+def test_a_post_x_reported_gone_is_dropped_from_the_harness_files_even_if_its_removal_failed(
+    tmp_path, monkeypatch,
+):
+    import backend.activities.store_activities
+    import backend.target_refetch
+
+    redraft_harness = _script()
+    db = _app_db_with_cards([("review:t:3101", "3101")])
+
+    def locked(*args, **kwargs):
+        raise _DatabaseLocked()
+
+    monkeypatch.setattr(backend.target_refetch, "_delete_post_text_sync", locked)
+    monkeypatch.setattr(backend.activities.store_activities, "_delete_post_text_sync", locked)
+
+    async def fake_refetcher(args, settings, cap, db_path):
+        return harness.Refetcher(LookupX({"3101": "gone"}), "t", _not_running, cap, 0.005,
+                                 removal_attempts=1, removal_wait_seconds=0)
+
+    monkeypatch.setattr(redraft_harness, "_refetcher", fake_refetcher)
+    monkeypatch.setattr(redraft_harness, "_settings", lambda: SimpleNamespace(
+        openai_api_key="synthetic", openai_base_url=None, openai_model="m", claim_gate_max_attempts=2,
+        inference_input_token_cost_usd=1e-6, inference_output_token_cost_usd=1e-6,
+    ))
+    exported = tmp_path / "settings.json"
+    exported.write_text(json.dumps({"watches": {f"t:{TOPIC}": dataclasses.asdict(SETTINGS[f"t:{TOPIC}"])},
+                                    "review_topics": TOPICS_31}))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "plans.json").write_text(json.dumps({"review:t:3101": dataclasses.asdict(PLAN)}))
+    monkeypatch.setattr(sys, "argv", [
+        "redraft_harness.py", "run", "--db", str(db), "--settings", str(exported),
+        "--out-root", str(out), "--label", "t",
+    ])
+
+    with pytest.raises(SystemExit, match="Unfinished removals"):
+        redraft_harness.main()
+
+    assert json.loads((out / "plans.json").read_text()) == {}
+    assert not _stored_card("review:t:3101").get("text_removed")  # the database removal is what failed

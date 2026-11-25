@@ -272,8 +272,12 @@ async def run(args) -> None:
     db = Path(args.db)
     PROTECTED.append(db.resolve())
 
+    refetch = None
+
     def is_removed(post_id: str) -> bool:
-        return removal_recorded(db, post_id)
+        # A post X reported gone in this run counts even when recording its
+        # removal failed: the harness drops its own copies of it
+        return removal_recorded(db, post_id) or (refetch is not None and refetch.reported_gone(post_id))
 
     reviews, excluded = load_stored_reviews(db, raw["review_topics"])
     if args.limit:

@@ -748,6 +748,12 @@ class Refetcher:
         # earlier removal's checkpoint may still be pending)
         self.startup_checkpoint_pending = False
 
+    def reported_gone(self, post_id: str) -> bool:
+        """Did X report the post gone in this run? True also when recording
+        its removal failed: the harness must drop its own copies of the
+        post (cached plans, reports) all the same."""
+        return str(post_id) in self._x_said_gone
+
     @property
     def incomplete_removals(self) -> int:
         """Removals that did not fully complete: X asked for them in this
