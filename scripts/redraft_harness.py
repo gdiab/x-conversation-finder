@@ -65,6 +65,24 @@ def ensure_ignored(path: Path) -> None:
         )
 
 
+# Files the harness must never write over (the card database), set by run
+PROTECTED: list = []
+
+
+def safe_write(path: Path, text: str) -> None:
+    """Write an output file: git must ignore it, it must not be a symlink
+    (writing would follow it), and it must not be a protected file."""
+    path = Path(path)
+    if path.is_symlink():
+        sys.exit(f"Refusing to write {path}: it is a symlink")
+    resolved = path.resolve()
+    if any(resolved == p for p in PROTECTED):
+        sys.exit(f"Refusing to write {path}: it is the input database")
+    ensure_ignored(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
 def _settings():
     from backend.config import get_settings
 
@@ -119,8 +137,7 @@ async def export_settings(args) -> None:
         review = await start_input(handle, ReviewInput)
         review_topics[execution.id] = review.topic
     print(f"{len(review_topics)} Review topics")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    safe_write(out, json.dumps(result, indent=2, ensure_ascii=False))
     print(f"wrote {out}")
 
 
@@ -136,12 +153,11 @@ def sweep_earlier_reports(out_root: Path, is_removed) -> bool:
             report = json.loads(earlier.read_text())
             if not redact_removed_report(report, is_removed):
                 continue
-            ensure_ignored(earlier)
-            earlier.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+            safe_write(earlier, json.dumps(report, indent=2, ensure_ascii=False))
             if isinstance(report.get("summary"), dict):
-                (earlier.parent / "summary.md").write_text(summary_markdown(report["summary"]))
+                safe_write(earlier.parent / "summary.md", summary_markdown(report["summary"]))
             print(f"applied recorded removals to {earlier}")
-        except (OSError, ValueError, TypeError, AttributeError) as e:
+        except (OSError, ValueError, TypeError, AttributeError, SystemExit) as e:
             complete = False
             print(f"could not apply recorded removals to {earlier}: {type(e).__name__}; check it by hand",
                   file=sys.stderr)
@@ -156,6 +172,7 @@ async def run(args) -> None:
     from backend.eval.written_harness import (
         SpendCap,
         WatchSettings,
+        apply_removals,
         load_stored_reviews,
         prune_removed_plans,
         removal_recorded,
@@ -180,6 +197,7 @@ async def run(args) -> None:
         sys.exit("--settings is not an export-settings file (it needs \"watches\" and \"review_topics\")")
     by_key = {key: WatchSettings(**value) for key, value in raw["watches"].items()}
     db = Path(args.db)
+    PROTECTED.append(db.resolve())
 
     def is_removed(post_id: str) -> bool:
         return removal_recorded(db, post_id)
@@ -215,13 +233,14 @@ async def run(args) -> None:
         # Also when the run failed: no cached plan of a removed post is kept,
         # and earlier reports get the removals recorded since they were written
         prune_removed_plans(plans, is_removed)
-        plans_path.parent.mkdir(parents=True, exist_ok=True)
-        plans_path.write_text(json.dumps(plans, indent=2, ensure_ascii=False))
+        safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))
         swept = sweep_earlier_reports(out_root, is_removed)
+    # A removal recorded while the earlier reports were swept: apply it to
+    # this run's records too, right before they are written
+    apply_removals(records, plans, is_removed, excluded)
     summary = summarize(records, excluded, cap, stopped_by_cap=stopped)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "report.json").write_text(report_json(args.label, records, summary, sorted({c.model for c in cap.calls})))
-    (out_dir / "summary.md").write_text(summary_markdown(summary))
+    safe_write(out_dir / "report.json", report_json(args.label, records, summary, sorted({c.model for c in cap.calls})))
+    safe_write(out_dir / "summary.md", summary_markdown(summary))
     print(summary_markdown(summary))
     # The new report has the removals already; sweep again in case one was
     # recorded while it was written

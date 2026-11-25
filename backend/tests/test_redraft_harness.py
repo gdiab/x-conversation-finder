@@ -843,6 +843,7 @@ async def test_redacting_an_earlier_report_recounts_its_summary(tmp_path, no_x):
     assert report["summary"]["outcomes"] == {"passed_first": 1, "removed": 1}
     assert report["summary"]["pass_rate"] == 1.0 and report["summary"]["drafts"] == 1
     assert report["summary"]["cost_usd"] == 0.5
+    assert report["summary"]["checker_calls"] == summary["checker_calls"]  # paid calls stay counted
     assert report["summary"]["removals_applied_after_run"] is True
 
 
@@ -867,3 +868,33 @@ def test_the_sweep_goes_on_past_a_report_it_cannot_read(tmp_path, capsys):
     assert swept["posts"][0]["attempts"][0]["text"] == ""
     assert swept["summary"]["summary_stale"] is True  # too old a shape to recount
     assert "could not apply recorded removals" in capsys.readouterr().err
+
+
+
+# ---------- review round 7 ----------
+
+
+def test_the_script_never_writes_through_a_symlink_or_over_the_database(tmp_path):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "redraft_harness.py"
+    sys.path.insert(0, str(script.parent))
+    try:
+        import redraft_harness
+    finally:
+        sys.path.remove(str(script.parent))
+    db = tmp_path / "cards.db"
+    db.write_text("synthetic database")
+    link = tmp_path / "out" / "report.json"
+    link.parent.mkdir()
+    link.symlink_to(db)
+
+    with pytest.raises(SystemExit):
+        redraft_harness.safe_write(link, "{}")
+    redraft_harness.PROTECTED.append(db.resolve())
+    try:
+        with pytest.raises(SystemExit):
+            redraft_harness.safe_write(db, "{}")
+    finally:
+        redraft_harness.PROTECTED.remove(db.resolve())
+    assert db.read_text() == "synthetic database"
+    redraft_harness.safe_write(tmp_path / "out" / "summary.md", "ok")  # outside a repo: allowed
+    assert (tmp_path / "out" / "summary.md").read_text() == "ok"

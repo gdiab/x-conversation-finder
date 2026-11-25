@@ -735,6 +735,8 @@ def redact_removed_report(report: Dict[str, Any], is_removed: Callable[[str], bo
             ]
             fresh = summarize(records, Counter(old.get("excluded") or {}), None,
                               stopped_by_cap=bool(old.get("stopped_by_spend_cap")))
+            # checker_calls counts paid requests (from the spend cap): keep it
+            fresh.pop("checker_calls", None)
             report["summary"] = {**old, **fresh, "removals_applied_after_run": True}
         except Exception:
             report["summary"] = {**old, "removals_applied_after_run": True, "summary_stale": True}
