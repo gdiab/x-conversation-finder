@@ -53,6 +53,11 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   };
   const draftText = card.evidence.draft?.text;
   useEffect(closePostAnyway, [draftText, card.edited_text_gate_state]);
+  // The draft as currently shown, so a rejection that arrives after the card
+  // changed is not taken as a rejection of the new draft
+  const shownDraft = `${draftText ?? ''}\u0000${card.edited_text_gate_state ?? ''}`;
+  const shownDraftRef = useRef(shownDraft);
+  shownDraftRef.current = shownDraft;
 
   const handleApprove = async (postAnyway: boolean = false) => {
     if (!postedUrl.trim()) {
@@ -69,6 +74,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     setError(null);
     setNotice(null);
     setShowPostAnywayConfirm(false);
+    const draftAtRequest = shownDraftRef.current;
     
     try {
       await approveReview(card.workflow_id, postedUrl, approveRequestId.current, postAnyway);
@@ -90,6 +96,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       }
       // issue #15: the API says so with a code; the message text is for people
       if (err instanceof ReviewApiError && err.code === 'post_anyway_required' && !postAnyway) {
+        if (shownDraftRef.current !== draftAtRequest) {
+          // The draft changed while the request ran: the failures listed are
+          // not the shown draft's. Ask for a fresh approve instead.
+          setNotice('The draft changed while approving. Review it and approve again.');
+          return;
+        }
         setFailingSentences(err.failingSentences);
         setShowPostAnywayConfirm(true);
       }
@@ -177,6 +189,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       const wait = retryNotice(err);
       if (wait) setNotice(wait);
       else setError(err instanceof Error ? err.message : 'Failed to nudge');
+      // issue #9: another Review of the post recorded its removal; reload to
+      // show the card without the post text
+      if (err instanceof PostRemovedError) onUpdate();
     } finally {
       setLoading(false);
     }

@@ -1329,15 +1329,16 @@ class ReviewWorkflow:
 
         issue #20: until a card row is stored (the pending card, or a skip
         card), returns only {"workflow_id", "status", "in_progress": True,
-        "created_at", "skip_reason", "evidence": None}. "status" names the
+        "created_at", "evidence": None}. "status" names the
         stage ("researching", "planning", "drafting") while the Review is
         pending, else its status (a founder skip during research: the
         workflow still drafts and stores the card). Before, building the card
         from evidence that did not exist yet failed the query and the API
-        reported "Review not found". The post and evidence are left out until
-        the row exists: only then can the API apply a removal recorded by
-        another Review of the post (apply_stored_removal), and store_card
-        stores a removed post's card redacted.
+        reported "Review not found". The post, the evidence and the skip
+        reason (a gate-failure reason quotes model-written sentences) are left
+        out until the row exists: only then can the API apply a removal
+        recorded by another Review of the post (apply_stored_removal), and
+        store_card stores a removed post's card redacted.
         """
         if (
             not self.workflow_id
@@ -1350,7 +1351,6 @@ class ReviewWorkflow:
                 "status": self._stage if self.status == "pending" else self.status,
                 "in_progress": True,
                 "created_at": self.created_at,
-                "skip_reason": self.skip_reason if self.skipped else None,
                 "evidence": None,
             }
 

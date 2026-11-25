@@ -171,7 +171,6 @@ async def test_requests_during_research_are_not_ready_and_get_reports_the_stage(
                 "status": "researching",
                 "in_progress": True,
                 "created_at": got.json()["created_at"],
-                "skip_reason": None,
                 "evidence": None,
             }
 
@@ -211,8 +210,9 @@ async def test_founder_skip_during_research_shows_no_post_until_the_card_is_stor
 
             got = (await http.get(f"/api/reviews/{workflow_id}")).json()
             assert got["status"] == "skipped" and got["in_progress"] is True
-            assert got["evidence"] is None and "post" not in got
-            assert got["skip_reason"] == "Not relevant"
+            # No post, evidence or skip reason until the row exists (a
+            # gate-failure skip reason quotes model-written sentences)
+            assert got["evidence"] is None and "post" not in got and "skip_reason" not in got
 
             agent.release.set()
             assert await handle.result() == "skipped"
@@ -340,13 +340,28 @@ def test_rejection_types_map_to_status_and_code(error_type, expected):
     assert body["detail"] == "synthetic reason"
 
 
-def test_failures_that_are_not_a_decision_are_500():
-    activity_failure = ActivityError(
+def _activity_failure(cause=None):
+    error = ActivityError(
         "Activity task failed", scheduled_event_id=1, started_event_id=2, identity="",
-        activity_type="lookup_post", activity_id="1", retry_state=RetryState.MAXIMUM_ATTEMPTS_REACHED,
+        activity_type="draft_reply", activity_id="1", retry_state=RetryState.NON_RETRYABLE_FAILURE,
     )
+    error.__cause__ = cause
+    return error
+
+
+def test_a_nudge_refused_because_the_post_was_removed_is_409_post_removed():
+    """draft_reply refuses to redraft a card whose post another Review found
+    removed (issue #9); the refusal arrives wrapped in ActivityError."""
+    refusal = ApplicationError("Post removed: not redrafting", type="PostRemoved", non_retryable=True)
+    status, body = _body(api.review_error_response(WorkflowUpdateFailedError(_activity_failure(refusal)), "Nudge"))
+    assert (status, body["code"], body["detail"]) == (409, "post_removed", "Post removed: not redrafting")
+
+
+def test_failures_that_are_not_a_decision_are_500():
     for exc in [
-        WorkflowUpdateFailedError(activity_failure),
+        WorkflowUpdateFailedError(_activity_failure()),
+        # Any other activity failure, even one that is an ApplicationError
+        WorkflowUpdateFailedError(_activity_failure(ApplicationError("model unavailable", type="Busy"))),
         RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b""),
         RuntimeError("unexpected"),
     ]:

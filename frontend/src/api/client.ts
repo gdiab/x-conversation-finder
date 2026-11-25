@@ -224,7 +224,7 @@ export type ReviewErrorCode =
   | 'post_anyway_required' // edited text failed the re-gate; approve again with post_anyway
   | 'not_ready' // the card is not stored yet (issue #20); try again in a moment
   | 'busy' // another edit, nudge or approval is running; try again after it
-  | 'post_removed' // approve found the target post gone; the review is skipped
+  | 'post_removed' // the target post is gone (approve: the review is skipped); reload the card
   | 'invalid_state'
   | 'invalid_request'
   | 'rejected' // the workflow refused it (e.g. a nudged draft failed the gate)
@@ -254,11 +254,15 @@ export class ReviewApiError extends Error {
   }
 }
 
-/** Approve found the target post deleted or no longer visible on X; the review is now skipped (issue #9). */
+/**
+ * The target post is deleted or no longer visible on X (issue #9). On approve
+ * the review is now skipped; on a nudge another Review of the post recorded
+ * the removal, so the card's text is gone and it is not redrafted.
+ */
 export class PostRemovedError extends ReviewApiError {
   constructor(detail: string, status: number = 409) {
     super(
-      `Post removed: the post was deleted or is no longer visible on X, so this review was skipped. ${detail}`,
+      `Post removed: the post was deleted or is no longer visible on X. ${detail}`,
       status,
       'post_removed',
       detail,

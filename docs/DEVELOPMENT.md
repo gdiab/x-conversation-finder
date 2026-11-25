@@ -178,7 +178,7 @@ The review endpoints (`approve`, `edit`, `nudge`, `confirm_posted`, `skip`, `GET
 | `post_anyway_required` | 409 | the edited text failed the re-gate; also `gate_state` and `failing_sentences`. Approve again with `post_anyway=true` |
 | `not_ready` | 409 | the pending card is not stored yet; try again in a moment. The card row is written inside `store_card` slightly before the workflow marks the card ready, so the UI can briefly show a card this rejects |
 | `busy` | 409 | another edit, nudge or approval is running; try again after it |
-| `post_removed` | 409 | approve's re-fetch found the target post gone; the review is skipped |
+| `post_removed` | 409 | the target post is gone: approve's re-fetch found it gone and the review is skipped, or a nudge was refused because another Review of the post recorded its removal (`draft_reply` refuses, wrapped in `ActivityError`) |
 | `invalid_state` / `invalid_request` | 409 / 400 | not allowed in this status / bad input (422 with FastAPI's `errors` for a malformed body) |
 | `rejected` | 422 | an update handler refused it (a nudged draft failed the gate, a URL that is not a reply to the post) |
 | `not_found` | 404 | no such workflow, or it has ended (updates and signals) |

@@ -20,7 +20,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowUpdateFailedError
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from backend.config import get_settings
@@ -140,8 +140,18 @@ def review_error_response(exc: Exception, action: str) -> JSONResponse:
     Only failures that are not the Review's own decision (an activity that
     failed, Temporal unreachable) are 500s.
     """
-    if isinstance(exc, WorkflowUpdateFailedError) and isinstance(exc.cause, ApplicationError):
-        cause = exc.cause
+    cause = exc.cause if isinstance(exc, WorkflowUpdateFailedError) else None
+    # An activity can refuse on purpose too: draft_reply refuses to redraft
+    # (nudge) a card whose post was removed by another Review of it. That
+    # refusal arrives wrapped in ActivityError; any other activity failure
+    # stays a 500.
+    if (
+        isinstance(cause, ActivityError)
+        and isinstance(cause.cause, ApplicationError)
+        and cause.cause.type == POST_REMOVED_ERROR
+    ):
+        cause = cause.cause
+    if isinstance(cause, ApplicationError):
         status_code, code = REJECTION_CODES.get(cause.type, OTHER_REJECTION)
         extra = {}
         if code == "post_anyway_required":

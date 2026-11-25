@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReviewCard } from './ReviewCard';
@@ -354,6 +354,24 @@ describe('ReviewCard: error codes (issues #15, #20)', () => {
 
     expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
     expect(screen.queryByText('Failing: "Edited synthetic sentence."')).not.toBeInTheDocument();
+  });
+
+  it('ignores a post_anyway_required that arrives after the draft changed', async () => {
+    const user = userEvent.setup();
+    let reject: (err: unknown) => void = () => {};
+    approveMock.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    const card = makeCard({ edited_text_gate_state: 'failed' });
+    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    const edited = makeCard({ edited_text_gate_state: 'failed' });
+    edited.evidence = makeEvidence({ draft: makeDraft({ text: 'A different synthetic draft.' }) });
+    rerender(<ReviewCard card={edited} onUpdate={vi.fn()} />);
+    await act(async () => reject(postAnywayError()));
+
+    expect(screen.queryByRole('button', { name: 'Post Anyway (Override)' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('The draft changed while approving. Review it and approve again.');
   });
 
   it('closes the override prompt after a successful edit', async () => {
