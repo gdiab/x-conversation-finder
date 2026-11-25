@@ -709,12 +709,20 @@ def redact_removed_report(report: Dict[str, Any], is_removed: Callable[[str], bo
     """Apply recorded removals to a report.json written by an earlier run:
     the same fields apply_removals empties. Returns whether it changed."""
     changed = False
+    newly_removed = set()
+    already_removed = {
+        str(post.get("post_id") or post_id_of(str(post.get("workflow_id") or "")))
+        for post in report.get("posts") or []
+        if isinstance(post, dict) and post.get("outcome") == "removed"
+    }
     for post in report.get("posts") or []:
         if not isinstance(post, dict):
             continue
         post_id = str(post.get("post_id") or post_id_of(str(post.get("workflow_id") or "")))
         if not post_id or not is_removed(post_id):
             continue
+        if post_id not in already_removed:
+            newly_removed.add(post_id)
         before = json.dumps(post, sort_keys=True)
         post["outcome"] = "removed"
         post["error"] = ""
@@ -733,7 +741,9 @@ def redact_removed_report(report: Dict[str, Any], is_removed: Callable[[str], bo
             records = [
                 value_to_type(PostRecord, post) for post in report.get("posts") or [] if isinstance(post, dict)
             ]
-            fresh = summarize(records, Counter(old.get("excluded") or {}), None,
+            excluded = Counter(old.get("excluded") or {})
+            excluded[EXCLUDED_REMOVED] += len(newly_removed)  # once per post, never again
+            fresh = summarize(records, excluded, None,
                               stopped_by_cap=bool(old.get("stopped_by_spend_cap")))
             # checker_calls counts paid requests (from the spend cap): keep it
             fresh.pop("checker_calls", None)
@@ -801,7 +811,9 @@ def summarize(
             entry["calls"] += 1
             entry["input_tokens"] += c.input_tokens
             entry["output_tokens"] += c.output_tokens
-            entry["cost_usd"] = round(entry["cost_usd"] + c.cost_usd, 6)
+            entry["cost_usd"] += c.cost_usd
+        for entry in by_call.values():
+            entry["cost_usd"] = round(entry["cost_usd"], 6)  # once, after summing
         summary["calls"] = by_call
         summary["cost_usd"] = round(cap.spent_usd, 6)
         summary["spend_cap_usd"] = cap.cap_usd

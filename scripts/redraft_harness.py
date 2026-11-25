@@ -238,6 +238,7 @@ async def run(args) -> None:
     # A removal recorded while the earlier reports were swept: apply it to
     # this run's records too, right before they are written
     apply_removals(records, plans, is_removed, excluded)
+    safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))  # pruned again
     summary = summarize(records, excluded, cap, stopped_by_cap=stopped)
     safe_write(out_dir / "report.json", report_json(args.label, records, summary, sorted({c.model for c in cap.calls})))
     safe_write(out_dir / "summary.md", summary_markdown(summary))

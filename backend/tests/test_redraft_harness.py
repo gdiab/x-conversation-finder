@@ -845,6 +845,10 @@ async def test_redacting_an_earlier_report_recounts_its_summary(tmp_path, no_x):
     assert report["summary"]["cost_usd"] == 0.5
     assert report["summary"]["checker_calls"] == summary["checker_calls"]  # paid calls stay counted
     assert report["summary"]["removals_applied_after_run"] is True
+    removed_before = summary["excluded"].get("post_text_removed", 0)
+    assert report["summary"]["excluded"]["post_text_removed"] == removed_before + 1
+    harness.redact_removed_report(report, lambda post_id: post_id == "2001")  # a later sweep
+    assert report["summary"]["excluded"]["post_text_removed"] == removed_before + 1  # not counted again
 
 
 def test_the_sweep_goes_on_past_a_report_it_cannot_read(tmp_path, capsys):
@@ -898,3 +902,13 @@ def test_the_script_never_writes_through_a_symlink_or_over_the_database(tmp_path
     assert db.read_text() == "synthetic database"
     redraft_harness.safe_write(tmp_path / "out" / "summary.md", "ok")  # outside a repo: allowed
     assert (tmp_path / "out" / "summary.md").read_text() == "ok"
+
+
+
+def test_per_call_kind_costs_are_rounded_once_after_summing():
+    cap = SpendCap(cap_usd=1.0, input_cost_usd=1e-6, output_cost_usd=1e-6)
+    cap.calls.extend(harness.CallRecord("check", "m", 0, 0, 4e-7) for _ in range(100))
+
+    summary = summarize([], harness.Counter(), cap)
+
+    assert summary["calls"]["check"]["cost_usd"] == pytest.approx(4e-5)
