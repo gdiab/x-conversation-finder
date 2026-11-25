@@ -149,9 +149,15 @@ def _core(word: str) -> str:
 
 def sentence_terminator(word: str) -> str:
     """The word's last character before closing quotes, brackets and
-    decoration if it is '.', '!' or '?'; otherwise the empty string."""
+    decoration if it is '.', '!', '?' or an ellipsis ('\u2026'); otherwise
+    the empty string."""
     last = _strip_trailing(word)[-1:]
-    return last if last in (".", "!", "?") else ""
+    return last if last in (".", "!", "?", "\u2026") else ""
+
+
+def _is_ellipsis(word: str) -> bool:
+    core = _strip_trailing(word)
+    return core.endswith("\u2026") or core.endswith("..")
 
 
 def abbreviation_kind(word: str) -> Optional[str]:
@@ -229,27 +235,46 @@ def period_boundary(word: str, next_word: Optional[str], *, sentence_start: bool
 
 
 def word_boundary(word: str, next_word: Optional[str], *, sentence_start: bool = False) -> Boundary:
-    """Classify the end of a word whose terminator is '.', '!' or '?'.
+    """Classify the end of a word whose terminator is '.', '!', '?' or an ellipsis.
 
-    A terminator inside closing quotes or brackets before a lowercase word is
-    unclear: '"Is it fast?" asked a customer' continues, '"Ship it." Then'
-    does not. Otherwise '!' and '?' end the sentence, and a period follows
-    period_boundary.
+    Before a lowercase word, an ellipsis ("We launched... and grew") and a
+    terminator inside closing quotes or brackets ('"Is it fast?" asked a
+    customer') are unclear; '"Ship it." Then' and "We launched\u2026 What"
+    end the sentence. Otherwise '!' and '?' end the sentence, and a single
+    period follows period_boundary.
     """
     if next_word is None:
         return END
     trailing = word[len(_strip_trailing(word)):]
-    if any(c in _CLOSERS for c in trailing) and next_word.lstrip(_OPENERS)[:1].islower():
+    next_lower = next_word.lstrip(_OPENERS)[:1].islower()
+    if next_lower and (_is_ellipsis(word) or any(c in _CLOSERS for c in trailing)):
         return LIKELY_CONTINUE
     if sentence_terminator(word) == ".":
         return period_boundary(word, next_word, sentence_start=sentence_start)
     return END
 
 
-# A terminator with no space before a capital letter ("fast.It saves",
-# "fast.AI saves"): a missing space, or a joined name. "Node.js", "ASP.NET"
-# and "U.S.A" do not match; "Node.JS" does (conservatively unselectable).
-_JOINED_SENTENCES_RE = re.compile(r"[a-z]{2}[.!?][A-Z]")
+# Candidates for a terminator with no space between two words; see
+# joined_boundary_at.
+_JOINED_CANDIDATE_RE = re.compile(r"[^\W\d_]{2}([.!?\u2026])(?=[^\W\d_])")
+
+
+def joined_boundary_at(text: str, i: int) -> bool:
+    """Is the terminator at text[i], between letters, a missing space?
+
+    True when the next letter is a capital (any script) and either the letter
+    before the terminator or the one after the capital is lowercase:
+    "fast.It", "fast.AI", "AI.It", "today.\u00c9lodie". False for "Node.js",
+    "ASP.NET" and "U.S.A"; "Node.JS" counts (conservatively).
+    """
+    if i < 1 or i + 1 >= len(text):
+        return False
+    after = text[i + 2:i + 3]
+    return text[i + 1].isupper() and (text[i - 1].islower() or after.islower())
+
+
+def has_joined_boundary(text: str) -> bool:
+    return any(joined_boundary_at(text, m.start(1)) for m in _JOINED_CANDIDATE_RE.finditer(text))
 
 
 def _boundary_after(sentence: str, next_sentence: str) -> Boundary:
@@ -263,7 +288,7 @@ def _boundary_after(sentence: str, next_sentence: str) -> Boundary:
 
 def has_unclear_boundary_inside(sentence: str) -> bool:
     """True if a terminator inside the sentence might end a sentence."""
-    if _JOINED_SENTENCES_RE.search(sentence):
+    if has_joined_boundary(sentence):
         return True
     words = sentence.split()
     return any(

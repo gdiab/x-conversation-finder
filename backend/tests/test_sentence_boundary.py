@@ -128,6 +128,12 @@ GOLDEN_SPLITS = [
     # Codex thermo r8: a missing space joins two sentences; unclear.
     ("Our product is fast.It saves money.", ["Our product is fast.It saves money."], [0]),
     ("We ship fast.AI saves time.", ["We ship fast.AI saves time."], [0]),
+    # Codex thermo r11: uppercase-ending words, Unicode capitals, ellipses.
+    ("We use AI.It saves time.", ["We use AI.It saves time."], [0]),
+    ("We ship today.\u00c9lodie runs sales.", ["We ship today.\u00c9lodie runs sales."], [0]),
+    ("We launched\u2026 What do you think?", ["We launched\u2026", "What do you think?"], []),
+    ("We launched\u2026 and then grew.", ["We launched\u2026 and then grew."], [0]),
+    ("We launched... and then grew.", ["We launched... and then grew."], [0]),
     ("We build on Node.js and ASP.NET today.", ["We build on Node.js and ASP.NET today."], []),
     # Codex thermo r9: emoji after a terminator do not hide it.
     ("Our product saves time!\U0001F680 Customers pay monthly.", ["Our product saves time!\U0001F680", "Customers pay monthly."], []),
@@ -635,6 +641,12 @@ def test_missing_space_before_a_question_splits_post_text():
     assert validate_reply_plan(plan("We grew."), post) != []
     post = "We launched.AI helps?"
     assert [post[a:b].strip() for a, b in question_spans(post)] == ["AI helps?"]
+    post = "We use AI.Is that useful?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["Is that useful?"]
+    post = "We launched\u2026 What do you think?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["What do you think?"]
+    post = "We use ASP.NET. Is it good?"
+    assert [post[a:b].strip() for a, b in question_spans(post)] == ["Is it good?"]
     post = "Anyone using Node.js for queues?"
     assert [post[a:b].strip() for a, b in question_spans(post)] == [post]
 

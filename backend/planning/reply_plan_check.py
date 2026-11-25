@@ -9,7 +9,7 @@ these rules cannot make an in-flight Review workflow replay differently.
 import re
 from typing import List, Optional, Tuple
 
-from backend.gate.sentence_boundary import CONTINUE, is_decoration, period_boundary
+from backend.gate.sentence_boundary import CONTINUE, is_decoration, joined_boundary_at, period_boundary
 from backend.models.evidence import Segment
 from backend.models.reply_plan import REPLY_TYPES, ReplyPlan
 
@@ -29,10 +29,11 @@ _URL_RE = re.compile(r"https?://\S+?(?=[.,;:!?？)\]}»\"'”’]*(?:\s|$))", re
 # ready?", "Dr. Smith, can you help?"). An AMBIGUOUS period ("in 2021.
 # Canals or railways?") is a boundary here, so a statement before a question
 # never counts as part of it (issue #10; backend.gate.sentence_boundary).
-# A period with no space before a capital letter ("We grew.Is that good?",
-# "We launched.AI helps?") is a boundary as well; "Node.js" and "ASP.NET" are not.
+# A period or ellipsis with no space between letters is a boundary when
+# joined_boundary_at says so ("We grew.Is that good?", "We use AI.Is it
+# useful?"); "Node.js" and "ASP.NET" are not.
 _BOUNDARY_RE = re.compile(
-    r"[.!?？]+[\"'”’)\]}»]*(?=\s|$)|[!?？]+[\"'”’)\]}»]*(?=\w)|(?<=[a-z][a-z])\.(?=[A-Z])|\n"
+    r"[.!?？…]+[\"'”’)\]}»]*(?=\s|$)|[!?？]+[\"'”’)\]}»]*(?=\w)|(?<=[^\W\d_]{2})[.…](?=[^\W\d_])|\n"
 )
 _QUESTION_MARKS = ("?", "？")
 _CLOSERS = "\"'”’)]}»"
@@ -47,11 +48,11 @@ def _period_continues_sentence(text: str, m: "re.Match[str]", first_word_start: 
     is bounded by the lengths of the word before m and the gap after it, so a
     long post stays linear.
     """
+    if m.group() in (".", "\u2026") and m.end() < len(text) and not text[m.end()].isspace():
+        # The no-space alternative: decided from the neighbouring letters
+        # alone, so long unbroken tokens stay linear.
+        return not joined_boundary_at(text, m.start())
     if m.group().rstrip(_CLOSERS) != ".":
-        return False
-    if m.end() < len(text) and not text[m.end()].isspace():
-        # The no-space alternative ("We grew.Is that good?") is always a
-        # boundary; skipping the word scan keeps long unbroken tokens linear.
         return False
     word_start = m.start()
     while word_start > 0 and not text[word_start - 1].isspace():
