@@ -28,6 +28,10 @@ const skipMock = vi.mocked(skipReview);
 const editMock = vi.mocked(editReview);
 
 // The workflow's validator text, as the API client wraps it in its error.
+// The card opens the override prompt only if the error contains "post_anyway".
+// api/client.test.ts checks the request body and that the response text reaches
+// the error; whether the live API puts the validator text in that response
+// needs an end-to-end check against a running backend.
 const POST_ANYWAY_ERROR =
   'Failed to approve review: Bad Request. Edited text has 1 failing sentence(s). Set post_anyway=true to approve anyway.';
 
