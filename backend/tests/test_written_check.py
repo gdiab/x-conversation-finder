@@ -346,6 +346,15 @@ def test_a_product_named_with_a_number_word_still_has_its_numbers_checked():
     assert judge(named_only, _verdicts(SUPPORTED_B1)).passed
 
 
+def test_a_numeric_alias_does_not_make_a_digit_in_the_name_a_number():
+    sentences = brief("Relay retries failed deliveries.")
+
+    prepared = prepare_check("Relay2 retries failed deliveries.", sentences, "Relay2", ["One"])
+
+    assert prepared.needs_checker and prepared.structural_failures == []
+    assert judge(prepared, _verdicts(SUPPORTED_B1)).passed
+
+
 def test_a_triggered_sentence_cannot_be_supported_by_an_empty_brief():
     prepared = prepare_check(CLAIM, [], NAME, ALIASES)
 

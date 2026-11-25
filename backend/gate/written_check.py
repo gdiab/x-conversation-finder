@@ -209,35 +209,33 @@ def find_triggers(
             hits.append(TriggerHit(trigger=trigger, match=match))
 
     name, aliases = clean_names(product_name, product_aliases)
-    name_spans: List[Tuple[int, int]] = []
+    # Where a name stands in the sentence, and whether a number there is part
+    # of the name ("Relay2"). A name that is nothing but numbers ("One",
+    # "37") exempts nothing: "One retries one delivery." could mean either,
+    # so it counts as a number too. (The brief sentences that name the
+    # product state it, so the number rule still lets a supported claim pass.)
+    exempt_spans: List[Tuple[int, int]] = []
     for label in [name, *aliases]:
         if not label:
             continue
+        label_words = _WORD_RE.findall(_fold(label))
         spans = _phrase_matches(words, label, plural=False)
-        if not spans and not _WORD_RE.search(_fold(label)) and _fold(label) in folded:
+        if not spans and not label_words and _fold(label) in folded:
             # A name made of symbols only has no words to match on
             start = folded.index(_fold(label))
             spans = [(start, start + len(_fold(label)))]
         if spans:
             add(TRIGGER_PRODUCT_NAME, label)
-            name_spans.extend(spans)
+            if not all(w in NUMBER_WORDS or w.isdigit() for w in label_words):
+                exempt_spans.extend(spans)
 
     def inside_name(start: int, end: int) -> bool:
-        return any(a <= start and end <= b for a, b in name_spans)
-
-    # A name that is nothing but numbers ("One", "37") cannot be told from a
-    # quantity: "One retries one delivery." Then nothing is exempt, and the
-    # name counts as a number too (the brief sentences that name the product
-    # state it, so the number rule still lets a supported claim pass).
-    numeric_names = {
-        label.casefold() for label in [name, *aliases]
-        if label and all(w in NUMBER_WORDS or w.isdigit() for w in _WORD_RE.findall(_fold(label)) or [""])
-    }
+        return any(a <= start and end <= b for a, b in exempt_spans)
 
     for word, start, end in words:
         if word in FIRST_PERSON_PLURAL:
             add(TRIGGER_FIRST_PERSON_PLURAL, word)
-        if inside_name(start, end) and not numeric_names:
+        if inside_name(start, end):
             continue
         if _DIGIT_RUN_RE.search(word) or word in NUMBER_WORDS:
             add(TRIGGER_NUMBER, word)

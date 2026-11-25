@@ -99,6 +99,18 @@ def test_a_name_that_is_itself_a_number_does_not_hide_a_quantity():
     assert TRIGGER_NUMBER not in {h.trigger for h in find_triggers("Relay2 handles that.", "Relay2", [], [])}
 
 
+def test_a_numeric_alias_does_not_take_the_exemption_from_another_name():
+    """Each matched name decides for itself: "Relay2" keeps its digit although
+    the alias "One" exempts nothing."""
+    plain = find_triggers("Relay2 retries failed deliveries.", "Relay2", ["One"], [])
+    both = find_triggers("Relay2, or One, retries one delivery.", "Relay2", ["One"], [])
+
+    assert [(h.trigger, h.match) for h in plain] == [(TRIGGER_PRODUCT_NAME, "Relay2")]
+    assert [(h.trigger, h.match) for h in both] == [
+        (TRIGGER_PRODUCT_NAME, "Relay2"), (TRIGGER_PRODUCT_NAME, "One"), (TRIGGER_NUMBER, "one"),
+    ]
+
+
 def test_clean_names_trims_and_drops_blanks_and_repeats():
     assert clean_names("  Acme   Relay ", [" Relay", "relay", "", "acme relay", "AR"]) == (
         "Acme Relay", ["Relay", "AR"]
