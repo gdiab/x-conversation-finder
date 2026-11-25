@@ -229,7 +229,7 @@ async def test_reconcile_retry_idempotency():
         
         # Check reconciliation record exists
         reconciliation = db.query(BudgetReconciliationDB).filter(
-            BudgetReconciliationDB.reconciliation_key == "test_wf_idempotent:test-run-idempotent:test_act_idempotent:a1:x_reads"
+            BudgetReconciliationDB.reconciliation_key == f"test_wf_idempotent:test-run-idempotent:test_act_idempotent:a1:{reservation_date}:x_reads"
         ).first()
         assert reconciliation is not None
         assert reconciliation.reserved_amount == 10.0

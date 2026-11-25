@@ -9,8 +9,9 @@ import json
 from typing import Any, List, Optional
 
 from openai import APIStatusError, AsyncOpenAI
+from temporalio.exceptions import ApplicationError
 
-from backend.budget import current_inference_meter, estimate_prompt_tokens
+from backend.budget import current_inference_meter, prompt_token_bound
 from backend.config import get_settings
 from backend.models import (
     Evidence,
@@ -165,11 +166,32 @@ def _parse_plan(result: object) -> dict:
 # --- end reply plan ---
 
 
+def _provider_rejected(status_code: Optional[int]) -> bool:
+    """A 4xx (except 408 Request Timeout) means the provider refused the request
+    before generating: nothing returned, nothing billed. 408 and 5xx are
+    ambiguous, so their reservations stay counted."""
+    return isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 408
+
+
 class PlainReplyAgent(ReplyAgentPort):
     """Plain LLM adapter - baseline implementation."""
     
-    def __init__(self, openai_client: Optional[AsyncOpenAI] = None):
+    def __init__(
+        self,
+        openai_client: Optional[AsyncOpenAI] = None,
+        require_budget_meter: Optional[bool] = None,
+    ):
+        """openai_client: inject a client (tests use stubs); None builds the real one.
+
+        require_budget_meter: refuse a call made outside a metered activity
+        attempt (backend.budget.meter_inference), so a paid request can never
+        skip the daily cap and kill switch. Defaults to True when the adapter
+        builds its own (real, paid) client, False for an injected client.
+        """
         settings = get_settings()
+        self._require_budget_meter = (
+            openai_client is None if require_budget_meter is None else require_budget_meter
+        )
         self.client = openai_client or AsyncOpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
@@ -189,16 +211,24 @@ class PlainReplyAgent(ReplyAgentPort):
         """Send one JSON-mode chat completion, metered against the daily budget.
 
         Issue #8: inside a metered activity attempt (backend.budget.meter_inference)
-        the call is reserved right before the request, sized from the prompt and
-        the max output tokens sent with it, then reconciled to the reported usage.
-        An error status from the provider (4xx/5xx) returns no completion, so the
-        reservation is released. Any other failure (timeout, connection error,
-        cancellation) keeps it counted: the request may have been billed.
+        the call is reserved right before the request, sized from an upper bound
+        on the prompt's tokens and the max output tokens sent with it, then
+        reconciled to the reported usage. A 4xx status (including 429) means the
+        provider rejected the request: no completion, so the reservation is
+        released. Anything else (5xx, timeout, connection error, cancellation)
+        keeps it counted: the request may have been billed.
         """
         max_output_tokens = self._max_output_tokens[call]
         meter = current_inference_meter()
+        if meter is None and self._require_budget_meter:
+            raise ApplicationError(
+                f"Unmetered {call} inference call refused: paid calls must run "
+                "inside backend.budget.meter_inference()",
+                non_retryable=True,
+                type="UnmeteredInferenceCall",
+            )
         reservation = (
-            meter.reserve(estimate_prompt_tokens(messages), max_output_tokens) if meter else None
+            meter.reserve(prompt_token_bound(messages), max_output_tokens) if meter else None
         )
         try:
             response = await self.client.chat.completions.create(
@@ -210,8 +240,8 @@ class PlainReplyAgent(ReplyAgentPort):
                 # which json.loads rejects.
                 response_format={"type": "json_object"},
             )
-        except APIStatusError:
-            if reservation:
+        except APIStatusError as e:
+            if reservation and _provider_rejected(e.status_code):
                 reservation.release()
             raise
         if reservation:
@@ -221,6 +251,22 @@ class PlainReplyAgent(ReplyAgentPort):
                 getattr(usage, "completion_tokens", None) if usage else None,
             )
         return response
+    
+    def _raise_if_truncated(self, call: str, response) -> None:
+        """Fail without retry when the output hit max_completion_tokens.
+
+        The JSON is cut off, and a retry sends the same prompt with the same
+        limit, paying again for the same failure. The call is already counted.
+        Raise the call's limit (settings: <call>_max_output_tokens) instead.
+        """
+        choices = getattr(response, "choices", None) or []
+        if choices and getattr(choices[0], "finish_reason", None) == "length":
+            raise ApplicationError(
+                f"{call} output truncated at {self._max_output_tokens[call]} tokens; "
+                f"raise {call.upper()}_MAX_OUTPUT_TOKENS",
+                non_retryable=True,
+                type="InferenceOutputTruncated",
+            )
     
     async def research(
         self,
@@ -278,6 +324,7 @@ Most posts are not reply opportunities. Do not stretch a post to fit the brief."
             ],
             temperature=0.3,
         )
+        self._raise_if_truncated("research", response)
         
         result = json.loads(response.choices[0].message.content)
         if not isinstance(result, dict):
@@ -483,6 +530,7 @@ Max 280 chars total after text insertion."""
             ],
             temperature=0.7,
         )
+        self._raise_if_truncated("draft", response)
         
         result = json.loads(response.choices[0].message.content)
         

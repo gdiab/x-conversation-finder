@@ -14,13 +14,14 @@ Issue #8: every paid attempt is counted.
   previous attempt's. Inference keys also carry a call index, one per paid call.
 - An open reservation from an attempt that sent its request stays counted at the
   reserved amount: the call may have been billed.
-- An attempt whose request the provider answered with an error status is released
-  (reconciled to zero): an error response returns no posts and no completion.
-- Inference reservations are sized from the prompt and the call's max output
-  tokens (estimate_prompt_tokens, InferenceMeter), not from fixed estimates.
+- An attempt whose request the provider rejected with a 4xx status (including
+  429) is released (reconciled to zero): the request was refused, so no posts or
+  completion were returned. 5xx, timeouts and crashes stay counted.
+- Inference reservations are sized from an upper bound on the prompt's tokens
+  plus the call's max output tokens (prompt_token_bound, InferenceMeter), not
+  from fixed estimates.
 """
 
-import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -74,17 +75,6 @@ def _reservation_key(
     call = f":c{call_index}" if call_index is not None else ""
     return f"{workflow_id}:{workflow_run_id}:{activity_id}:a{attempt}{call}:{reservation_date}:{budget_type}"
 
-
-def _reconciliation_key(
-    workflow_id: str,
-    workflow_run_id: str,
-    activity_id: str,
-    attempt: int,
-    budget_type: str,
-    call_index: Optional[int] = None,
-) -> str:
-    call = f":c{call_index}" if call_index is not None else ""
-    return f"{workflow_id}:{workflow_run_id}:{activity_id}:a{attempt}{call}:{budget_type}"
 
 
 def _check_kill_switch(db):
@@ -392,7 +382,10 @@ def reconcile_x_reads(
     
     attempt = _resolve_attempt(attempt)
     actual_cost = actual_reads * cost_per_read
-    reconciliation_key = _reconciliation_key(workflow_id, workflow_run_id, activity_id, attempt, "x_reads")
+    # One identity for the reservation and its reconciliation (incl. UTC date)
+    reconciliation_key = _reservation_key(
+        workflow_id, workflow_run_id, activity_id, attempt, reservation_date, "x_reads"
+    )
     
     db = get_db()
     try:
@@ -469,9 +462,7 @@ def reconcile_x_reads(
         db.add(reconciliation)
         
         # Mark the reservation as reconciled
-        reservation_key_str = _reservation_key(
-            workflow_id, workflow_run_id, activity_id, attempt, reservation_date, "x_reads"
-        )
+        reservation_key_str = reconciliation_key
         reservation = db.query(BudgetReservationDB).filter(
             BudgetReservationDB.reservation_key == reservation_key_str
         ).first()
@@ -499,10 +490,10 @@ def release_x_reservation(
 ) -> float:
     """Release an X reservation whose request returned no posts (issue #8).
 
-    For an attempt the X API answered with an error status: X bills per post
-    returned, and an error response returns none. Reconciles the reservation to
-    zero reads. Do not call it for timeouts or connection errors, where the
-    request may have been served; those reservations stay counted.
+    For an attempt that returned no posts: X rejected the request with a 4xx
+    status, or a lookup found no post. X bills per post returned. Reconciles the
+    reservation to zero reads. Do not call it for 5xx, timeouts or connection
+    errors, where the request may have been served; those stay counted.
     """
     return reconcile_x_reads(
         reserved_reads=reserved_reads,
@@ -558,7 +549,7 @@ def release_inference_reservation(
 ) -> float:
     """Release an inference reservation whose call returned no completion (issue #8).
 
-    For a call the provider answered with an error status. Refunds the whole
+    For a call the provider rejected with a 4xx status. Refunds the whole
     reservation and takes the call off the day's inference_calls count.
     Idempotent with reconcile_inference_tokens (same key). Returns 0.0.
     """
@@ -594,8 +585,10 @@ def _close_inference_reservation(
         actual_output * settings.inference_output_token_cost_usd
     )
     
-    reconciliation_key = _reconciliation_key(
-        workflow_id, workflow_run_id, activity_id, attempt, "inference", call_index
+    # One identity for the reservation and its reconciliation (incl. UTC date)
+    reconciliation_key = _reservation_key(
+        workflow_id, workflow_run_id, activity_id, attempt, reservation_date,
+        "inference", call_index,
     )
     
     db = get_db()
@@ -667,10 +660,7 @@ def _close_inference_reservation(
         db.add(reconciliation)
         
         # Mark the reservation as reconciled
-        reservation_key_str = _reservation_key(
-            workflow_id, workflow_run_id, activity_id, attempt, reservation_date,
-            "inference", call_index,
-        )
+        reservation_key_str = reconciliation_key
         reservation = db.query(BudgetReservationDB).filter(
             BudgetReservationDB.reservation_key == reservation_key_str
         ).first()
@@ -689,35 +679,27 @@ def _close_inference_reservation(
 
 # --- issue #8: per-attempt inference metering, sized from the prompt ---
 
-# Prompt token estimate. English averages about 4 characters per token in the
-# GPT tokenizers; assume 3 so the estimate is high, not low. A non-ASCII
-# character (accents, CJK, emoji) can take more than one token; assume 2.
-# Reconciliation corrects the estimate to the provider's reported usage.
-ASCII_CHARS_PER_TOKEN = 3
-TOKENS_PER_NON_ASCII_CHAR = 2
-# Chat format overhead: tokens per message, plus the assistant reply priming.
+# Prompt token bound. The GPT tokenizers are byte-level BPE: every token covers
+# at least one UTF-8 byte, so a text never has more tokens than bytes, whatever
+# it contains (code, punctuation, emoji, adversarial post text). English runs
+# about 4 bytes per token, so the bound is about 4x the real count; input is the
+# cheap side and reconciliation refunds the difference right after the call.
+# Chat format overhead (OpenAI cookbook): tokens per message (role and
+# delimiters, the role name counted in full) and the assistant reply priming.
 TOKENS_PER_MESSAGE = 4
 TOKENS_PER_REPLY = 3
 
 
-def estimate_prompt_tokens(messages: Sequence[dict]) -> int:
-    """Estimate the input tokens of a chat request from its messages.
-
-    A deliberate overestimate (see the constants above), so a reservation
-    covers the call; the call is reconciled to the provider's usage after.
-    """
+def prompt_token_bound(messages: Sequence[dict]) -> int:
+    """Upper bound on the input tokens of a chat request: its UTF-8 bytes plus
+    the chat format overhead. A reservation sized from it covers the call, so a
+    call admitted under the daily cap cannot cost more input than reserved."""
     total = TOKENS_PER_REPLY
     for message in messages:
-        content = message.get("content") or ""
-        if not isinstance(content, str):
-            content = str(content)
-        ascii_chars = sum(1 for ch in content if ord(ch) < 128)
-        non_ascii_chars = len(content) - ascii_chars
-        total += (
-            TOKENS_PER_MESSAGE
-            + math.ceil(ascii_chars / ASCII_CHARS_PER_TOKEN)
-            + non_ascii_chars * TOKENS_PER_NON_ASCII_CHAR
-        )
+        for value in message.values():
+            text_value = value if isinstance(value, str) else str(value)
+            total += len(text_value.encode("utf-8"))
+        total += TOKENS_PER_MESSAGE
     return total
 
 
@@ -740,11 +722,16 @@ class InferenceCall:
     cost_usd: float = 0.0
 
     def settle(self, actual_input: Optional[int], actual_output: Optional[int]) -> float:
-        """Reconcile to the provider's reported usage. Missing usage (None or 0/0)
-        keeps the full reservation as spent (R5-B1). Returns the cost counted."""
+        """Reconcile to the provider's reported usage. Missing or partial usage
+        (either side None or not an int, or 0/0) keeps the full reservation as
+        spent (R5-B1). Returns the cost counted."""
         if self.status != "open":
             return self.cost_usd
-        if not actual_input and not actual_output:
+        valid = all(
+            isinstance(v, int) and not isinstance(v, bool) and v >= 0
+            for v in (actual_input, actual_output)
+        )
+        if not valid or (actual_input == 0 and actual_output == 0):
             self.status = "kept"
             self.cost_usd = self.reserved_cost
             return self.cost_usd
@@ -752,8 +739,8 @@ class InferenceCall:
         self.cost_usd = reconcile_inference_tokens(
             reserved_input=self.reserved_input,
             reserved_output=self.reserved_output,
-            actual_input=actual_input or 0,
-            actual_output=actual_output or 0,
+            actual_input=actual_input,
+            actual_output=actual_output,
             reservation_date=self.reservation_date,
             workflow_id=m.workflow_id,
             workflow_run_id=m.workflow_run_id,
@@ -765,8 +752,8 @@ class InferenceCall:
         return self.cost_usd
 
     def release(self) -> None:
-        """Refund the reservation: the provider answered with an error status,
-        so no completion was returned or billed."""
+        """Refund the reservation: the provider rejected the request (4xx), so
+        no completion was returned or billed."""
         if self.status != "open":
             return
         m = self.meter

@@ -31,7 +31,7 @@ from backend.adapters.plain_reply_agent import PlainReplyAgent
 from backend.budget import (
     BudgetExceeded,
     InferenceMeter,
-    estimate_prompt_tokens,
+    prompt_token_bound,
     get_today_budget,
     reconcile_inference_tokens,
     release_inference_reservation,
@@ -48,9 +48,7 @@ from backend.ports import XClientPort
 USAGE_IN, USAGE_OUT = 120, 30
 
 
-@pytest.fixture(autouse=True)
-def empty_budget_tables():
-    """Start each test from an empty ledger, so totals are this test's own."""
+def _empty():
     from backend.database import BudgetLedgerDB
     db = get_db()
     try:
@@ -59,6 +57,12 @@ def empty_budget_tables():
         db.commit()
     finally:
         db.close()
+
+
+@pytest.fixture(autouse=True)
+def empty_budget_tables():
+    """Start each test from an empty ledger, so totals are this test's own."""
+    _empty()
 
 RESEARCH_JSON = {
     "post_kind": "question",
@@ -78,17 +82,18 @@ PLAN_JSON = {
 DRAFT_JSON = {"segments": [{"kind": "non_claim", "phrase_id": "q.current_tool"}]}
 
 
-def _completion(payload, usage=(USAGE_IN, USAGE_OUT)):
+def _completion(payload, usage=(USAGE_IN, USAGE_OUT), finish_reason="stop"):
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)))],
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=json.dumps(payload)), finish_reason=finish_reason
+        )],
         usage=SimpleNamespace(prompt_tokens=usage[0], completion_tokens=usage[1]) if usage else None,
     )
 
 
 def _status_error(status: int) -> openai.APIStatusError:
     request = httpx.Request("POST", "https://api.openai.invalid/v1/chat/completions")
-    cls = openai.RateLimitError if status == 429 else openai.InternalServerError
-    return cls("synthetic error", response=httpx.Response(status, request=request), body=None)
+    return openai.APIStatusError("synthetic error", response=httpx.Response(status, request=request), body=None)
 
 
 class ScriptedCompletions:
@@ -239,8 +244,8 @@ async def test_timeout_keeps_the_attempt_counted_and_retry_adds_a_call(sample_po
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 500])
-async def test_error_status_releases_the_attempt(status, sample_post):
+@pytest.mark.parametrize("status", [400, 429])
+async def test_rejected_request_releases_the_attempt(status, sample_post):
     agent, _ = _agent([_status_error(status), PLAN_JSON])
     activities = ReplyActivities(agent)
     fn, arg = _activity_call("plan_reply", activities, sample_post)
@@ -255,6 +260,67 @@ async def test_error_status_releases_the_attempt(status, sample_post):
     budget = get_today_budget()
     assert budget["inference_calls"] == 1
     assert budget["inference_cost_usd"] == pytest.approx(_actual_cost())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [408, 500, 503])
+async def test_ambiguous_error_status_keeps_the_attempt_counted(status, sample_post):
+    """A 5xx (or 408) may come after the provider did the work: stay counted."""
+    agent, _ = _agent([_status_error(status)])
+    fn, arg = _activity_call("plan_reply", ReplyActivities(agent), sample_post)
+
+    with pytest.raises(openai.APIStatusError):
+        await _env(attempt=1).run(fn, arg)
+
+    (reservation,) = _reservations("inference")
+    assert reservation.reconciled == 0
+    budget = get_today_budget()
+    assert budget["inference_calls"] == 1
+    assert budget["inference_cost_usd"] == pytest.approx(reservation.cost_usd)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage", [None, (USAGE_IN, None), (None, USAGE_OUT), (0, 0)])
+async def test_missing_or_partial_usage_keeps_the_reservation(usage, sample_post):
+    payload = (PLAN_JSON, None) if usage is None else (PLAN_JSON, usage)
+    agent, _ = _agent([payload])
+    fn, arg = _activity_call("plan_reply", ReplyActivities(agent), sample_post)
+    await _env(attempt=1).run(fn, arg)
+
+    (reservation,) = _reservations("inference")
+    assert reservation.reconciled == 0
+    assert get_today_budget()["inference_cost_usd"] == pytest.approx(reservation.cost_usd)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["research_post", "draft_reply"])
+async def test_truncated_output_fails_without_retry_and_stays_counted(name, sample_post):
+    agent, _ = _agent([(PAYLOADS[name], (USAGE_IN, 400), "length")])
+    fn, arg = _activity_call(name, ReplyActivities(agent), sample_post)
+
+    with pytest.raises(ApplicationError) as info:
+        await _env(attempt=1).run(fn, arg)
+    assert info.value.type == "InferenceOutputTruncated"
+    assert info.value.non_retryable
+    assert get_today_budget()["inference_cost_usd"] == pytest.approx(_actual_cost(USAGE_IN, 400))
+
+
+@pytest.mark.asyncio
+async def test_real_client_refuses_a_call_outside_a_metered_attempt(sample_post, monkeypatch):
+    """The adapter that builds its own (paid) client fails closed without a meter."""
+    agent = PlainReplyAgent()  # builds a real AsyncOpenAI client; no request is sent
+    sent = []
+
+    async def must_not_send(**kwargs):
+        sent.append(kwargs)
+        raise AssertionError("request sent")
+
+    monkeypatch.setattr(agent.client.chat.completions, "create", must_not_send)
+    with pytest.raises(ApplicationError) as info:
+        await agent.plan(sample_post, _evidence(), "k")
+    assert info.value.type == "UnmeteredInferenceCall"
+    assert sent == []
+    assert agent.client.max_retries == 0
 
 
 @pytest.mark.asyncio
@@ -297,30 +363,66 @@ async def test_reservation_is_sized_from_the_prompt_and_max_output(name, setting
     max_output = getattr(get_settings(), setting)
     assert sent["max_completion_tokens"] == max_output
     (reservation,) = _reservations("inference")
-    assert reservation.reserved_amount == estimate_prompt_tokens(sent["messages"]) + max_output
+    assert reservation.reserved_amount == prompt_token_bound(sent["messages"]) + max_output
     s = get_settings()
     assert reservation.cost_usd == pytest.approx(
-        estimate_prompt_tokens(sent["messages"]) * s.inference_input_token_cost_usd
+        prompt_token_bound(sent["messages"]) * s.inference_input_token_cost_usd
         + max_output * s.inference_output_token_cost_usd
     )
 
 
-def test_prompt_estimate_grows_with_the_prompt_and_overestimates_english():
-    short = [{"role": "user", "content": "Hi."}]
-    long = [{"role": "user", "content": "word " * 400}]  # about 400 tokens in GPT tokenizers
-    assert estimate_prompt_tokens(short) < 20
-    assert estimate_prompt_tokens(long) >= 400
-    # non-ASCII text counts more per character
-    assert estimate_prompt_tokens([{"role": "user", "content": "é" * 30}]) > estimate_prompt_tokens(
-        [{"role": "user", "content": "e" * 30}]
-    )
+@pytest.mark.parametrize("content", [
+    "word " * 400,
+    "{}[]();:!?<>=+-*/&|^%$#@~`" * 20,   # punctuation: about one token per byte
+    "x9Qz_7Lk" * 50,                      # random identifiers
+    "你好世界" * 50,                       # CJK: 3 bytes per character
+    "🙂👍🏽🧑‍💻" * 30,                    # emoji and ZWJ sequences
+])
+def test_prompt_bound_is_at_least_one_token_per_byte(content):
+    messages = [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": content}]
+    content_bytes = sum(len(m["content"].encode("utf-8")) for m in messages)
+    # A byte-level BPE token covers at least one byte, so bytes bound the tokens.
+    assert prompt_token_bound(messages) >= content_bytes + 2 * 4
+
+
+@pytest.mark.asyncio
+async def test_admission_near_the_cap_tracks_the_prompt_not_a_fixed_estimate(sample_post, monkeypatch):
+    """Through draft_reply: the call is admitted exactly when the remaining budget
+    covers its own prompt bound + max output, so a small call is not refused by a
+    larger fixed estimate, and a larger prompt needs more room."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "draft_max_output_tokens", 60)
+
+    async def reservation_cost(steer):
+        agent, completions = _agent([(DRAFT_JSON, None)])
+        await _env(attempt=1, activity_id=f"probe-{len(steer)}").run(
+            ReplyActivities(agent).draft_reply,
+            DraftReplyInput(evidence=_evidence(), idempotency_key="k", steer=steer),
+        )
+        return _reservations("inference")[-1].cost_usd
+
+    small, large = await reservation_cost(""), await reservation_cost("Be brief. " * 200)
+    assert small < large
+
+    for limit, admitted in [(small * 1.0001, True), (small * 0.9999, False)]:
+        _empty()
+        monkeypatch.setattr(settings, "daily_inference_limit_usd", limit)
+        agent, completions = _agent([(DRAFT_JSON, None)])
+        call = ReplyActivities(agent).draft_reply, DraftReplyInput(evidence=_evidence(), idempotency_key="k")
+        if admitted:
+            await _env(attempt=1).run(*call)
+            assert len(completions.calls) == 1
+        else:
+            with pytest.raises(BudgetExceeded):
+                await _env(attempt=1).run(*call)
+            assert completions.calls == []
 
 
 def test_small_call_near_the_cap_is_not_refused_by_a_fixed_estimate(monkeypatch):
     settings = get_settings()
     old_fixed_cost = 500 * settings.inference_input_token_cost_usd + 200 * settings.inference_output_token_cost_usd
     small_messages = [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "Short."}]
-    small_input, small_output = estimate_prompt_tokens(small_messages), 50
+    small_input, small_output = prompt_token_bound(small_messages), 50
     small_cost = (
         small_input * settings.inference_input_token_cost_usd
         + small_output * settings.inference_output_token_cost_usd
@@ -463,11 +565,23 @@ async def test_search_timeout_keeps_reads_counted():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [408, 500, 503])
+async def test_search_ambiguous_error_keeps_reads_counted(status):
+    activities = XActivities(ScriptedXClient([_x_status_error(status)]))
+    arg = SearchRecentInput(query="synthetic", max_results=10, idempotency_key="k")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _env(attempt=1).run(activities.search_recent, arg)
+    assert get_today_budget()["x_reads"] == 10
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error", [
-    _x_status_error(503),
+    _x_status_error(400),
+    _x_status_error(401),
     ApplicationError("rate limited", type="RateLimitError"),
 ])
-async def test_search_error_status_releases_reads(error):
+async def test_search_rejected_request_releases_reads(error):
     activities = XActivities(ScriptedXClient([error]))
     arg = SearchRecentInput(query="synthetic", max_results=10, idempotency_key="k")
 
@@ -480,8 +594,8 @@ async def test_search_error_status_releases_reads(error):
 
 
 @pytest.mark.asyncio
-async def test_lookup_error_status_releases_the_read_and_retry_counts_one():
-    activities = XActivities(ScriptedXClient([_x_status_error(503), _post(1)]))
+async def test_lookup_rejected_request_releases_the_read_and_retry_counts_one():
+    activities = XActivities(ScriptedXClient([_x_status_error(403), _post(1)]))
     arg = LookupPostInput(post_id="9001", idempotency_key="k")
 
     with pytest.raises(httpx.HTTPStatusError):
@@ -490,3 +604,27 @@ async def test_lookup_error_status_releases_the_read_and_retry_counts_one():
 
     await _env(attempt=2).run(activities.lookup_post, arg)
     assert get_today_budget()["x_reads"] == 1
+
+
+@pytest.mark.asyncio
+async def test_lookup_not_found_releases_the_read(monkeypatch):
+    """The real HTTP adapter turns a 404 into None; no post returned, no read billed."""
+    from backend.adapters.http_x_client import HttpXClient
+
+    def handler(request):
+        return httpx.Response(404, json={"title": "Not Found"}, request=request)
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *a, **kw: real_async_client(*a, transport=httpx.MockTransport(handler), **kw),
+    )
+    activities = XActivities(HttpXClient(bearer_token="synthetic-token"))
+    result = await _env(attempt=1).run(
+        activities.lookup_post, LookupPostInput(post_id="9001", idempotency_key="k")
+    )
+
+    assert result is None
+    budget = get_today_budget()
+    assert budget["x_reads"] == 0
+    assert budget["x_cost_usd"] == pytest.approx(0.0)

@@ -157,15 +157,23 @@ call is counted per Temporal activity attempt:
   index for inference). A retry after a lost completion makes a new reservation,
   so both paid calls are counted.
 - Inference calls reserve inside the adapter, right before the request, sized
-  from the prompt (`estimate_prompt_tokens`) plus the call's max output tokens
-  (`RESEARCH_MAX_OUTPUT_TOKENS`, `PLAN_MAX_OUTPUT_TOKENS`,
+  from an upper bound on the prompt's tokens (`prompt_token_bound`: its UTF-8
+  bytes, since a byte-level BPE token covers at least one byte) plus the call's
+  max output tokens (`RESEARCH_MAX_OUTPUT_TOKENS`, `PLAN_MAX_OUTPUT_TOKENS`,
   `DRAFT_MAX_OUTPUT_TOKENS`, sent as `max_completion_tokens`). The activity opens
   the meter with `meter_inference()`; an adapter that makes a paid call reserves
   through `current_inference_meter()`. Each call is then reconciled to the
-  reported usage.
-- An error status from the provider (OpenAI 4xx/5xx, X HTTP errors and 429s)
-  releases the reservation: no completion or posts were returned. A timeout,
-  connection error or crash leaves it counted at the reserved amount.
+  reported usage; missing or partial usage keeps the full reservation.
+- `PlainReplyAgent` with its own (real) client refuses a call made outside a
+  metered activity attempt (`UnmeteredInferenceCall`). Injected clients (test
+  stubs) are not metered unless the test opens a meter.
+- A 4xx status (including 429, except 408) releases the reservation: the
+  provider refused the request, so no completion or posts were returned. 408,
+  5xx, timeouts, connection errors and crashes leave it counted at the reserved
+  amount. `lookup_post` settles to 1 read when a post is returned, 0 when not.
+- Output that hits the max output tokens (`finish_reason == "length"`) fails
+  research and draft without retry (`InferenceOutputTruncated`); the call stays
+  counted. A truncated plan parses as an empty plan and is re-planned.
 - The OpenAI client runs with `max_retries=0`: Temporal's retry policy owns
   retries, so each retried request is reserved and counted.
 - `FakeReplyAgent` makes no paid calls and reserves nothing.

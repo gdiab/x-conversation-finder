@@ -13,18 +13,21 @@ from backend.config import get_settings
 from temporalio.exceptions import ApplicationError
 
 
-def x_returned_error_status(exc: BaseException) -> bool:
-    """True when the X API answered the request with an error status (issue #8).
+def x_rejected_request(exc: BaseException) -> bool:
+    """True when the X API refused the request with a 4xx status (issue #8).
 
-    X bills per post returned, and an error response returns none, so the
+    X bills per post returned, and a refused request returns none, so the
     attempt's reservation is released. The HTTP adapter raises
     httpx.HTTPStatusError, or a RateLimitError ApplicationError for 429.
-    Timeouts and connection errors return False: the request may have been
-    served, so the reservation stays counted.
+    408, 5xx, timeouts and connection errors return False: the request may
+    have been served, so the reservation stays counted.
     """
+    if isinstance(exc, ApplicationError):
+        return exc.type == "RateLimitError"
     if isinstance(exc, httpx.HTTPStatusError):
-        return True
-    return isinstance(exc, ApplicationError) and exc.type == "RateLimitError"
+        status = exc.response.status_code
+        return 400 <= status < 500 and status != 408
+    return False
 
 
 @dataclass
@@ -136,7 +139,7 @@ class XActivities:
                 max_results=input.max_results,
             )
         except Exception as e:
-            if x_returned_error_status(e):
+            if x_rejected_request(e):
                 release_x_reservation(
                     reserved_reads=input.max_results,
                     reservation_date=reservation_date,
@@ -180,7 +183,8 @@ class XActivities:
         
         Idempotent: same post_id is cached.
         Returns None if post is deleted (404).
-        Budget: Records 1 post read.
+        Budget: reserves 1 post read; settles to 1 when a post is returned and to
+        0 when none is (issue #8: X bills per post returned).
         """
         activity.logger.info(f"Looking up post {input.post_id} (key: {input.idempotency_key})")
         
@@ -202,7 +206,7 @@ class XActivities:
         try:
             post = await self._x_client.lookup_post(input.post_id)
         except Exception as e:
-            if x_returned_error_status(e):
+            if x_rejected_request(e):
                 release_x_reservation(
                     reserved_reads=1,
                     reservation_date=reservation_date,
@@ -213,7 +217,19 @@ class XActivities:
                 )
             raise
         
-        # Note: lookup_post always bills exactly 1 read, so no reconciliation needed
+        # Issue #8: X bills per post returned. A found post is 1 read; no post
+        # (404 or a response without data) returned nothing, so release the read.
+        reconcile_x_reads(
+            reserved_reads=1,
+            actual_reads=1 if post else 0,
+            reservation_date=reservation_date,
+            workflow_id=activity.info().workflow_id,
+            workflow_run_id=activity.info().workflow_run_id,
+            activity_id=activity.info().activity_id,
+            cost_per_read=settings.x_post_read_cost,
+        )
+        if not post:
+            cost_usd = 0.0
         if post:
             activity.logger.info(f"Found post {input.post_id} by @{post.author.username}, cost ${cost_usd:.4f}")
         else:
@@ -258,7 +274,7 @@ class XActivities:
                 max_results=max_results,
             )
         except Exception as e:
-            if x_returned_error_status(e):
+            if x_rejected_request(e):
                 release_x_reservation(
                     reserved_reads=max_results,
                     reservation_date=reservation_date,
