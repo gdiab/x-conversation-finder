@@ -652,7 +652,7 @@ async def test_an_interrupted_run_keeps_its_plan(tmp_path, no_x):
 
 def test_labels_and_model_names_with_ids_are_refused():
     assert harness.safe_label("after2")
-    for label in ("2124917236280553696", "run-2124917236", "a/b", "x" * 41):
+    for label in ("1000000000000000001", "run-1000000000", "a/b", "x" * 41):
         assert not harness.safe_label(label)
 
 
