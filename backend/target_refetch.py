@@ -136,13 +136,25 @@ async def refetch_stored_card_target(
     if post is not None:
         return "found"
 
-    _delete_post_text_sync(
-        DeletePostTextInput(
-            workflow_id=workflow_id,
-            idempotency_key=f"{workflow_id}:delete_text:eval:{run_key}",
-            post_id=card["post"]["id"],
+    from temporalio.exceptions import ApplicationError
+    from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
+
+    checkpoint_pending = None
+    try:
+        _delete_post_text_sync(
+            DeletePostTextInput(
+                workflow_id=workflow_id,
+                idempotency_key=f"{workflow_id}:delete_text:eval:{run_key}",
+                post_id=card["post"]["id"],
+            )
         )
-    )
+    except ApplicationError as e:
+        # issue #23: the removal committed; only the WAL checkpoint waits. The
+        # unbilled read is released below all the same, then the error is
+        # raised (a retry finds the card removed and finishes the checkpoint)
+        if e.type != WAL_CHECKPOINT_PENDING_ERROR:
+            raise
+        checkpoint_pending = e
     # Issue #17: X returned no post object for the gone post and billed
     # nothing. Released after the removal, so a failed release cannot keep
     # the text; it then stays counted (the safe direction).
@@ -154,4 +166,6 @@ async def refetch_stored_card_target(
         activity_id=call_id,
         cost_per_read=settings.x_post_read_cost,
     )
+    if checkpoint_pending is not None:
+        raise checkpoint_pending
     return "removed"

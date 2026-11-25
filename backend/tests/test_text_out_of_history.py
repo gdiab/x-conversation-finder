@@ -625,3 +625,29 @@ async def test_a_review_started_again_under_the_same_id_is_not_blocked_by_the_ea
             finally:
                 db.close()
             assert runs == {second.result_run_id}
+
+
+def test_a_retired_runs_late_attempt_writes_nothing(make_review_input):
+    """A timed-out activity of a closed Review whose thread finishes after a
+    restarted watch started the Review again cannot clear or overwrite the
+    new run's documents (review round 7)."""
+    from unittest import mock
+    from backend import review_docs
+
+    post_id = make_review_input().post_id
+    wid = "review:test:1001_retired"
+
+    def as_writer(run, seq, attempt=1):
+        return mock.patch.object(review_docs, "current_writer", return_value=(run, seq, attempt))
+
+    with as_writer("old", 1):
+        assert review_docs.claim_run(wid, post_id)
+        review_docs.save_doc(wid, post_id, "evidence", "old run evidence")
+    with as_writer("new", 1):
+        assert review_docs.claim_run(wid, post_id)  # retires "old", clears its documents
+        assert review_docs.find_doc(wid, post_id, "evidence", str) is None
+        review_docs.save_doc(wid, post_id, "evidence", "new run evidence")
+    with as_writer("old", 9, 1):  # the old run's late thread
+        assert not review_docs.claim_run(wid, post_id)
+        review_docs.save_doc(wid, post_id, "evidence", "late old write")
+    assert review_docs.load_doc(wid, post_id, "evidence", str) == "new run evidence"

@@ -326,29 +326,67 @@ def _writer_fields(writer: Optional[tuple]) -> dict:
     return {"writer_run": writer[0], "writer_seq": writer[1], "writer_attempt": writer[2]}
 
 
+# Which run of a workflow id owns its documents: {"owner": run id,
+# "retired": [earlier run ids]}. Written by each run's first activity.
+RUN_SLOT = "#run"
+
+
+def _superseded(db, workflow_id: str, writer: Optional[tuple]) -> bool:
+    """Whether `writer` belongs to a run that a later run of the same
+    workflow id has replaced (a timed-out activity of a closed Review whose
+    thread finished after a restarted watch started the Review again)."""
+    if writer is None:
+        return False
+    owner = db.get(ReviewDocDB, (workflow_id, RUN_SLOT))
+    return owner is not None and writer[0] in ((owner.data or {}).get("retired") or [])
+
+
+def _write_blocked(db, workflow_id: str, row, writer: Optional[tuple]) -> bool:
+    return _superseded(db, workflow_id, writer) or written_later(row, writer)
+
+
 @_text_safe
-def clear_earlier_runs(workflow_id: str) -> None:
-    """Delete the documents an earlier run of this workflow id wrote (a
-    Review started again by a restarted watch). Called by the run's first
-    activity (research_post), before it writes."""
+def claim_run(workflow_id: str, post_id: str) -> bool:
+    """Make the running activity's workflow run the owner of this workflow
+    id's documents; called by a run's first activity (research_post) before
+    it writes. A new run (a Review started again under the same id) retires
+    the previous owner and deletes its documents. Returns False for a run
+    already retired: its late activity then writes nothing."""
     writer = current_writer()
     if writer is None:
-        return
+        return True
+    run = writer[0]
     db = get_db()
     try:
         db.execute(sql_text("BEGIN IMMEDIATE"))
-        db.query(ReviewDocDB).filter(
-            ReviewDocDB.workflow_id == workflow_id,
-            ReviewDocDB.writer_run.isnot(None),
-            ReviewDocDB.writer_run != writer[0],
-        ).delete(synchronize_session=False)
+        row = db.get(ReviewDocDB, (workflow_id, RUN_SLOT))
+        data = dict(row.data or {}) if row is not None else {}
+        retired = list(data.get("retired") or [])
+        if run in retired:
+            db.commit()
+            return False
+        owner = data.get("owner")
+        if owner != run:
+            if owner:
+                retired.append(owner)
+            db.query(ReviewDocDB).filter(
+                ReviewDocDB.workflow_id == workflow_id,
+                ReviewDocDB.slot != RUN_SLOT,
+            ).delete(synchronize_session=False)
+            db.merge(ReviewDocDB(
+                workflow_id=workflow_id, slot=RUN_SLOT, post_id=post_id,
+                data={"owner": run, "retired": retired}, updated_at=_now(), **_writer_fields(None),
+            ))
         db.commit()
+        return True
     finally:
         db.close()
 
 
 def doc_written_later(db, workflow_id: str, slot: str, writer: Optional[tuple] = None) -> bool:
-    return written_later(db.get(ReviewDocDB, (workflow_id, slot)), writer or current_writer())
+    """Whether a write of `slot` by `writer` (default: the running activity)
+    would be a late attempt's, or a retired run's, and so is dropped."""
+    return _write_blocked(db, workflow_id, db.get(ReviewDocDB, (workflow_id, slot)), writer or current_writer())
 
 
 def claim_write(db, workflow_id: str, post_id: str, slot: str) -> bool:
@@ -358,7 +396,7 @@ def claim_write(db, workflow_id: str, post_id: str, slot: str) -> bool:
     the caller then drops. The marker holds no text, so it is kept after a
     removal like the card it guards."""
     writer = current_writer()
-    if written_later(db.get(ReviewDocDB, (workflow_id, slot)), writer):
+    if _write_blocked(db, workflow_id, db.get(ReviewDocDB, (workflow_id, slot)), writer):
         return False
     db.merge(ReviewDocDB(
         workflow_id=workflow_id, slot=slot, post_id=post_id, data={}, updated_at=_now(),
@@ -401,7 +439,7 @@ def save_doc_in(db, workflow_id: str, post_id: str, slot: str, value: Any) -> bo
     if _post_removed(db, post_id):
         raise post_removed_error("not storing it")
     writer = current_writer()
-    if written_later(db.get(ReviewDocDB, (workflow_id, slot)), writer):
+    if _write_blocked(db, workflow_id, db.get(ReviewDocDB, (workflow_id, slot)), writer):
         logger.info(f"Dropped a late attempt's write of {slot!r} ({workflow_id})")
         return False
     db.merge(ReviewDocDB(

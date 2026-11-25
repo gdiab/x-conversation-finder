@@ -178,12 +178,13 @@ class ReplyActivities:
         )
         
         if text_free:
-            # The run's first write: an earlier run of this workflow id (a
-            # Review started again by a restarted watch) leaves no documents
-            review_docs.clear_earlier_runs(activity.info().workflow_id)
-            review_docs.save_doc(
-                activity.info().workflow_id, post.id, review_docs.EVIDENCE_SLOT, evidence
-            )
+            # The run's first write: this run takes over the workflow id's
+            # documents from an earlier run (a Review started again by a
+            # restarted watch); a retired run's late attempt writes nothing
+            if review_docs.claim_run(activity.info().workflow_id, post.id):
+                review_docs.save_doc(
+                    activity.info().workflow_id, post.id, review_docs.EVIDENCE_SLOT, evidence
+                )
             return ResearchSummary(
                 confidence_score=evidence.confidence_score,
                 skip_reason=evidence.skip_reason,

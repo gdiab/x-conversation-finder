@@ -1019,3 +1019,27 @@ async def test_eval_refetch_removes_text_even_if_the_release_fails(make_review_i
     # The next eval run sees the removal and reads nothing
     assert await tr.refetch_stored_card_target(client, workflow_id, "run2", review_is_running=_finished) == "removed"
     assert client.target_lookups == 1
+
+
+@pytest.mark.asyncio
+async def test_eval_refetch_releases_the_read_when_the_checkpoint_is_pending(make_review_input, monkeypatch):
+    """issue #23 review round 7: the removal committed but a reader kept the
+    WAL checkpoint from completing. The lookup that found the post gone was
+    not billed, so its read is released before the retryable error."""
+    from temporalio.exceptions import ApplicationError
+    import backend.database
+    from backend.activities.store_activities import WAL_CHECKPOINT_PENDING_ERROR
+    from backend.target_refetch import refetch_stored_card_target
+
+    workflow_id = await _stored_card(make_review_input, "eval_pending")
+    client = TargetClient(["gone"])
+    reads_before = _x_reads()
+    real_checkpoint = backend.database.checkpoint_wal
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: False)
+    with pytest.raises(ApplicationError) as pending:
+        await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished)
+    assert pending.value.type == WAL_CHECKPOINT_PENDING_ERROR
+    assert _x_reads() == reads_before
+    assert _db_card(workflow_id)["post"]["text_removed"] is True
+    monkeypatch.setattr(backend.database, "checkpoint_wal", real_checkpoint)  # the reader is gone
+    assert await refetch_stored_card_target(client, workflow_id, "run1", review_is_running=_finished) == "removed"
