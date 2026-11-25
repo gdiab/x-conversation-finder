@@ -93,11 +93,26 @@ def safe_write(path: Path, text: str) -> None:
 
 
 def _app_database(settings) -> Path:
-    """The SQLite file the app's code (budget, removal) writes."""
-    url = settings.get_resolved_database_url()
+    """The SQLite file the running app uses. The app resolves a relative
+    DATABASE_URL against its own checkout, which is the one holding .env:
+    the current directory (the script's code can be another checkout)."""
+    url = settings.database_url or "sqlite:///data/x_conversation_finder.db"
     if not url.startswith("sqlite:///"):
         sys.exit("The re-fetch needs the app's SQLite database (DATABASE_URL); pass --no-refetch otherwise")
-    return Path(url[len("sqlite:///"):])
+    path = Path(url[len("sqlite:///"):])
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _use_app_database(app_db: Path) -> None:
+    """Point the app code the re-fetch reuses (budget ledger, removal) at the
+    app's database file, whatever checkout the code comes from."""
+    from backend.config import get_settings
+
+    os.environ["DATABASE_URL"] = f"sqlite:///{app_db.resolve()}"
+    get_settings.cache_clear()
+    resolved = get_settings().get_resolved_database_url()  # what backend.database opens
+    if not (resolved.startswith("sqlite:///") and os.path.samefile(resolved[len("sqlite:///"):], app_db)):
+        sys.exit("Could not point the app code at the app's database")
 
 
 async def _refetcher(args, settings, cap, db: Path):
@@ -122,8 +137,10 @@ async def _refetcher(args, settings, cap, db: Path):
     if not (app_db.exists() and db.exists() and os.path.samefile(app_db, db)):
         sys.exit(
             f"--db is not the app's database ({app_db}): a removal the re-fetch records must reach the "
-            "app's copy of the text. Run on the app's database, or pass --no-refetch for synthetic data."
+            "app's copy of the text. Run from the checkout that holds your .env, on the app's database, "
+            "or pass --no-refetch for synthetic data."
         )
+    _use_app_database(app_db)
     try:
         temporal = await Client.connect(settings.temporal_host, namespace=settings.temporal_namespace)
     except Exception as e:

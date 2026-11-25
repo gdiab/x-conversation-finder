@@ -1536,3 +1536,22 @@ async def test_a_removal_recorded_between_samples_is_counted_once(tmp_path, no_x
 
     assert [r.outcome for r in records] == ["removed"]
     assert excluded["post_text_removed"] == 1
+
+
+def test_a_relative_database_url_is_the_one_in_the_checkout_holding_env(tmp_path, monkeypatch):
+    """Found by the smoke run: the app resolves a relative DATABASE_URL
+    against its code's checkout; the script's code can be another checkout,
+    so the app's database is resolved against the current directory (the
+    checkout holding .env), and the reused app code is pointed at it."""
+    from backend.config import get_settings
+
+    redraft_harness = _script()
+    app_checkout = tmp_path / "app"
+    app_checkout.mkdir()
+    app_db = _make_db(app_checkout / "x.db")
+    monkeypatch.chdir(app_checkout)
+    relative = get_settings().model_copy(update={"database_url": "sqlite:///./x.db"})
+
+    assert redraft_harness._app_database(relative).resolve() == app_db.resolve()
+    redraft_harness._use_app_database(redraft_harness._app_database(relative))
+    assert get_settings().get_resolved_database_url() == f"sqlite:///{app_db.resolve()}"
