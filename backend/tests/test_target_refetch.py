@@ -601,6 +601,43 @@ async def test_eval_refetch_over_budget_raises_and_keeps_text(make_review_input)
     assert QUESTION in _db_card(workflow_id)["post"]["text"]
 
 
+
+@pytest.mark.asyncio
+async def test_founder_skip_is_stored_so_the_eval_can_recheck_it(make_review_input):
+    """A founder skip used to leave the stored card "pending" after the
+    workflow ended, so the eval hook called it live forever."""
+    from backend.target_refetch import refetch_stored_card_target
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, TargetClient(["found"])):
+            _, handle = await _start(env, make_review_input, "eval_founder_skip")
+            await handle.signal("skip", args=["Not relevant", str(uuid.uuid4())])
+            assert await handle.result() == "skipped"
+            stored = _db_card(handle.id)
+            assert stored["status"] == "skipped"
+            assert stored["skip_reason"] == "Not relevant"
+            await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
+
+    client = TargetClient(["gone"])
+    assert await refetch_stored_card_target(client, handle.id, "run1") == "removed"
+    assert _db_card(handle.id)["post"]["text_removed"] is True
+
+
+@pytest.mark.asyncio
+async def test_removal_redacts_model_written_topic_and_source():
+    from backend.activities.store_activities import redact_post_text_copies
+
+    out = redact_post_text_copies({
+        "matched_topic": f"posts like '{QUESTION}'",
+        "founder_materials": [
+            {"source": f"brief, for '{QUESTION}'", "passage": "Our product records work.", "relevance": ""},
+            {"source": "product_brief", "passage": "It runs locally.", "relevance": "fits"},
+        ],
+    })
+    assert QUESTION not in json.dumps(out)
+    assert out["founder_materials"][1]["source"] == "product_brief"
+    assert out["founder_materials"][0]["passage"] == "Our product records work."
+
 @pytest.mark.asyncio
 async def test_eval_refetch_unknown_card():
     from backend.target_refetch import refetch_stored_card_target

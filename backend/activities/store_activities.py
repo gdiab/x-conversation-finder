@@ -18,6 +18,16 @@ POST_TEXT_REMOVED = "[removed - post deleted]"
 POST_REMOVED_SKIP_REASON = "Post removed: the target post was deleted or is no longer visible on X"
 
 
+def _redact_material(material: Dict[str, Any]) -> Dict[str, Any]:
+    """A founder material without its model-written relevance note and source label."""
+    redacted = dict(material)
+    if redacted.get("relevance"):
+        redacted["relevance"] = POST_TEXT_REMOVED
+    if redacted.get("source") and redacted["source"] != "product_brief":
+        redacted["source"] = POST_TEXT_REMOVED
+    return redacted
+
+
 def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return a copy of a card's evidence dict with every copy of the post text removed.
 
@@ -25,6 +35,9 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
     get_card query, so both views redact the same fields. Every free-text
     field a model wrote after reading the post can quote it:
     - why_it_fits, and each founder material's relevance note;
+    - issue #9: matched_topic and each founder material's source label, which
+      the research model also writes freely (the default source
+      "product_brief" is kept);
     - issue #4: reply_fit.brief_problem_span and reply_fit.rejected_span;
     - issue #5: reply_plan.target_point, reply_plan.mention_product_reason,
       and reply_plan.reply_type when it is not one of the known values.
@@ -33,13 +46,13 @@ def redact_post_text_copies(evidence_data: Optional[Dict[str, Any]]) -> Dict[str
     from backend.models.reply_plan import REPLY_TYPES
 
     evidence_data = dict(evidence_data or {})
-    if evidence_data.get("why_it_fits"):
-        evidence_data["why_it_fits"] = POST_TEXT_REMOVED
+    for key in ("why_it_fits", "matched_topic"):
+        if evidence_data.get(key):
+            evidence_data[key] = POST_TEXT_REMOVED
     materials = evidence_data.get("founder_materials")
     if isinstance(materials, list):
         evidence_data["founder_materials"] = [
-            {**m, "relevance": POST_TEXT_REMOVED} if isinstance(m, dict) and m.get("relevance") else m
-            for m in materials
+            _redact_material(m) if isinstance(m, dict) else m for m in materials
         ]
     reply_fit = evidence_data.get("reply_fit")
     if isinstance(reply_fit, dict):

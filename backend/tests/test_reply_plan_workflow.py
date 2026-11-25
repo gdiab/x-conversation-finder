@@ -909,6 +909,6 @@ def test_redact_post_text_copies_covers_issue_4_and_5_fields():
     assert out["reply_fit"]["post_kind"] == "question"
     assert out["reply_plan"]["target_point"] == POST_TEXT_REMOVED
     assert out["reply_plan"]["reply_type"] == "answer_question"
-    assert out["matched_topic"] == "agents"
+    assert out["matched_topic"] == POST_TEXT_REMOVED  # issue #9: model-written too
     assert evidence["why_it_fits"].startswith("The post"), "input is not mutated"
     assert redact_post_text_copies(None) == {}

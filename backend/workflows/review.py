@@ -36,6 +36,10 @@ KEEP_TARGET_ON_REPLY_404_PATCH_ID = "keep-target-on-reply-404-v1"
 # Patch id (issue #9): approve re-fetches the target post first (removal duty,
 # ADR-0006/0086). Reviews approved before this replay without the re-fetch.
 TARGET_REFETCH_PATCH_ID = "target-refetch-on-approve-v1"
+# Patch id (issue #9): a founder skip is written to the stored card. Before,
+# the card stayed "pending" after the workflow ended, so the eval re-fetch
+# (backend/target_refetch.py) treated it as live and never checked it.
+PERSIST_FOUNDER_SKIP_PATCH_ID = "persist-founder-skip-v1"
 
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
@@ -489,6 +493,17 @@ class ReviewWorkflow:
         
         if self.skipped:
             workflow.logger.info("Skipped by founder")
+            if workflow.patched(PERSIST_FOUNDER_SKIP_PATCH_ID):
+                await workflow.execute_activity(
+                    update_card,
+                    UpdateCardInput(
+                        workflow_id=workflow_id,
+                        idempotency_key=f"{workflow_id}:update:skip",
+                        status="skipped",
+                        skip_reason=self.skip_reason,
+                    ),
+                    start_to_close_timeout=timedelta(seconds=QUICK_ACTIVITY_TIMEOUT_SEC),
+                )
             return "skipped"
         
         return None
