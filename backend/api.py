@@ -75,7 +75,13 @@ async def retry_wal_checkpoint(interval_sec: float = WAL_CHECKPOINT_RETRY_SEC) -
 
     while True:
         await asyncio.sleep(interval_sec)
-        if await asyncio.to_thread(checkpoint_wal):
+        try:
+            done = await asyncio.to_thread(checkpoint_wal)
+        except Exception:
+            # A transient database error must not end the retries
+            logger.exception("WAL checkpoint after the removal backfill failed; retrying")
+            continue
+        if done:
             logger.info("WAL checkpoint after the removal backfill completed")
             return
 

@@ -358,11 +358,19 @@ async def test_the_api_retries_a_pending_backfill_checkpoint_until_it_completes(
     import backend.database
     from backend.api import retry_wal_checkpoint
 
-    results = iter([False, False, True])
+    results = iter([False, OSError("disk I/O error"), False, True])
     calls = []
-    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append(1) or next(results))
+
+    def checkpoint():
+        calls.append(1)
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result  # a transient error does not end the retries
+        return result
+
+    monkeypatch.setattr(backend.database, "checkpoint_wal", checkpoint)
     await asyncio.wait_for(retry_wal_checkpoint(interval_sec=0), timeout=5)
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_redact_removed_post_tolerates_a_post_without_fields():
