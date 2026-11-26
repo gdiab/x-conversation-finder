@@ -168,7 +168,7 @@ async def test_research_prompt_asks_for_features_not_a_strength():
 
     prompt = completions.calls[0]["messages"][1]["content"]
     assert "topic_match_strength" not in prompt
-    for key in ("post_kind", "brief_problem_span", "in_others_thread", "is_vendor_post"):
+    for key in ("post_kind", "post_problem_quote", "in_others_thread", "is_vendor_post"):
         assert key in prompt
     for kind in POST_KINDS:
         assert kind in prompt
@@ -367,7 +367,7 @@ def test_thread_position(post_kw, model_value, expected):
 def test_parse_reply_fit_rejects_malformed_values():
     fit = parse_reply_fit({
         "post_kind": "Rant",
-        "brief_problem_span": 17,
+        "post_problem_quote": 17,
         "in_others_thread": "yes",
         "is_vendor_post": "FALSE",
     })
@@ -583,7 +583,7 @@ async def test_passing_post_is_drafted(make_review_input, x_activities):
 async def test_malformed_founder_materials_skip_instead_of_failing(payload):
     text = "How do you keep a record of what each coding agent did?"
     completions = JsonModeCompletions({
-        "post_kind": "question", "brief_problem_span": text,
+        "post_kind": "question", "post_problem_quote": text,
         "in_others_thread": False, "is_vendor_post": False, **payload,
     })
     agent = PlainReplyAgent(

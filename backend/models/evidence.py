@@ -116,7 +116,10 @@ class ReplyFit:
 
     # Proposed by the research model
     post_kind: Optional[str] = None  # one of backend.config.confidence.POST_KINDS
-    brief_problem_span: Optional[str] = None  # after the check: verified post text, or None
+    # The model's "post_problem_quote" (issue #44: the model-facing key names
+    # the post; this stored name is kept for existing cards). After the
+    # check: verified post text, or None
+    brief_problem_span: Optional[str] = None
     in_others_thread: Optional[bool] = None
     is_vendor_post: Optional[bool] = None
     # Set by code

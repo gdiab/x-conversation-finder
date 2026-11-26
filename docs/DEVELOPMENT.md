@@ -120,6 +120,8 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `test_removal_author_edit.py`: issue #35. After a removal, no author name, handle, profile URL, post URL or edited draft text is left in the stored card, the stored post or the API's card, for this card and another account's card of the same post (both draft modes), nor in the SQLite file or its `-wal`
 - `test_product_url.py`: issue #41. A passing draft that names the product ends with exactly one ` <url>` (both draft modes, also after a nudge and when the model wrote the URL itself); a draft that does not name the product, or a Review without a URL, has none; the check of an edit is the same with and without the link; the 256-character budget in the check, the writer prompt, the edit check and the redraft harness; text-free histories recorded on main d296ec3 replay
 - `test_redraft_harness.py`: The offline redraft harness (issue #29) with fake adapters: no X calls, the database left unchanged, the workflow's redraft steps, the spend cap, a summary without text, and `--limit` counted after the skips (issue #34)
+- `test_research_post_quote.py`: issue #44. The research prompt asks for `post_problem_quote`, a quote of the post (between its markers, right before the keys) and never of the brief; the parse reads only that key into `ReplyFit.brief_problem_span`; a brief quote and a near quote are still `not_in_post`; histories recorded on main fd3f38e replay
+- `test_research_harness.py`: The offline research eval (issue #44) with fake adapters: no X calls, the database left unchanged, only posts that still have text, a removal stops the post, the spend cap, brief quotes counted, and a summary without text
 
 ### E2E Scripts
 
@@ -257,6 +259,20 @@ python <repo>/scripts/redraft_harness.py run --db x_conversation_finder.db \
 - **Samples.** The drafter runs at temperature 0.7, so one run per post is noisy; `--samples 3` runs the written path three times per post. With `gpt-4o-mini` a sample of 21 posts costs about $0.02 in model calls; the re-fetch adds about $0.005 per post found (about $0.105 for 21), so a run of 21 posts needs a cap of about $0.13.
 
 The harness is the first piece of switch criterion 3 (the blind comparison of `assembled` against `written` on stored evidence); the comparison and its scoring are not built yet.
+
+### Research eval (issue #44)
+
+The research model proposes the part of the post that shows a problem the brief solves; code accepts it only if it is in the post, word for word (`match_span` in `backend/gate/reply_fit.py`), and otherwise skips the post as `no_problem_span`. Until issue #44 the prompt asked for `brief_problem_span`, right after the brief, and the model often copied the brief's own problem statement: on 2026-11-26, 70 of the 71 `not_in_post` cards held a brief quote in `reply_fit.rejected_span`. The prompt now shows the brief first and the post between `<<<POST` and `POST>>>` right before the keys, asks for `post_problem_quote` first, and says never to copy from the brief. Only the model-facing key changed: the card still stores the checked quote as `reply_fit.brief_problem_span`, so stored cards and running Reviews read as before.
+
+`scripts/research_harness.py` measures research-prompt changes on stored posts. It runs the research step (the model, then the code's fit checks) against the real model on every stored card whose post still has its text, once per post and watch settings, including cards that were skipped at research. It makes no X call, opens the database read-only and never writes it, and checks before each model call that the post's removal is not recorded. It uses the watch settings the redraft harness exports (see "Redraft harness"; the export reads each watch's current run, so all cards are researched with the current brief) and the same spend cap (`--max-cost`, default $0.25, priced with `INFERENCE_*_TOKEN_COST_USD`) and output rules (git-ignored paths only). Run it from the checkout that holds your `.env`:
+
+```bash
+python <repo>/scripts/research_harness.py --db x_conversation_finder.db \
+  --settings <repo>/eval-out/watch-settings.json --out-root <repo>/eval-out/research \
+  --label before --samples 3
+```
+
+`<out-root>/<label>/report.json` has each run's proposal, check and skip rule; `summary.md` has the aggregate numbers only: the `span_check` counts, the share of `not_in_post`, how many of those quote the brief (`verbatim`: the whole quote is in the brief, ignoring case and spaces; `partial`: it shares a run of 6 words with it), the skip rules, and how many runs pass the fit rules (no skip rule; the confidence threshold is not applied, because freshness has changed since the post was found). With `gpt-4o-mini` a run costs about $0.00025 per post and sample.
 
 ### Post removal (ADR-0006, issue #9)
 

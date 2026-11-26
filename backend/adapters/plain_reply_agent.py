@@ -87,15 +87,28 @@ def _strict_bool(value: Any) -> Optional[bool]:
     return None
 
 
+# Issue #44: the research model's problem quote. The key the model sees says
+# "post" (it used to be "brief_problem_span", and the model often copied the
+# brief's own problem statement), and the post sits between these markers
+# right before the keys. The stored field keeps its name (ReplyFit.brief_problem_span).
+POST_QUOTE_KEY = "post_problem_quote"
+POST_START = "<<<POST"
+POST_END = "POST>>>"
+BRIEF_START = "<<<BRIEF"
+BRIEF_END = "BRIEF>>>"
+
+
 def parse_reply_fit(result: dict) -> ReplyFit:
     """Read the model's proposed reply features, keeping only well-typed values.
 
     An unknown post_kind or a malformed flag becomes None, which the skip
-    rules treat as "research incomplete" rather than guessing.
+    rules treat as "research incomplete" rather than guessing. The problem
+    quote is read from POST_QUOTE_KEY; code checks it against the post
+    (backend/gate/reply_fit.py), so a quote under any other key is ignored.
     """
     kind = result.get("post_kind")
     kind = kind.strip().lower() if isinstance(kind, str) else None
-    span = result.get("brief_problem_span")
+    span = result.get(POST_QUOTE_KEY)
     return ReplyFit(
         post_kind=kind if kind in POST_KINDS else None,
         brief_problem_span=span if isinstance(span, str) and span.strip() else None,
@@ -425,16 +438,26 @@ class PlainReplyAgent(ReplyAgentPort):
         if post.in_reply_to_user_id:
             thread_hint = "\nThis post is a reply to another post."
 
-        prompt = f"""Analyze this X post. Decide whether the founder of the product below should reply to it.
+        prompt = f"""Analyze an X post. Decide whether the founder of the product below should reply to it.
 
-Post: {post.text}
-Author: @{post.author.username} ({post.author.followers_count} followers){thread_hint}
+PRODUCT BRIEF (the founder's own material about the product):
+{BRIEF_START}
+{product_brief}
+{BRIEF_END}
+
+THE POST (written by @{post.author.username}, {post.author.followers_count} followers){thread_hint}
+{POST_START}
+{post.text}
+{POST_END}
 Topic: {topic}
 
-Product Brief:
-{product_brief}
-
 Return a JSON object with these keys:
+- {POST_QUOTE_KEY}: copy, character for character, the part of THE POST (the text between
+  {POST_START} and {POST_END}) where the poster shows a problem that the product brief solves.
+  Quote the poster's own words only. Never copy text from the product brief: the brief
+  describes the problem in the founder's words, and code rejects any quote that is not in
+  the post. Use null if no part of the post shows such a problem.
+  Do not paraphrase, shorten or fix the text.
 - post_kind: exactly one of {", ".join(POST_KINDS)}.
     question: the poster asks for help, advice or a recommendation.
     problem: the poster describes a problem they have now.
@@ -444,15 +467,12 @@ Return a JSON object with these keys:
     promo: the poster promotes a product, service, course or event.
     roundup: a list or digest of links, tools or updates.
     news: the poster reports news about someone else.
-- brief_problem_span: copy, character for character, the part of the post that shows a
-  problem the product brief solves. Use null if no part of the post shows such a problem.
-  Do not paraphrase, shorten or fix the text.
 - in_others_thread: true if the post is a reply inside a conversation started by another account.
 - is_vendor_post: true if the poster promotes their own product or company, competing or not.
 - matched_topic: which topic this relates to.
 - why_it_fits: one short sentence quoting the post. If it does not fit, say why.
 - founder_materials: list of {{source, passage, relevance}} that a reply could use. Copy each
-  passage from the brief character for character; a passage that is not in the brief is
+  passage from the product brief (between {BRIEF_START} and {BRIEF_END}) character for character; a passage that is not in the brief is
   discarded. Use an empty list if nothing in the brief applies.
 
 Most posts are not reply opportunities. Do not stretch a post to fit the brief."""
