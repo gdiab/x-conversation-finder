@@ -21,7 +21,8 @@ import unicodedata
 from backend.models import FounderMaterial, Segment, ClaimGateResult
 from backend.models.summaries import GateSummary
 from backend.gate.product_link import (
-    PRODUCT_LINK_CHARS, X_LINK_CHARS, append_product_link, linked_max_chars, strip_product_link,
+    PRODUCT_LINK_CHARS, X_LINK_CHARS, append_product_link, holds_product_link, linked_max_chars,
+    strip_product_link,
 )
 from backend.review_docs import text_free_activity as _text_free_activity
 from backend.gate.non_claim_set import (
@@ -662,13 +663,19 @@ async def claim_gate(input: ClaimGateInput) -> Union[ClaimGateResult, GateSummar
                 or any(seg.kind == "claim" for seg in result.segments)
             )
             limit = MAX_REPLY_CHARS - PRODUCT_LINK_CHARS
-            if link and len(result.draft_text.strip()) > limit:
+            length = len(result.draft_text.strip())
+            if holds_product_link(result.draft_text, input.product_url):
+                # The claim quotes the URL: no second link is added, and X
+                # counts the quoted one as a link
+                limit = MAX_REPLY_CHARS
+                length = length - len(input.product_url) + X_LINK_CHARS
+            if link and length > limit:
                 # Issue #41: a draft that names the product gets the link, so
                 # its sentences must leave room for it; a redraft is asked for
                 link = False
                 reason = (
                     f"The draft must be at most {limit} characters, because the product link is added "
-                    f"after it and X counts a link as {X_LINK_CHARS} characters (got {len(result.draft_text.strip())})"
+                    f"after it and X counts a link as {X_LINK_CHARS} characters (got {length})"
                 )
                 result.passed = False
                 result.failed_sentences = list(result.failed_sentences) + [("[reply]", reason)]
