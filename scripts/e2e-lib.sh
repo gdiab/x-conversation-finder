@@ -1,8 +1,8 @@
 #!/bin/bash
 # Shared setup for the e2e scripts (issue #27). Source it; do not run it.
 #
-# The worker and the API run in E2E_DIR, which holds no .env, so the app's
-# .env settings do not apply; the settings that matter are exported below.
+# The worker, the API and the script's Python steps run in a new empty
+# directory, so no .env applies; the settings that matter are exported below.
 #
 # Each script starts its own stack: a Temporal dev server (in memory), a
 # worker and an API, on ports nothing else is using, with fake adapters and a
@@ -46,8 +46,11 @@ e2e_configure() {
     E2E_DIR="${E2E_DIR:-$WORKSPACE_ROOT/data/e2e}"
     mkdir -p "$E2E_DIR"
     E2E_DIR="$(cd "$E2E_DIR" && pwd)"
-    # Every Python process of the script runs here, where no .env is read
-    cd "$E2E_DIR"
+    # Every Python process of the script runs in a new empty directory, so no
+    # .env is read there (the app's settings read .env from the working directory)
+    E2E_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/x-finder-e2e.XXXXXX")"
+    cd "$E2E_RUN_DIR"
+    trap e2e_cleanup EXIT
     E2E_DB="$E2E_DIR/$E2E_NAME.db"
     E2E_API="http://127.0.0.1:$E2E_API_PORT/api"
 
@@ -122,6 +125,7 @@ e2e_cleanup() {
     for pid in "${E2E_PIDS[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
+    cd / && rmdir "$E2E_RUN_DIR" 2>/dev/null || true
     echo "✓ Services stopped"
 }
 
@@ -138,8 +142,6 @@ e2e_start_stack() {
     "$PYTHON" -c "from backend.database import init_db; init_db()" || e2e_fail "Database initialization failed"
     echo "✓ Database initialized"
     echo ""
-
-    trap e2e_cleanup EXIT
 
     local log_prefix="$E2E_DIR/$E2E_NAME"
     echo "Starting Temporal dev server..."
