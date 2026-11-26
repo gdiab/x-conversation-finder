@@ -13,7 +13,6 @@
 #   E2E_TEMPORAL_PORT     Temporal frontend port (default 7243)
 #   E2E_TEMPORAL_UI_PORT  Temporal web UI port (default 8243)
 #   E2E_API_PORT          API port (default: per script)
-#   E2E_DIR               SQLite file and logs (default <repo>/data/e2e)
 #   PYTHON                Python interpreter (default <repo>/.venv/bin/python, else python3)
 #
 # After e2e_start_stack, E2E_API is the API base URL (http://127.0.0.1:<port>/api).
@@ -49,13 +48,14 @@ e2e_configure() {
     E2E_TEMPORAL_PORT="${E2E_TEMPORAL_PORT:-7243}"
     E2E_TEMPORAL_UI_PORT="${E2E_TEMPORAL_UI_PORT:-8243}"
     E2E_API_PORT="${E2E_API_PORT:-$2}"
-    E2E_DIR="${E2E_DIR:-$WORKSPACE_ROOT/data/e2e}"
+    # The SQLite file and logs: a gitignored folder only these scripts use,
+    # never a location from the environment (each run deletes its file there)
+    E2E_DIR="$WORKSPACE_ROOT/data/e2e"
     mkdir -p "$E2E_DIR"
-    E2E_DIR="$(cd "$E2E_DIR" && pwd)"
     # Every Python process of the script runs in a new empty directory, so no
     # .env is read there (the app's settings read .env from the working directory)
     E2E_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/x-finder-e2e.XXXXXX")"
-    cd "$E2E_RUN_DIR"
+    cd "$E2E_RUN_DIR" || e2e_fail "Could not enter $E2E_RUN_DIR"
     trap e2e_cleanup EXIT
     E2E_DB="$E2E_DIR/$E2E_NAME.db"
     E2E_API="http://127.0.0.1:$E2E_API_PORT/api"
