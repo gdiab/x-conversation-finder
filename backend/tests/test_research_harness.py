@@ -252,7 +252,9 @@ async def test_the_spend_cap_refuses_the_call_that_could_pass_it(tmp_path):
     ("You become the one who replays every dropped event by hand, again", "partial"),
     ("our webhook consumer drops events", "none"),
     ("Relay delivers", "verbatim"),  # a short quote counts when all of it is in the brief
-    ("Relay delivers events on time", "none"),  # shorter than a run, and not all in the brief
+    ("Relay delivers events on time", "none"),
+    ('"Relay delivers"', "verbatim"),  # one pair of wrapping quotes, as match_span drops
+    (f"\u201c{BRIEF_PROBLEM}\u201d", "verbatim"),  # shorter than a run, and not all in the brief
     (None, "none"),
     ("", "none"),
 ])
@@ -280,3 +282,94 @@ def test_the_script_refuses_an_output_path_git_would_track(tmp_path):
     assert result.returncode != 0
     assert "Refusing to write" in result.stderr
     assert not (repo / "reports").exists()
+
+
+def _load_script():
+    script = Path(__file__).resolve().parents[2] / "scripts" / "research_harness.py"
+    sys.path.insert(0, str(script.parent))
+    try:
+        import research_harness
+    finally:
+        sys.path.remove(str(script.parent))
+    return research_harness
+
+
+def _record_removal(db: Path, post_id: str) -> None:
+    """Mark the post removed on its card, as delete_post_text records it."""
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    try:
+        for workflow_id, post_data in conn.execute("SELECT workflow_id, post_data FROM review_cards").fetchall():
+            post = json.loads(post_data)
+            if post.get("id") == post_id:
+                post.update(text="[Post text removed]", text_removed=True)
+                conn.execute("UPDATE review_cards SET post_data = ? WHERE workflow_id = ?",
+                             (json.dumps(post), workflow_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_the_script_stops_a_post_removed_between_samples_and_sweeps_earlier_reports(tmp_path, monkeypatch):
+    """Through the script's own wiring (its database-backed removal check):
+    a removal the app records after a post's first sample stops the next
+    call, and the quotes of that post leave this report and earlier ones."""
+    import openai
+
+    script = _load_script()
+    db = _make_db(tmp_path / "cards.db")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(json.dumps({
+        "watches": {key: dataclasses.asdict(value) for key, value in SETTINGS.items()},
+        "review_topics": TOPICS,
+    }))
+    out_root = tmp_path / "out"
+    # An earlier run's report that quoted post 3001
+    earlier = out_root / "before" / "report.json"
+    earlier.parent.mkdir(parents=True)
+    earlier.write_text(json.dumps({"label": "before", "summary": {}, "runs": [
+        {"post_id": "3001", "accepted_span": "How do you retry deliveries?", "rejected_span": None},
+        {"post_id": "3002", "accepted_span": "How do you retry deliveries?", "rejected_span": None},
+    ]}))
+    sent = []
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=self)
+
+        async def create(self, **kwargs):
+            prompt = kwargs["messages"][1]["content"]
+            sent.append(prompt)
+            if len(sent) == 1:
+                _record_removal(db, "3001")  # recorded while the first sample ran
+            body = {"post_kind": "question", POST_QUOTE_KEY: "How do you retry deliveries?",
+                    "in_others_thread": False, "is_vendor_post": False, "founder_materials": []}
+            return SimpleNamespace(
+                model="fake-model",
+                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(body)), finish_reason="stop")],
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=10),
+            )
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setattr(script, "_settings", lambda: SimpleNamespace(
+        openai_api_key="sk-test", openai_base_url=None, openai_model="fake-model",
+        inference_input_token_cost_usd=1e-7, inference_output_token_cost_usd=1e-7,
+    ))
+    args = SimpleNamespace(db=str(db), settings=str(settings_file), out_root=str(out_root), label="after",
+                           samples=2, limit=0, max_cost=0.10)
+    await script.run(args)
+
+    # 3001 once (its removal stopped the second sample), 3002 and 3005 twice: 5, not 6
+    assert len(sent) == 5
+    report = json.loads((out_root / "after" / "report.json").read_text())
+    runs_3001 = [r for r in report["runs"] if r["post_id"] == "3001"]
+    # The first sample's result is emptied; the second never ran
+    assert [r["outcome"] for r in runs_3001] == ["removed", "removed"]
+    assert report["summary"]["outcomes"] == {"removed": 2, "researched": 4}
+    assert not any(r.get("removed_after_run") for r in report["runs"])  # this run's own redaction
+    assert all(r["accepted_span"] is None and r["rejected_span"] is None for r in runs_3001)
+    swept = json.loads(earlier.read_text())["runs"]
+    assert swept[0] == {"post_id": "3001", "accepted_span": None, "rejected_span": None, "removed_after_run": True}
+    assert swept[1]["accepted_span"] == "How do you retry deliveries?"

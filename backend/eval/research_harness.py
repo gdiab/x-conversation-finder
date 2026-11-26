@@ -11,8 +11,9 @@ What it does and does not do:
 - It makes no X call: the post comes from the stored card. A card whose post
   text was removed (issue #9) is not used, and a removal recorded during a
   run stops that post's next model call.
-- It reads the database through a read-only SQLite connection and never
-  writes it.
+- It reads the database through a read-only SQLite connection and changes
+  none of its data. (SQLite may still update the shared-memory index, the
+  -shm file, as any reader of a WAL database does.)
 - Every model call goes through the redraft harness's spend cap (SpendCap),
   which refuses a call whose worst-case cost would pass the cap.
 
@@ -47,7 +48,7 @@ from backend.eval.written_harness import (
     _stop_if_removed,
     post_id_of,
 )
-from backend.gate.reply_fit import assess_reply_fit, normalize_text
+from backend.gate.reply_fit import _WRAPPING_QUOTES, assess_reply_fit, normalize_text
 from backend.models import Post
 from backend.ports.reply_agent import ReplyAgentPort
 
@@ -143,7 +144,11 @@ def brief_quote_kind(span: Optional[str], brief: str) -> str:
     "none". Used to measure issue #44, never to decide a skip."""
     if not isinstance(span, str) or not span.strip():
         return "none"
-    if normalize_text(span) in normalize_text(brief):
+    span = span.strip()
+    # One pair of wrapping quotes is dropped, as match_span drops it
+    if len(span) > 2 and _WRAPPING_QUOTES.get(span[0]) == span[-1]:
+        span = span[1:-1].strip()
+    if span and normalize_text(span) in normalize_text(brief):
         return "verbatim"
     span_words, brief_words = _words(span), _words(brief)
     n = BRIEF_RUN_WORDS
@@ -241,6 +246,21 @@ def redact_removed(records: Sequence[ResearchRecord], is_removed: Callable[[str]
             r.outcome = "removed"
             r.accepted_span = r.rejected_span = None
             changed += 1
+    return changed
+
+
+def redact_report(report: Dict[str, Any], is_removed: Callable[[str], bool]) -> bool:
+    """Empty the quotes of every run in an earlier report.json whose post's
+    removal is now recorded. The summary holds no text and is kept. Returns
+    whether the report changed."""
+    changed = False
+    for run in report.get("runs") or []:
+        if not isinstance(run, dict) or not is_removed(str(run.get("post_id"))):
+            continue
+        if run.get("accepted_span") is not None or run.get("rejected_span") is not None:
+            run["accepted_span"] = run["rejected_span"] = None
+            run["removed_after_run"] = True
+            changed = True
     return changed
 
 

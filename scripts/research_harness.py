@@ -3,8 +3,8 @@
 
 Runs the research step of a Review (the research model, then the code's fit
 checks) against the real model on posts already stored in the local
-database, and writes a report. It makes no X call and never writes the
-database. See backend/eval/research_harness.py and docs/DEVELOPMENT.md
+database, and writes a report. It makes no X call and changes none of the
+database's data. See backend/eval/research_harness.py and docs/DEVELOPMENT.md
 ("Research eval").
 
 Run it from the checkout that holds your .env (the OpenAI key and model come
@@ -92,12 +92,36 @@ async def run(args) -> None:
     )
     # A removal recorded during the run: its quotes stay out of the report
     redact_removed(records, is_removed)
+    swept = sweep_earlier_reports(Path(args.out_root), is_removed)
     summary = summarize(records, excluded, cap, stopped_by_cap=stopped)
     models = sorted({c.model for c in cap.calls})
     safe_write(out_dir / "report.json", report_json(args.label, records, summary, models))
     safe_write(out_dir / "summary.md", summary_markdown(summary))
     print(summary_markdown(summary))
     print(f"wrote {out_dir}/report.json and summary.md")
+    # Once more, for a removal recorded while this report was written
+    if not (sweep_earlier_reports(Path(args.out_root), is_removed) and swept):
+        sys.exit("Some reports could not be checked for recorded removals (see above)")
+
+
+def sweep_earlier_reports(out_root: Path, is_removed) -> bool:
+    """Apply recorded removals to every research report.json under out_root:
+    the quotes of a removed post are emptied. Each file on its own; one that
+    cannot be read or written is named. Returns whether all were swept."""
+    from backend.eval.research_harness import redact_report
+
+    complete = True
+    for earlier in sorted(out_root.glob("*/report.json")):
+        try:
+            report = json.loads(earlier.read_text())
+            if redact_report(report, is_removed):
+                safe_write(earlier, json.dumps(report, indent=2, ensure_ascii=False))
+                print(f"applied recorded removals to {earlier}")
+        except (OSError, ValueError, TypeError, AttributeError, SystemExit) as e:
+            complete = False
+            print(f"could not apply recorded removals to {earlier}: {type(e).__name__}; check it by hand",
+                  file=sys.stderr)
+    return complete
 
 
 def main() -> None:

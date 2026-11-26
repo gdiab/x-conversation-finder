@@ -80,7 +80,8 @@ async def test_the_prompt_asks_for_a_quote_of_the_post_next_to_the_post():
     assert f"between\n  {POST_START} and {POST_END}" in rule
     assert "Never copy text from the product brief" in rule
     assert "character for character" in rule
-    assert "null" in rule
+    assert "shows a problem that the product brief solves" in rule
+    assert "Use null if no part of the post shows such a problem" in rule
 
 
 @pytest.mark.asyncio
@@ -154,14 +155,27 @@ async def test_histories_recorded_before_the_change_replay(fixture, workflow_id)
 
 
 def test_the_recorded_histories_are_the_live_shape():
-    """Control: text-free Reviews, a watch with a product URL, and one Review
-    that ended at the research skip."""
-    watch = (FIXTURES / MAIN_FD3F38E_HISTORIES[0][0]).read_text()
-    assert "product_url" in watch or "https://github.com/example-org/acme" in _decoded(watch)
-    for fixture, _ in MAIN_FD3F38E_HISTORIES:
-        assert "Synthetic" not in (FIXTURES / fixture).read_text()  # payloads are encoded, no raw text
+    """Control: the watch has a product URL, its Reviews are text-free (the
+    input carries no post, only its id), and one Review ended at the
+    research skip for a quote that is not in the post."""
+    watch = _decoded((FIXTURES / MAIN_FD3F38E_HISTORIES[0][0]).read_text())
+    assert "https://github.com/example-org/acme" in watch
+    for fixture, _ in MAIN_FD3F38E_HISTORIES[1:]:
+        review_input = json.loads(_first_payload((FIXTURES / fixture).read_text()))
+        assert review_input["post"] is None and review_input["post_id"] == "1001"
+        assert review_input["product_url"] == "https://github.com/example-org/acme"
     skipped = _decoded((FIXTURES / MAIN_FD3F38E_HISTORIES[2][0]).read_text())
     assert "the quoted span is not in the post" in skipped
+    ready = _decoded((FIXTURES / MAIN_FD3F38E_HISTORIES[1][0]).read_text())
+    assert '"skip_reason":null' in ready
+
+
+def _first_payload(history_json: str) -> str:
+    """The workflow's start input, decoded."""
+    import base64
+
+    started = json.loads(history_json)["events"][0]["workflowExecutionStartedEventAttributes"]
+    return base64.b64decode(started["input"]["payloads"][0]["data"]).decode()
 
 
 def _decoded(history_json: str) -> str:
