@@ -17,6 +17,7 @@ from backend.budget import (
     BudgetExceeded,
 )
 from backend.config import get_settings
+from backend.activities.store_activities import post_removal_recorded
 from temporalio.exceptions import ApplicationError
 
 
@@ -239,8 +240,15 @@ class XActivities:
         adapter cannot convert (it raises; X billed it). None is reconciled to
         0 reads: X returned no post object (issue #17). An attempt X refused
         with a 4xx status, or answered without any post, is released (issue #8).
+        A post whose removal is already recorded (by another account's Review
+        of it, or the eval re-fetch) is gone: None, without an X read or a
+        budget reservation (issue #22).
         """
         activity.logger.info(f"Looking up post {input.post_id} (key: {input.idempotency_key})")
+        
+        if post_removal_recorded(input.post_id):
+            activity.logger.info(f"Post {input.post_id}: removal already recorded; not asking X")
+            return None
         
         settings = get_settings()
         
