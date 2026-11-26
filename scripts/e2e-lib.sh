@@ -29,6 +29,12 @@ if [ -z "${PYTHON:-}" ]; then
         PYTHON=python3
     fi
 fi
+# A relative path (.venv/bin/python) is resolved now: the script later runs
+# its Python steps from another directory
+case "$PYTHON" in
+    /*) ;;
+    */*) PYTHON="$(cd "$(dirname "$PYTHON")" && pwd)/$(basename "$PYTHON")" ;;
+esac
 
 E2E_PIDS=()
 
@@ -131,7 +137,10 @@ e2e_cleanup() {
 
 # e2e_start_stack: start Temporal, the worker and the API; wait until each is ready.
 e2e_start_stack() {
-    local port
+    local port cmd
+    for cmd in temporal curl lsof "$PYTHON"; do
+        command -v "$cmd" > /dev/null 2>&1 || e2e_fail "Required command not found: $cmd"
+    done
     for port in "$E2E_TEMPORAL_PORT" "$E2E_TEMPORAL_UI_PORT" "$E2E_API_PORT"; do
         if e2e_port_in_use "$port"; then
             e2e_fail "Port $port is already in use. The e2e stack starts its own services and never uses a running one; set E2E_TEMPORAL_PORT, E2E_TEMPORAL_UI_PORT or E2E_API_PORT to free ports."

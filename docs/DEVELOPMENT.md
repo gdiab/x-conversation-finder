@@ -128,7 +128,7 @@ Three scripts run the app end to end with fake adapters, so they call neither X 
 
 Each script approves as the review app does. It reads the card (`GET /api/reviews/{id}`) and sends the card's `draft.text` and `edited_text_gate_state` (null if the draft was never edited). Each script then checks that the card reaches `followup_due`, with the confirmed reply's id and the fixture replies to it (`backend/tests/fixtures/e2e_x.json`) stored.
 
-Run a script from the repo root, for example `bash scripts/e2e-full.sh`. It needs the Temporal CLI and the backend dependencies. It uses `.venv/bin/python` if that exists, and otherwise `python3` (set `PYTHON` to choose another interpreter). Each script starts its own stack and stops it on exit:
+Run a script from the repo root, for example `bash scripts/e2e-full.sh`. It needs the Temporal CLI, `curl`, `lsof` and the backend dependencies. It uses `.venv/bin/python` if that exists, and otherwise `python3` (set `PYTHON` to choose another interpreter). Each script starts its own stack and stops it on exit:
 
 - an in-memory Temporal dev server on port 7243, with its web UI on port 8243;
 - a worker connected to that Temporal server;
