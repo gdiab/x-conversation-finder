@@ -1138,14 +1138,15 @@ def redact_recorded_removals() -> int:
         cards = db.query(ReviewCardDB).filter(
             ReviewCardDB.post_data["text_removed"].as_boolean() == True,  # noqa: E712
         ).all()
+        stored_posts = db.query(StoredPostDB).filter(
+            StoredPostDB.post_data["text_removed"].as_boolean() == True,  # noqa: E712
+        ).all()
         for card_db in cards:
             fields = _removed_card_fields(card_db)
             if redact_removed_card(fields) != fields:
                 _redact_removed_card_db(card_db)
                 changed += 1
-        for stored in db.query(StoredPostDB).filter(
-            StoredPostDB.post_data["text_removed"].as_boolean() == True,  # noqa: E712
-        ).all():
+        for stored in stored_posts:
             redacted_post = redact_removed_post(stored.post_data)
             if redacted_post != stored.post_data:
                 stored.post_data = redacted_post
@@ -1153,10 +1154,12 @@ def redact_recorded_removals() -> int:
         db.commit()
     finally:
         db.close()
-    if changed and not checkpoint_wal():
-        # The rows are redacted; the old pages leave the -wal file at the next
-        # checkpoint (the next removal, or the next start)
-        logger.warning("Redacted recorded removals; the WAL checkpoint is pending (a reader holds an old snapshot)")
+    # Checkpoint whenever a removal is recorded, not only when this run
+    # changed rows: a checkpoint an earlier start could not complete (a
+    # reader held an old snapshot) leaves the old pages in the -wal file,
+    # and the next start finds the rows already redacted
+    if (cards or stored_posts) and not checkpoint_wal():
+        logger.warning("Recorded removals redacted; the WAL checkpoint is pending (a reader holds an old snapshot)")
     return changed
 
 

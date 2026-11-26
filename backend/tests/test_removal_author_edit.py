@@ -100,18 +100,20 @@ def _sqlite_bytes(db_path: Path) -> bytes:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "draft_mode,other_legacy",
+    "draft_mode,this_legacy,other_legacy",
     [
-        ("assembled", False),
-        ("written", False),
-        # The other account's Review carries the post in its input (recorded
-        # before issue #23): its get_card query builds the card from workflow
-        # state, and the API redacts it from the stored removal
-        ("assembled", True),
+        ("assembled", False, False),
+        ("written", False, False),
+        # A Review that carries the post in its input (recorded before issue
+        # #23) builds its get_card query from workflow state. The removing
+        # one redacts it itself (checked on the raw query); for the other
+        # account's, the API redacts it from the stored removal
+        ("assembled", True, True),
+        ("written", True, True),
     ],
 )
 async def test_a_removal_drops_the_author_the_url_and_the_edits_on_every_card(
-    make_review_input, test_db_isolation, draft_mode, other_legacy
+    make_review_input, test_db_isolation, draft_mode, this_legacy, other_legacy
 ):
     db_path = Path(test_db_isolation)
     post = _post()
@@ -124,7 +126,7 @@ async def test_a_removal_drops_the_author_the_url_and_the_edits_on_every_card(
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, x_client=MarkerXClient(gone="1001", post=post), agent=agent, draft_mode=draft_mode):
             handles = []
-            for account, legacy in (("test", False), ("other", other_legacy)):
+            for account, legacy in (("test", this_legacy), ("other", other_legacy)):
                 review_input = make_review_input(
                     post=post, legacy=legacy, account=account, product_name=PRODUCT
                 )
@@ -156,6 +158,11 @@ async def test_a_removal_drops_the_author_the_url_and_the_edits_on_every_card(
                 assert stored["created_at"] == before[handle.id]["created_at"]
                 assert stored["post"]["created_at"] == before[handle.id]["post"]["created_at"]
                 assert stored["post"]["conversation_id"] == "1001"
+            # The removing Review's own query, before the API's overlay
+            raw = await query_card(this)
+            if this_legacy:
+                assert not raw.get("text_free")
+            _assert_removed(raw, f"raw get_card query {this.id}")
             assert get_stored_card(this.id)["status"] == "skipped"
             # The removal leaves the other account's status alone (the
             # time-skipping server can let that Review expire meanwhile)
@@ -306,6 +313,36 @@ def test_removals_recorded_before_the_change_are_redacted_at_startup(test_db_iso
     from backend.activities.store_activities import redact_recorded_removals
 
     assert redact_recorded_removals() == 0
+
+
+def test_a_start_retries_a_checkpoint_an_earlier_start_could_not_complete(test_db_isolation, monkeypatch):
+    """The rows are redacted at the first start, whose checkpoint is blocked;
+    the next start finds nothing to change and still runs the checkpoint, so
+    the old pages leave the -wal file."""
+    import backend.database
+    from backend.activities.store_activities import redact_recorded_removals
+    from backend.database import ReviewCardDB, get_db
+
+    card = _card()
+    db = get_db()
+    try:
+        db.add(ReviewCardDB(
+            workflow_id=card["workflow_id"],
+            post_data={**card["post"], "text": POST_TEXT_REMOVED, "text_removed": True},
+            evidence_data=card["evidence"], status="skipped",
+            created_at=card["created_at"], updated_at=card["updated_at"],
+        ))
+        db.commit()
+    finally:
+        db.close()
+    calls = []
+    real_checkpoint = backend.database.checkpoint_wal
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("blocked") and False)
+    assert redact_recorded_removals() == 1
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("ok") or real_checkpoint())
+    assert redact_recorded_removals() == 0
+    assert calls == ["blocked", "ok"]
+    assert HANDLE.encode() not in _sqlite_bytes(Path(test_db_isolation))
 
 
 def test_redact_removed_post_tolerates_a_post_without_fields():
