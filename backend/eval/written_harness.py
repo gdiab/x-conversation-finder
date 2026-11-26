@@ -41,7 +41,9 @@ from temporalio.converter import value_to_type
 
 from backend.budget import prompt_token_bound
 from backend.gate.brief import split_brief
+from backend.gate.product_link import PRODUCT_LINK_CHARS, strip_product_link, writer_max_chars
 from backend.gate.written_check import (
+    MAX_CHARS,
     MAX_PRODUCT_CLAIMS,
     clean_feature_terms,
     clean_names,
@@ -73,6 +75,11 @@ class WatchSettings:
     # The watch's saved ReviewConfig.claim_gate_max_attempts: a live Review
     # keeps the limit its watch was started with. None: the caller's default.
     claim_gate_max_attempts: Optional[int] = None
+    # Issue #41: the watch's "Product URL" (None for a watch started without
+    # it, and in settings exported before the field). With it, a draft that
+    # names the product is written and checked with room for the link, as a
+    # live Review does.
+    product_url: Optional[str] = None
 
 
 def settings_key(account: str, topic: str) -> str:
@@ -474,6 +481,7 @@ async def check_text(
         settings.product_aliases,
         settings.key_features,
         mention_product,
+        product_link_chars=PRODUCT_LINK_CHARS if settings.product_url else 0,
     )
     if not prepared.needs_checker:
         return judge(prepared, None, mention_product)
@@ -584,6 +592,7 @@ async def run_written_path(
                 product_aliases=aliases,
                 feature_terms=feature_terms,
                 steer=steer,
+                max_chars=writer_max_chars(MAX_CHARS, settings.product_url, plan.mention_product),
             ),
             idempotency_key=f"harness:{review.workflow_id}:{sample}:draft:{attempt}",
         )
@@ -593,7 +602,8 @@ async def run_written_path(
                 attempt, steer, "", False, False, False, [], [], "the draft is missing", ["empty"], 0,
             ))
             continue
-        text = evidence.draft.text
+        # Issue #41: checked without a trailing product link, as live
+        text = strip_product_link(evidence.draft.text, settings.product_url)[0]
         reused = text in checks
         if not reused:
             if cap is not None:

@@ -89,7 +89,7 @@ class WritingAgent(FakeReplyAgent):
             return self._plans.pop(0)
         return await super().plan(post, evidence, idempotency_key, feedback)
 
-    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
         self.assembled_calls += 1
         return await super().draft(evidence, steer, idempotency_key, plan)
 

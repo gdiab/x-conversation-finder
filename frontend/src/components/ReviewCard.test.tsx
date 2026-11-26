@@ -124,6 +124,34 @@ describe('ReviewCard: pending card', () => {
     expect(writeText).toHaveBeenCalledWith('Copy me, synthetic.');
   });
 
+  it('shows and copies a draft that ends with the product link (issue #41)', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    const text = 'Acme Relay retries failed deliveries. https://example.com/acme-relay';
+    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft: makeDraft({ text }) }) })} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText(text)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Copy Draft' }));
+    expect(writeText).toHaveBeenCalledWith(text);
+  });
+
+  it('counts a link in the edit box as X does, and keeps it in the text to edit', async () => {
+    const user = userEvent.setup();
+    const url = 'https://example.com/a-rather-long-path/to-the-product-page-for-acme-relay';
+    const body = 'a'.repeat(256);
+    const text = `${body} ${url}`;
+    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft: makeDraft({ text }) }) })} onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    const box = screen.getByDisplayValue(text);
+    expect(screen.getByText(/^280\/280 characters, as X counts them/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Edit' })).toBeEnabled();
+
+    await user.type(box, ' x'); // after the link: one space and one letter more
+    expect(screen.getByText(/^282\/280 characters/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Edit' })).toBeDisabled();
+  });
+
   it('shows the claim gate result and each failed sentence with its reason', () => {
     const draft = makeDraft({
       claim_gate: {

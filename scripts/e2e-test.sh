@@ -34,7 +34,8 @@ e2e_request POST /watch/start '{
     "topic": "distributed-systems",
     "query": "distributed systems",
     "product_brief": "Acme Tools helps teams handle eventual consistency in distributed systems.",
-    "product_name": "Acme Tools"
+    "product_name": "Acme Tools",
+    "product_url": "https://example.com/acme-tools"
   }' | "$PYTHON" -m json.tool
 echo ""
 

@@ -53,6 +53,12 @@ class GateSummary:
     failing_count: int = 0
     # Digest of the text the result is about (the gate can rewrite a draft)
     text_sha256: str = ""
+    # Issue #41: digest of the draft as stored after the gate or the recorded
+    # check, the product link included when code appended it: the draft the
+    # founder sees, copies and approves. Empty in results recorded before
+    # the field existed (and from verify_edited_text): text_sha256 is then
+    # that draft's digest.
+    draft_sha256: str = ""
 
 
 @dataclass

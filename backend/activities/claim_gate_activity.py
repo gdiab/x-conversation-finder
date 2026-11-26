@@ -20,6 +20,7 @@ import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
 from backend.models.summaries import GateSummary
+from backend.gate.product_link import PRODUCT_LINK_CHARS, X_LINK_CHARS, append_product_link, strip_product_link
 from backend.review_docs import text_free_activity as _text_free_activity
 from backend.gate.non_claim_set import (
     UNKNOWN_IDENTIFIER,
@@ -41,6 +42,8 @@ from backend.gate.legacy_split_v1 import split_into_sentences_v1
 # Re-exported: the splitter and normalization moved below the activities
 # (issue #12) so the written-draft check can use them; callers import them here.
 from backend.gate.sentence_split import normalize_text, split_into_sentences
+# X's limit for a reply; with the product link (issue #41) the text gets what is left
+from backend.gate.written_check import MAX_CHARS as MAX_REPLY_CHARS
 
 REFERENT_REASON = "Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above)"
 ABBREVIATION_REASON = "Sentence ends with an abbreviation (not selectable)"
@@ -64,6 +67,11 @@ class ClaimGateInput:
     # Review document slot, record the result on it and return a GateSummary
     post_id: str = ""
     slot: str = ""
+    # Issue #41: the watch's "Product URL" (None for a watch started without
+    # it). A passing draft that names the product (the plan says to mention
+    # it, or it has a claim segment) gets it appended, and its text must
+    # leave room for it. Text-free inputs only.
+    product_url: Optional[str] = None
 
 
 def has_unresolved_referent(text: str) -> bool:
@@ -282,6 +290,9 @@ class EditedTextGateInput:
     text_slot: str = ""
     evidence_slot: str = ""
     results_slot: str = ""
+    # Issue #41: the watch's "Product URL". An edit that ends with it is
+    # checked without it, under the length X leaves after the link.
+    product_url: Optional[str] = None
 
 
 @dataclass
@@ -333,12 +344,27 @@ async def verify_edited_text(input: EditedTextGateInput) -> Union[List[SentenceG
     what = "not checking the edit"
     text = review_docs.load_doc(workflow_id, input.post_id, input.text_slot, str, what)
     evidence = review_docs.load_doc(workflow_id, input.post_id, input.evidence_slot, Evidence, what)
+    # Issue #41: the sentences are checked without a trailing product link;
+    # the link is not required, but with it the sentences get what X leaves
+    body, linked = strip_product_link(text, input.product_url)
     results = await _verify_edited_text(EditedTextGateInput(
-        edited_text=text,
+        edited_text=body,
         gated_segments=evidence.draft.segments if evidence.draft else [],
         founder_materials=evidence.founder_materials,
         idempotency_key=input.idempotency_key,
     ))
+    limit = MAX_REPLY_CHARS - PRODUCT_LINK_CHARS
+    if linked and len(body.strip()) > limit:
+        results.append(SentenceGateResult(
+            sentence="[edited text]",
+            passed=False,
+            kind="non_claim",
+            reason=(
+                f"With the product link, the text before it must be at most {limit} characters, "
+                f"because X counts a link as {X_LINK_CHARS} characters (got {len(body.strip())})"
+            ),
+            kept_segment=False,
+        ))
     review_docs.save_doc(workflow_id, input.post_id, input.results_slot, results)
     failing = sum(1 for r in results if not r.passed)
     return GateSummary(
@@ -621,15 +647,36 @@ async def claim_gate(input: ClaimGateInput) -> Union[ClaimGateResult, GateSummar
         [[PLAN_FAILURE_MARKER, r] for r in draft.plan_conformance_failures]
         if evidence.reply_plan is not None else []
     )
+    link = False
     if draft.segments:
         result = await _claim_gate(ClaimGateInput(
             segments=draft.segments,
             founder_materials=evidence.founder_materials,
             idempotency_key=input.idempotency_key,
         ))
+        if input.product_url and result.passed and not plan_rows:
+            link = (
+                (evidence.reply_plan is not None and evidence.reply_plan.mention_product is True)
+                or any(seg.kind == "claim" for seg in result.segments)
+            )
+            limit = MAX_REPLY_CHARS - PRODUCT_LINK_CHARS
+            if link and len(result.draft_text.strip()) > limit:
+                # Issue #41: a draft that names the product gets the link, so
+                # its sentences must leave room for it; a redraft is asked for
+                link = False
+                reason = (
+                    f"The draft must be at most {limit} characters, because the product link is added "
+                    f"after it and X counts a link as {X_LINK_CHARS} characters (got {len(result.draft_text.strip())})"
+                )
+                result.passed = False
+                result.failed_sentences = list(result.failed_sentences) + [("[reply]", reason)]
+                result.reasoning = f"1 failure: {reason}"
         draft.claim_gate = result
         if result.draft_text:
             draft.text = result.draft_text
+        if link:
+            # Issue #41: code, never the model, adds the link
+            draft.text = append_product_link(draft.text, input.product_url)
         draft.segments = result.segments
         rows = plan_rows + [[sentence, reason] for sentence, reason in result.failed_sentences]
     else:
@@ -650,7 +697,8 @@ async def claim_gate(input: ClaimGateInput) -> Union[ClaimGateResult, GateSummar
         passed=result.passed,
         failure_count=len(rows),
         plan_failure_count=len(plan_rows),
-        text_sha256=review_docs.text_digest(draft.text),
+        text_sha256=review_docs.text_digest(result.draft_text or draft.text),
+        draft_sha256=review_docs.text_digest(draft.text),
     )
 
 

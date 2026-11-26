@@ -76,7 +76,7 @@ class CountingAgent(QuotingAgent):
         await self._record("plan")
         return await super().plan(post, evidence, idempotency_key, feedback)
 
-    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
         await self._record("draft")
         return await super().draft(evidence, steer, idempotency_key, plan)
 

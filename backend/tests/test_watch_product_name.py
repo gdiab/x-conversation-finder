@@ -40,14 +40,15 @@ BACKEND = Path(__file__).resolve().parents[1]
 
 def _request(**overrides):
     fields = dict(account="founder", topic="reliability", query="reliability", product_brief="A brief.",
-                  product_name="Acme Relay")
+                  product_name="Acme Relay", product_url="https://example.com/relay")
     fields.update(overrides)
     return api.StartWatchRequest(**fields)
 
 
 def test_product_name_is_required():
     with pytest.raises(ValidationError) as missing:
-        api.StartWatchRequest(account="founder", topic="t", query="q", product_brief="b")
+        api.StartWatchRequest(account="founder", topic="t", query="q", product_brief="b",
+                              product_url="https://example.com")
     assert "product_name" in str(missing.value)
 
     for blank in ("", "   ", "\n"):
@@ -117,6 +118,7 @@ async def test_start_watch_puts_the_fields_on_the_topic_watch_input(monkeypatch)
     [(watch_input, workflow_id, task_queue)] = temporal.started
     assert (watch_input.product_name, watch_input.product_aliases) == ("Acme Relay", ["Relay"])
     assert watch_input.key_features == ["Signed deliveries"]
+    assert watch_input.product_url == "https://example.com/relay"  # issue #41
     assert workflow_id == "watch:founder:reliability" == response.workflow_id
     assert task_queue == "x-conversation-finder"
 
@@ -128,7 +130,10 @@ async def test_starting_a_running_watch_says_its_product_name_was_not_changed(mo
     response = await api.start_watch(_request())
 
     assert "already running" in response.message
-    assert "product name, other names, key features and brief were not changed; stop the watch first" in response.message
+    assert (
+        "product name, other names, key features, product URL and brief were not changed; stop the watch first"
+        in response.message
+    )
 
 
 # ---------- a nudge's response after a removal recorded elsewhere ----------
@@ -282,7 +287,7 @@ async def test_a_watch_with_a_product_name_gives_its_reviews_written_drafts(make
                 make_topic_watch_input(
                     query="reliability distributed systems",
                     product_name="Acme", product_aliases=["Acme Cloud"],
-                    key_features=["Real-time monitoring"],
+                    key_features=["Real-time monitoring"], product_url="https://example.com/acme",
                 ),
                 id="watch:test:reliability_named", task_queue="test",
             )
@@ -293,6 +298,7 @@ async def test_a_watch_with_a_product_name_gives_its_reviews_written_drafts(make
                 assert review_input["product_name"] == "Acme"
                 assert review_input["product_aliases"] == ["Acme Cloud"]
                 assert review_input["key_features"] == ["Real-time monitoring"]
+                assert review_input["product_url"] == "https://example.com/acme"  # issue #41
 
             [card, *_] = await _drafted_cards(1)
             assert card["evidence"]["draft_mode"] == "written"
@@ -333,7 +339,7 @@ async def test_continue_as_new_carries_the_product_name(make_topic_watch_input):
                 make_topic_watch_input(
                     query="reliability distributed systems", continue_as_new_after=1,
                     product_name="Acme", product_aliases=["Acme Cloud"],
-                    key_features=["Real-time monitoring"],
+                    key_features=["Real-time monitoring"], product_url="https://example.com/acme",
                 ),
                 id="watch:test:reliability_can", task_queue="test",
             )
@@ -355,6 +361,7 @@ async def test_continue_as_new_carries_the_product_name(make_topic_watch_input):
             assert next_input["product_name"] == "Acme"
             assert next_input["product_aliases"] == ["Acme Cloud"]
             assert next_input["key_features"] == ["Real-time monitoring"]
+            assert next_input["product_url"] == "https://example.com/acme"  # issue #41
             await env.client.get_workflow_handle(handle.id).signal("stop")
 
 

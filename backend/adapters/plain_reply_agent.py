@@ -28,6 +28,7 @@ from backend.ports import ReplyAgentPort
 from backend.ports.reply_agent import WrittenDraftRequest
 from backend.gate.brief import render_brief_sentence
 from backend.gate.written_check import MAX_CHARS, MAX_SENTENCES
+from backend.gate.product_link import X_LINK_CHARS
 from backend.models.written import DRAFT_MODE_WRITTEN, DrafterHint, WrittenDraftInfo
 from backend.activities.claim_gate_activity import (
     split_into_sentences,
@@ -246,6 +247,18 @@ def written_check_failures_for_prompt(draft: Optional[Draft]) -> str:
     )
 
 
+def product_link_note(max_chars: int) -> str:
+    """Issue #41: a reply that names the product gets the product link from
+    code. The drafter is told why its budget is lower, and never asked to
+    write the link."""
+    if max_chars >= MAX_CHARS:
+        return ""
+    return (
+        f"\n  Code adds a link to the product after your reply, and X counts it as {X_LINK_CHARS} characters:"
+        f"\n  that is why the limit is {max_chars}. Do not write the link or any URL yourself."
+    )
+
+
 def build_written_draft_prompt(request: WrittenDraftRequest) -> str:
     """The written drafter's prompt: the post, the plan and the numbered brief."""
     name = request.product_name
@@ -258,6 +271,7 @@ def build_written_draft_prompt(request: WrittenDraftRequest) -> str:
         terms = "; or use any of these key features: " + ", ".join(request.feature_terms)
 
     product_rule = written_product_rule(name, request.plan.mention_product)
+    link_note = product_link_note(request.max_chars)
 
     previous = ""
     failures = ""
@@ -285,8 +299,8 @@ stands under in parentheses, then the text):
 {brief}
 
 Rules:
-- At most {MAX_SENTENCES} sentences and at most {MAX_CHARS} characters in total; aim for 2 sentences
-  and under 220 characters. Plain text: no hashtags, links or emoji.
+- At most {MAX_SENTENCES} sentences and at most {request.max_chars} characters in total; aim for 2 sentences
+  and under {min(220, request.max_chars - 30)} characters. Plain text: no hashtags, links or emoji.{link_note}
 - Respond to the plan's target point in your own words: agree or disagree with it, add an
   observation, answer it, or ask one specific question about the poster's own situation. Do
   not open with a greeting or with thanks, and do not repeat the post back.
@@ -561,6 +575,7 @@ Return a JSON object with exactly these keys:
         steer: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         plan: Optional[ReplyPlan] = None,
+        max_chars: int = MAX_CHARS,
     ) -> Evidence:
         """
         Draft a reply with structured segments.
@@ -573,6 +588,7 @@ Return a JSON object with exactly these keys:
         available_phrases = format_phrases_for_prompt()
 
         steer_text = f"\n\nAdditional instruction: {steer}" if steer else ""
+        link_note = product_link_note(max_chars)
 
         # issue #5: under assembled drafts the plan steers the closer and
         # whether a claim is included. Without a plan (Review workflows started
@@ -650,7 +666,7 @@ Example (shape only; pick phrases and the sentence for this post):
 {example}
 
 Be conversational and honest. Never invent features. Reference founder material by sentence number only.
-Max 280 chars total after text insertion."""
+Max {max_chars} chars total after text insertion.{link_note}"""
 
         response = await self._complete(
             "draft",

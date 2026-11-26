@@ -59,6 +59,10 @@ class TopicWatchInput:
     # features" list, passed to each Review like the aliases. It is the only
     # source of feature terms. None for a watch started without the field.
     key_features: Optional[list[str]] = None
+    # issue #41: the form's "Product URL", passed to each Review; code appends
+    # it to drafts that name the product. None for a watch started before
+    # the field existed: its Reviews' drafts get no link.
+    product_url: Optional[str] = None
     
     def __post_init__(self):
         """Default configs if not provided."""
@@ -180,6 +184,7 @@ class TopicWatchWorkflow:
                                 product_name=input.product_name,
                                 product_aliases=input.product_aliases,
                                 key_features=input.key_features,
+                                product_url=input.product_url,
                             ),
                             id=review_id,
                             parent_close_policy=ParentClosePolicy.ABANDON,
@@ -240,6 +245,7 @@ class TopicWatchWorkflow:
                 product_name=input.product_name,
                 product_aliases=input.product_aliases,
                 key_features=input.key_features,
+                product_url=input.product_url,
             )
         )
     

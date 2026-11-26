@@ -19,6 +19,17 @@ interface ReviewCardProps {
 // issue #20: shown instead of an error when the request can be sent again
 const NOT_READY_NOTICE = 'This review is still being prepared. Try again in a moment.';
 
+// X's reply limit, and the length X counts any link as (it shortens links to
+// t.co). A draft that names the product ends with the watch's product URL
+// (issue #41), which can be longer than 23 characters as typed.
+export const X_MAX_CHARS = 280;
+export const X_LINK_CHARS = 23;
+
+/** A text's length as X counts it: each http(s) link as X_LINK_CHARS. */
+export function xLength(text: string): number {
+  return text.replace(/https?:\/\/\S+/gi, 'x'.repeat(X_LINK_CHARS)).length;
+}
+
 /** A "try again" notice for a not_ready/busy response, or null if the error is a real failure. */
 function retryNotice(err: unknown): string | null {
   if (!(err instanceof ReviewApiError) || !err.retryLater) return null;
@@ -689,14 +700,15 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                   border: '1px solid #ccc',
                   fontFamily: 'inherit',
                 }}
-                maxLength={280}
               />
-              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                {editText.length}/280 characters
+              <div
+                style={{ fontSize: '12px', color: xLength(editText) > X_MAX_CHARS ? '#c62828' : '#666', marginTop: '4px' }}
+              >
+                {xLength(editText)}/{X_MAX_CHARS} characters, as X counts them (a link counts as {X_LINK_CHARS})
               </div>
               <button
                 onClick={handleEdit}
-                disabled={loading}
+                disabled={loading || xLength(editText) > X_MAX_CHARS}
                 style={{ marginTop: '8px', marginRight: '8px' }}
               >
                 Save Edit

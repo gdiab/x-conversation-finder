@@ -223,6 +223,9 @@ export interface StartWatchRequest {
   product_name: string;
   product_aliases: string[];
   key_features: string[];
+  // issue #41: the form's required "Product URL" (https). Code appends it to
+  // drafts that name the product.
+  product_url: string;
 }
 
 const API_BASE = '/api';

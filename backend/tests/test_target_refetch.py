@@ -69,7 +69,7 @@ class QuotingAgent(FakeReplyAgent):
         super().__init__()
         self.drafted = []
 
-    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
         self.drafted.append(idempotency_key)
         return await super().draft(evidence, steer, idempotency_key, plan)
 
@@ -815,7 +815,7 @@ class QuoteAsIdentifierAgent(QuotingAgent):
         super().__init__()
         self.quote = quote
 
-    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
         from backend.models import Segment
 
         evidence = await super().draft(evidence, steer, idempotency_key, plan)

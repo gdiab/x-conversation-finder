@@ -47,7 +47,7 @@ class RecordingAgent(FakeReplyAgent):
             return self._plans.pop(0)
         return await super().plan(post, evidence, idempotency_key, feedback)
 
-    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
         self.draft_plans.append(plan)
         return await super().draft(evidence, steer, idempotency_key, plan)
 
@@ -299,7 +299,7 @@ class DisobeyingAgent(RecordingAgent):
         self.include_claim = include_claim
         self.steers: List[Optional[str]] = []
 
-    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+    async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
         self.steers.append(steer)
         self.draft_plans.append(plan)
         if len(self.draft_plans) <= self.disobey:
@@ -456,7 +456,7 @@ async def test_nudge_that_breaks_the_plan_is_rejected_and_draft_kept(make_review
 
     # The first draft follows the plan; every nudge redraft adds a claim.
     class NudgeDisobeys(DisobeyingAgent):
-        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
             self.disobey = 0 if not self.draft_plans else 99
             return await super().draft(evidence, steer, idempotency_key, plan)
 
@@ -519,7 +519,7 @@ async def test_nudge_activity_failure_under_plan_can_be_retried(make_review_inpu
     class FlakyNudgeAgent(RecordingAgent):
         fail_next_nudge = True
 
-        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
             if ":nudge:" in (idempotency_key or "") and self.fail_next_nudge:
                 self.fail_next_nudge = False
                 raise ApplicationError("model unavailable", non_retryable=True)
@@ -617,7 +617,7 @@ async def test_edit_and_approve_are_rejected_while_a_nudge_is_in_flight(make_rev
     release = asyncio.Event()
 
     class SlowNudgeAgent(RecordingAgent):
-        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None):
+        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280):
             if ":nudge:" in (idempotency_key or ""):
                 await release.wait()
             return await super().draft(evidence, steer, idempotency_key, plan)
