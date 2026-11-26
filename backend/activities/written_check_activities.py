@@ -16,7 +16,7 @@ from temporalio.exceptions import ApplicationError
 from backend.activities.store_activities import card_post_text_removed, post_removal_recorded
 from backend.budget import meter_inference
 from backend.gate.brief import split_brief
-from backend.gate.product_link import PRODUCT_LINK_CHARS, append_product_link, strip_product_link
+from backend.gate.product_link import PRODUCT_LINK_CHARS, append_product_link, linked_max_chars, strip_product_link
 from backend.gate.written_check import MAX_CHARS, judge, prepare_check
 from backend import review_docs
 from backend.gate.failures import PLAN_FAILURE_MARKER, DraftFailures
@@ -205,7 +205,8 @@ class WrittenCheckActivities:
         # kept by the sentences, so the link changes no check.
         body, linked = strip_product_link(text, input.product_url)
         if input.source_is_founder_text:
-            max_chars, link_chars = (MAX_CHARS - PRODUCT_LINK_CHARS, 0) if linked else (MAX_CHARS, 0)
+            max_chars = linked_max_chars(text, input.product_url, body, MAX_CHARS) if linked else MAX_CHARS
+            link_chars = 0
             digest = review_docs.text_digest(text)
         else:
             max_chars, link_chars = MAX_CHARS, (PRODUCT_LINK_CHARS if input.product_url else 0)

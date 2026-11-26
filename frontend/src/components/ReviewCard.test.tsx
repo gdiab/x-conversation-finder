@@ -147,8 +147,8 @@ describe('ReviewCard: pending card', () => {
     expect(screen.getByText(/^280\/280 characters, as X counts them/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save Edit' })).toBeEnabled();
 
-    await user.type(box, ' x'); // after the link: one space and one letter more
-    expect(screen.getByText(/^282\/280 characters/)).toBeInTheDocument();
+    await user.type(box, ' x'); // after the link: now a link in the text, counted as typed
+    expect(screen.getByText(new RegExp(`^${text.length + 2}/280 characters`))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save Edit' })).toBeDisabled();
   });
 

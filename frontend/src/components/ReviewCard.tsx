@@ -19,15 +19,20 @@ interface ReviewCardProps {
 // issue #20: shown instead of an error when the request can be sent again
 const NOT_READY_NOTICE = 'This review is still being prepared. Try again in a moment.';
 
-// X's reply limit, and the length X counts any link as (it shortens links to
+// X's reply limit, and the length X counts a link as (it shortens links to
 // t.co). A draft that names the product ends with the watch's product URL
 // (issue #41), which can be longer than 23 characters as typed.
 export const X_MAX_CHARS = 280;
 export const X_LINK_CHARS = 23;
 
-/** A text's length as X counts it: each http(s) link as X_LINK_CHARS. */
+/**
+ * A text's length as the server's check counts it: a link that is the
+ * text's last word (where the product link stands) as X_LINK_CHARS, every
+ * other character as typed. The server counts only the watch's own URL so;
+ * this box does not know it, so it counts any trailing link the same way.
+ */
 export function xLength(text: string): number {
-  return text.replace(/https?:\/\/\S+/gi, 'x'.repeat(X_LINK_CHARS)).length;
+  return text.trimEnd().replace(/https?:\/\/\S+$/i, 'x'.repeat(X_LINK_CHARS)).length;
 }
 
 /** A "try again" notice for a not_ready/busy response, or null if the error is a real failure. */

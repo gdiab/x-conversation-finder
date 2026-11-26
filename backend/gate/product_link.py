@@ -59,8 +59,22 @@ def product_url_error(url: str) -> Optional[str]:
 
 
 def append_product_link(body: str, url: str) -> str:
-    """The draft as it is posted: the checked sentences, one space, the URL."""
+    """The draft as it is posted: the checked sentences, one space, the URL.
+
+    A body that already holds the URL (a brief sentence quoting it, inserted
+    verbatim or paraphrased) gets no second copy."""
+    if url in body:
+        return body
     return f"{body.rstrip()} {url}"
+
+
+def linked_max_chars(text: str, url: str, body: str, max_chars: int) -> int:
+    """The length left for `body` (the text without its trailing product link,
+    see strip_product_link) under X's `max_chars`: the link counts as
+    X_LINK_CHARS, and the whitespace before it as typed (a founder's edit can
+    put a line break or two spaces there)."""
+    separator = len(text.rstrip()) - len(url) - len(body)
+    return max_chars - X_LINK_CHARS - max(separator, 0)
 
 
 def strip_product_link(text: str, url: Optional[str]) -> Tuple[str, bool]:

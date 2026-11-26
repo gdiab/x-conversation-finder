@@ -20,7 +20,9 @@ import unicodedata
 
 from backend.models import FounderMaterial, Segment, ClaimGateResult
 from backend.models.summaries import GateSummary
-from backend.gate.product_link import PRODUCT_LINK_CHARS, X_LINK_CHARS, append_product_link, strip_product_link
+from backend.gate.product_link import (
+    PRODUCT_LINK_CHARS, X_LINK_CHARS, append_product_link, linked_max_chars, strip_product_link,
+)
 from backend.review_docs import text_free_activity as _text_free_activity
 from backend.gate.non_claim_set import (
     UNKNOWN_IDENTIFIER,
@@ -353,7 +355,7 @@ async def verify_edited_text(input: EditedTextGateInput) -> Union[List[SentenceG
         founder_materials=evidence.founder_materials,
         idempotency_key=input.idempotency_key,
     ))
-    limit = MAX_REPLY_CHARS - PRODUCT_LINK_CHARS
+    limit = linked_max_chars(text, input.product_url, body, MAX_REPLY_CHARS) if linked else MAX_REPLY_CHARS
     if linked and len(body.strip()) > limit:
         results.append(SentenceGateResult(
             sentence="[edited text]",

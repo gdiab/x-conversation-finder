@@ -526,3 +526,59 @@ async def test_an_assembled_draft_too_long_for_the_link_is_not_carded(make_revie
             card = await wait_for_card_ready(plain)
             assert card["status"] == "pending"
             assert len(card["evidence"]["draft"]["text"]) > 256
+
+
+def test_the_link_budget_counts_the_whitespace_typed_before_the_link():
+    from backend.gate.product_link import linked_max_chars
+
+    for separator, expected in ((" ", 256), ("\n\n", 255), ("   ", 254)):
+        text = f"Hi.{separator}{URL}"
+        body, linked = strip_product_link(text, URL)
+        assert linked and linked_max_chars(text, URL, body, 280) == expected
+
+
+def test_a_body_that_already_holds_the_url_gets_no_second_copy():
+    body = f"Acme is at {URL} for anyone who wants it."
+    assert append_product_link(body, URL) == body
+
+
+def test_the_harness_counts_a_link_budget_failure_as_too_long():
+    from backend.eval.written_harness import failure_kinds
+
+    text = "Acme retries failed deliveries. " + "x" * 240
+    result = judge(_prepared(text, mention_product=True, product_link_chars=PRODUCT_LINK_CHARS), None, True)
+    assert "too_long" in failure_kinds(result)
+
+
+@pytest.mark.asyncio
+async def test_an_edit_with_extra_whitespace_before_the_link_leaves_x_room(make_review_input):
+    agent = WritingAgent(plans=[mention_plan()])
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=agent):
+            handle = await _start(env, make_review_input, "41_edit_newlines", product_url=URL)
+            await wait_for_card_ready(handle)
+            # 256 characters before the link: fits after one space, not after two line breaks
+            body = f"{OPENER} {CLAIM} " + "z" * (256 - len(OPENER) - len(CLAIM) - 3) + "."
+            assert len(body) == 256
+            await handle.execute_update("edit", args=[f"{body} {URL}", str(uuid.uuid4())])
+            assert (await query_card(handle))["edited_text_gate_state"] == "passed"
+            await handle.execute_update("edit", args=[f"{body}\n\n{URL}", str(uuid.uuid4())])
+            assert (await query_card(handle))["edited_text_gate_state"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_an_assembled_claim_that_quotes_the_url_carries_it_once(make_review_input, product_brief):
+    brief = product_brief.replace(
+        "Our product helps developers build reliable distributed systems.",
+        f"Our product helps developers build reliable distributed systems, open source at {URL} today.",
+    )
+    assert URL in brief
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, draft_mode="assembled"):
+            handle = await _start(env, make_review_input, "41_assembled_quoted_url", product_url=URL,
+                                  product_brief=brief)
+            card = await wait_for_card_ready(handle)
+            assert card["status"] == "pending", card.get("skip_reason")
+            draft = card["evidence"]["draft"]
+            assert any(URL in (seg.get("text") or "") for seg in draft["segments"])  # the claim quotes it
+            assert draft["text"].count(URL) == 1
