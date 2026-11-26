@@ -44,6 +44,12 @@ PERSIST_FOUNDER_SKIP_PATCH_ID = "persist-founder-skip-v1"
 # or skip (or during approve's re-fetch), the decision wins over expiry.
 # Before, the timeout always expired the Review; old histories keep that.
 DECISION_AT_DEADLINE_PATCH_ID = "decision-wins-at-deadline-v1"
+# Patch id (issue #22): research_post and plan_reply refuse (PostRemoved) once
+# the post's removal is recorded, also for a Review whose input carries the
+# post, and that Review then ends as skipped "post removed". Before, the
+# refusal could not happen there, so no recorded history reaches the new
+# branch; the marker keeps it so (without it the failure stays a failure).
+REMOVAL_BEFORE_DRAFT_PATCH_ID = "removal-skips-research-and-plan-v1"
 
 # Update rejection types (issue #15). Validators raise ApplicationError with one
 # of these types; backend/api.py maps the type to an HTTP status and a "code"
@@ -64,6 +70,12 @@ NUDGE_REJECTED_ERROR = "NudgeRejected"
 def _rejection(message: str, error_type: str, *details) -> ApplicationError:
     """An update rejection the API reports as a client error (issue #15)."""
     return ApplicationError(message, *details, type=error_type, non_retryable=True)
+
+
+def _is_post_removed(error: ActivityError) -> bool:
+    """Whether an activity refused because the post's removal is recorded."""
+    cause = error.cause
+    return isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR
 
 with workflow.unsafe.imports_passed_through():
     from backend.models import (
@@ -511,20 +523,39 @@ class ReviewWorkflow:
     async def _draft_and_validate(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
         """Draft and check the reply; None if the post is skipped.
 
-        issue #12: in written mode draft_reply and check_written_draft refuse
-        (PostRemoved) once any stored card of the post records its removal,
-        for example by another account's Review while this one was still
-        drafting. The Review then ends as skipped "post removed", with its
-        card stored redacted, instead of failing. Assembled Reviews never
-        get that refusal here (they have no card yet), so they run as before.
+        issues #12, #22: draft_reply and check_written_draft refuse
+        (PostRemoved) once the post's removal is recorded, for example by
+        another account's Review while this one was still drafting. The
+        Review then ends as skipped "post removed", with its card stored
+        redacted, instead of failing. Before issue #22 an assembled draft
+        was refused only when this Review's own card recorded the removal;
+        either way the refusal ends here, so no patch is needed.
         """
         try:
             return await self._draft_and_check(evidence, workflow_id, created_at)
         except ActivityError as e:
-            cause = e.cause
-            if not (isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR):
+            if not _is_post_removed(e):
                 raise
         workflow.logger.warning(f"Post {self.input.post.id} was removed while its reply was drafted; skipping")
+        await self._end_as_post_removed(workflow_id, created_at, evidence)
+        return None
+
+    async def _end_as_post_removed(
+        self, workflow_id: str, created_at: str, evidence: Optional[Evidence]
+    ) -> None:
+        """End a Review whose input carries the post as skipped "post
+        removed" before its pending card exists: store its card (redacted by
+        store_card, since the removal is recorded). `evidence` is None when
+        research itself was refused."""
+        if evidence is None:
+            evidence = Evidence(
+                post_id=self.input.post.id,
+                matched_topic=self.input.topic,
+                why_it_fits="",
+                confidence_score=0.0,
+                confidence_inputs={},
+                founder_materials=[],
+            )
         self.status = "skipped"
         self.skipped = True
         self.skip_reason = POST_REMOVED_SKIP_REASON
@@ -540,7 +571,6 @@ class ReviewWorkflow:
             start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
         )
         self._card_stored = True
-        return None
 
     async def _draft_and_check(self, evidence: Evidence, workflow_id: str, created_at: str) -> Optional[Evidence]:
         """
@@ -753,8 +783,7 @@ class ReviewWorkflow:
             )
             return True
         except ActivityError as e:
-            cause = e.cause
-            if not (isinstance(cause, ApplicationError) and cause.type == POST_REMOVED_ERROR):
+            if not _is_post_removed(e):
                 raise
         workflow.logger.warning(f"Post {self.input.post_id} was removed while its reply was prepared; skipping")
         self._mark_skipped(POST_REMOVED_SKIP_REASON)
@@ -1061,18 +1090,29 @@ class ReviewWorkflow:
         post (histories recorded before issue #23). None once the card is
         stored, else the workflow result."""
         input = self.input
-        # Step 1: Research
-        evidence = await self._research_post(workflow_id, created_at)
-        if evidence is None:
-            return "skipped"
-        
-        # Step 1b: Plan the reply (issue #5). Guarded by a patch so Review
-        # workflows started before this step replay unchanged.
-        if workflow.patched(REPLY_PLAN_PATCH_ID):
-            self._stage = "planning"
-            evidence = await self._plan_reply(evidence, workflow_id, created_at)
+        evidence: Optional[Evidence] = None
+        try:
+            # Step 1: Research
+            evidence = await self._research_post(workflow_id, created_at)
             if evidence is None:
                 return "skipped"
+
+            # Step 1b: Plan the reply (issue #5). Guarded by a patch so Review
+            # workflows started before this step replay unchanged.
+            if workflow.patched(REPLY_PLAN_PATCH_ID):
+                self._stage = "planning"
+                planned = await self._plan_reply(evidence, workflow_id, created_at)
+                if planned is None:
+                    return "skipped"
+                evidence = planned
+        except ActivityError as e:
+            # issue #22: the post's removal was recorded (by another account's
+            # Review of it, or the eval re-fetch) before this step's model call
+            if not (_is_post_removed(e) and workflow.patched(REMOVAL_BEFORE_DRAFT_PATCH_ID)):
+                raise
+            workflow.logger.warning(f"Post {input.post.id} was removed before its reply was drafted; skipping")
+            await self._end_as_post_removed(workflow_id, created_at, evidence)
+            return "skipped"
 
         # Step 2: Draft (with claim gate retry logic)
         self._stage = "drafting"
