@@ -88,6 +88,9 @@ export type EditGateResult = {
 
 export interface ReviewCard {
   workflow_id: string;
+  // issue #41: the watch's product URL (absent for a watch started without
+  // one, and on Reviews recorded before issue #23)
+  product_url?: string | null;
   post: {
     id: string;
     text: string;

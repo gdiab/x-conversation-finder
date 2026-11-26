@@ -1,7 +1,7 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ReviewCard } from './ReviewCard';
+import { ReviewCard, xLength } from './ReviewCard';
 import { approveReview, editReview, nudgeReview, ReviewApiError, skipReview } from '../api/client';
 import {
   makeCard,
@@ -100,6 +100,20 @@ describe('ReviewCard: skipped card', () => {
   });
 });
 
+describe('xLength (issue #41)', () => {
+  const url = 'https://example.com/acme';
+  it('counts the trailing product URL as 23 plus the whitespace before it', () => {
+    expect(xLength(`Hi. ${url}`, url)).toBe(3 + 1 + 23);
+    expect(xLength(`Hi.\n\n${url}  `, url)).toBe(3 + 2 + 23);
+    expect(xLength(url, url)).toBe(23);
+  });
+  it('counts any other link, or the URL glued to a word, as typed', () => {
+    expect(xLength(`Hi. https://other.example.com/long`, url)).toBe(34);
+    expect(xLength(`Hi.${url}`, url)).toBe(3 + url.length);
+    expect(xLength(`Hi. ${url}`, null)).toBe(4 + url.length);
+  });
+});
+
 describe('ReviewCard: pending card', () => {
   it('shows the draft with a Copy button and the action buttons', () => {
     render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
@@ -135,12 +149,17 @@ describe('ReviewCard: pending card', () => {
     expect(writeText).toHaveBeenCalledWith(text);
   });
 
-  it('counts a link in the edit box as X does, and keeps it in the text to edit', async () => {
+  it('counts the product link in the edit box as the check does, and keeps it in the text to edit', async () => {
     const user = userEvent.setup();
     const url = 'https://example.com/a-rather-long-path/to-the-product-page-for-acme-relay';
     const body = 'a'.repeat(256);
     const text = `${body} ${url}`;
-    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft: makeDraft({ text }) }) })} onUpdate={vi.fn()} />);
+    render(
+      <ReviewCard
+        card={makeCard({ product_url: url, evidence: makeEvidence({ draft: makeDraft({ text }) }) })}
+        onUpdate={vi.fn()}
+      />,
+    );
 
     await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
     const box = screen.getByDisplayValue(text);

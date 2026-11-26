@@ -1334,7 +1334,7 @@ def get_stored_card(workflow_id: str) -> Optional[Dict[str, Any]]:
 
 # issue #23: the Review state a text-free get_card query reports that can be
 # ahead of the stored row (the workflow writes the row after deciding)
-_QUERY_STATE_FIELDS = ("status", "posted_url", "reply_post_id", "post_anyway")
+_QUERY_STATE_FIELDS = ("status", "posted_url", "reply_post_id", "post_anyway", "product_url")
 
 
 def text_free_card(workflow_id: str, state: Dict[str, Any]) -> Dict[str, Any]:

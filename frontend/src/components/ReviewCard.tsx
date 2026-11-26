@@ -26,13 +26,22 @@ export const X_MAX_CHARS = 280;
 export const X_LINK_CHARS = 23;
 
 /**
- * A text's length as the server's check counts it: a link that is the
- * text's last word (where the product link stands) as X_LINK_CHARS, every
- * other character as typed. The server counts only the watch's own URL so;
- * this box does not know it, so it counts any trailing link the same way.
+ * A text's length as the server's check counts it (backend/gate/product_link.py):
+ * the text without surrounding whitespace, and the watch's product URL, when
+ * it is the last word (after whitespace, or alone), as X_LINK_CHARS plus the
+ * whitespace typed before it. Every other character, other links included,
+ * counts as typed.
  */
-export function xLength(text: string): number {
-  return text.trimEnd().replace(/https?:\/\/\S+$/i, 'x'.repeat(X_LINK_CHARS)).length;
+export function xLength(text: string, productUrl?: string | null): number {
+  const trimmed = text.trimEnd();
+  if (productUrl && trimmed.endsWith(productUrl)) {
+    const before = trimmed.slice(0, trimmed.length - productUrl.length);
+    if (before === '' || /\s$/.test(before)) {
+      const body = before.trimEnd();
+      return body.trimStart().length + (before.length - body.length) + X_LINK_CHARS;
+    }
+  }
+  return text.trim().length;
 }
 
 /** A "try again" notice for a not_ready/busy response, or null if the error is a real failure. */
@@ -707,13 +716,13 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 }}
               />
               <div
-                style={{ fontSize: '12px', color: xLength(editText) > X_MAX_CHARS ? '#c62828' : '#666', marginTop: '4px' }}
+                style={{ fontSize: '12px', color: xLength(editText, card.product_url) > X_MAX_CHARS ? '#c62828' : '#666', marginTop: '4px' }}
               >
-                {xLength(editText)}/{X_MAX_CHARS} characters, as X counts them (a link counts as {X_LINK_CHARS})
+                {xLength(editText, card.product_url)}/{X_MAX_CHARS} characters, as X counts them (a link counts as {X_LINK_CHARS})
               </div>
               <button
                 onClick={handleEdit}
-                disabled={loading || xLength(editText) > X_MAX_CHARS}
+                disabled={loading || xLength(editText, card.product_url) > X_MAX_CHARS}
                 style={{ marginTop: '8px', marginRight: '8px' }}
               >
                 Save Edit

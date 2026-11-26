@@ -207,6 +207,8 @@ async def test_a_written_draft_that_names_the_product_ends_with_exactly_one_link
             draft = card["evidence"]["draft"]
             assert draft["text"] == _linked(FAKE_DRAFT)
             assert draft["text"].count(URL) == 1
+            # The card names the URL, so the edit box counts the link as the check does
+            assert card["product_url"] == URL
             # The check ran on the sentences, without the URL
             assert [c["sentence"] for c in draft["sentence_checks"]] == [OPENER, CLAIM, CLOSER]
             assert draft["claim_gate"]["passed"]
@@ -241,6 +243,7 @@ async def test_a_review_without_a_product_url_drafts_as_before(make_review_input
             handle = await _start(env, make_review_input, "41_no_url")
             card = await wait_for_card_ready(handle)
             assert card["evidence"]["draft"]["text"] == FAKE_DRAFT
+            assert card.get("product_url") is None
             assert agent.requests[0].max_chars == 280
             assert "Do not write the link" not in agent.prompts[0]
             await _approve(handle, FAKE_DRAFT)

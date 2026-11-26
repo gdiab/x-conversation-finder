@@ -2266,6 +2266,10 @@ class ReviewWorkflow:
                 "post_anyway": self.post_anyway,
                 "edited_text_gate_state": self.edited_text_gate_state,
                 "draft_sha256": self._draft_sha256 if self._has_draft else None,
+                # issue #41: the watch's product URL, so the edit box counts
+                # the trailing link as the check does (a query: not recorded
+                # in history, so it does not affect replay)
+                "product_url": self.input.product_url,
                 # A founder's reason or a code-written one; a gate failure's
                 # reason quotes the draft and is only on the stored card
                 "skip_reason": self.skip_reason if self.skipped else None,
