@@ -892,8 +892,8 @@ async def test_a_written_review_is_skipped_when_another_review_recorded_the_post
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, agent=agent, checker=checker):
             # A Review whose input carries the post (recorded before issue
-            # #23) researches and plans, and draft_reply refuses; a text-free
-            # Review stops at research (the parametrized test above)
+            # #23) stops at research since issue #22, as a text-free Review
+            # does (the parametrized test below)
             handle, workflow_id = await _start(env, make_review_input, "removed_elsewhere", legacy=True)
             assert await handle.result() == "skipped"
 
@@ -905,9 +905,7 @@ async def test_a_written_review_is_skipped_when_another_review_recorded_the_post
                 assert card["evidence"]["draft"] is None
                 for fragment in POST_FRAGMENTS:
                     assert fragment not in json.dumps(card)
-            assert _scheduled(await handle.fetch_history()) == [
-                "research_post", "plan_reply", "draft_reply", "store_card",
-            ]
+            assert _scheduled(await handle.fetch_history()) == ["research_post", "store_card"]
             await Replayer(workflows=[ReviewWorkflow]).replay_workflow(await handle.fetch_history())
 
 
@@ -936,19 +934,21 @@ async def test_a_draft_is_not_sent_to_the_checker_once_the_post_is_removed(make_
 
 
 @pytest.mark.asyncio
-async def test_an_assembled_review_is_unchanged_by_the_post_wide_lookup(make_review_input):
-    """Assembled mode keeps issue #9's behavior: the Review drafts, and its
-    card is stored redacted. (Its drafter is not sent the post text.)"""
+async def test_an_assembled_review_also_stops_at_the_post_wide_lookup(make_review_input):
+    """issue #22: before, an assembled Review of a post removed elsewhere
+    researched, planned and drafted (its card stored redacted). Now its
+    research is refused before the model call, as in written mode."""
     _record_removal_by_another_review()
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with _worker(env, draft_mode="assembled"):
             handle, workflow_id = await _start(env, make_review_input, "removed_assembled", legacy=True)
-            await wait_for_card_ready(handle)
+            assert await handle.result() == "skipped"
 
             card = _db_card(workflow_id)
-            assert card["status"] == "pending"
+            assert card["status"] == "skipped"
+            assert card["skip_reason"] == POST_REMOVED_SKIP_REASON
             assert card["post"]["text_removed"] is True
-            assert "claim_gate" in _scheduled(await handle.fetch_history())
+            assert _scheduled(await handle.fetch_history()) == ["research_post", "store_card"]
 
 
 @pytest.mark.asyncio
