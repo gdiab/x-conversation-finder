@@ -655,5 +655,22 @@ async def test_a_network_error_or_unknown_host_is_fetch_failed():
     assert error.value.code == "fetch_failed"
 
 
+async def test_an_address_that_cannot_be_connected_to_is_skipped_for_the_next_checked_one():
+    tried = []
+
+    def handler(request):
+        tried.append(request.url.host)
+        if request.url.host == "2606:2800:21f:cb07:6820:80da:af6b:8b2c":
+            raise httpx.ConnectError("network unreachable")
+        return httpx.Response(200, headers={"content-type": "text/plain"}, stream=httpx.ByteStream(b"Acme Relay works."))
+
+    fetcher = HttpPageFetcher(60000, resolver=_resolver(
+        {"example.com": ["2606:2800:21f:cb07:6820:80da:af6b:8b2c", "93.184.215.14"]}
+    ), transport=httpx.MockTransport(handler))
+    page = await fetcher.fetch(URL)
+    assert page.text == "Acme Relay works."
+    assert tried == ["2606:2800:21f:cb07:6820:80da:af6b:8b2c", "93.184.215.14"]
+
+
 def test_html_text_drops_scripts_styles_and_head():
     assert html_to_text(HTML.decode()) == "Docs\nAcme Relay delivers & retries webhooks.\nRuns on Linux"

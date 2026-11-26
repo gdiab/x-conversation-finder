@@ -51,6 +51,8 @@ REQUEST_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # The whole read, redirects and DNS included
 TOTAL_TIMEOUT_SEC = 25.0
 DNS_TIMEOUT_SEC = 5.0
+# Checked addresses tried in turn when one cannot be connected to
+MAX_ADDRESSES = 3
 USER_AGENT = "x-conversation-finder-brief-suggestions"
 
 GITHUB_API = "https://api.github.com"
@@ -269,25 +271,7 @@ class HttpPageFetcher(PageFetcherPort):
         checked like the first URL. Returns (status, headers, body, cut)."""
         for _ in range(MAX_REDIRECTS + 1):
             host, path = check_fetch_url(url)
-            address = await self._public_address(host)
-            target = f"https://[{address}]{path}" if ":" in address else f"https://{address}{path}"
-            request = client.build_request(
-                "GET",
-                target,
-                headers={
-                    "Host": f"[{host}]" if ":" in host else host,
-                    "User-Agent": USER_AGENT,
-                    "Accept-Encoding": "gzip, deflate",
-                    **headers,
-                },
-                extensions={"sni_hostname": host},
-            )
-            try:
-                response = await client.send(request, stream=True)
-            except httpx.TimeoutException:
-                raise PageFetchError(FETCH_FAILED, "The site did not answer in time.")
-            except httpx.HTTPError as e:
-                raise PageFetchError(FETCH_FAILED, f"The page could not be read ({type(e).__name__}).")
+            response = await self._send(client, host, path, headers, await self._public_addresses(host))
             try:
                 if response.status_code in _REDIRECT_STATUSES:
                     location = response.headers.get("location")
@@ -301,7 +285,42 @@ class HttpPageFetcher(PageFetcherPort):
                 await response.aclose()
         raise PageFetchError(FETCH_FAILED, f"The site redirected more than {MAX_REDIRECTS} times.")
 
-    async def _public_address(self, host: str) -> str:
+    async def _send(
+        self, client: httpx.AsyncClient, host: str, path: str, headers: dict, addresses: List[str]
+    ) -> httpx.Response:
+        """Send the GET to the first checked address that accepts a connection.
+
+        Every address was checked before; one that cannot be connected to (an
+        IPv6 address on a network without IPv6) is skipped for the next, up
+        to MAX_ADDRESSES. Any other error ends the read.
+        """
+        for i, address in enumerate(addresses[:MAX_ADDRESSES]):
+            target = f"https://[{address}]{path}" if ":" in address else f"https://{address}{path}"
+            request = client.build_request(
+                "GET",
+                target,
+                headers={
+                    "Host": f"[{host}]" if ":" in host else host,
+                    "User-Agent": USER_AGENT,
+                    "Accept-Encoding": "gzip, deflate",
+                    **headers,
+                },
+                extensions={"sni_hostname": host},
+            )
+            last = i == min(len(addresses), MAX_ADDRESSES) - 1
+            try:
+                return await client.send(request, stream=True)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                if last:
+                    raise PageFetchError(FETCH_FAILED, f"The site could not be reached ({type(e).__name__}).")
+            except httpx.TimeoutException:
+                raise PageFetchError(FETCH_FAILED, "The site did not answer in time.")
+            except httpx.HTTPError as e:
+                raise PageFetchError(FETCH_FAILED, f"The page could not be read ({type(e).__name__}).")
+        raise PageFetchError(FETCH_FAILED, f"The site {host} could not be found.")
+
+    async def _public_addresses(self, host: str) -> List[str]:
+        """Every address the host resolves to, once each, if all are public."""
         try:
             ipaddress.ip_address(host.strip("[]"))
             addresses = [host.strip("[]")]
@@ -317,7 +336,7 @@ class HttpPageFetcher(PageFetcherPort):
                 URL_REFUSED,
                 f"The site {host} resolves to a private or local address, which is not read.",
             )
-        return addresses[0].split("%", 1)[0]
+        return list(dict.fromkeys(a.split("%", 1)[0] for a in addresses))
 
     @staticmethod
     async def _read_capped(response: httpx.Response) -> Tuple[bytes, bool]:

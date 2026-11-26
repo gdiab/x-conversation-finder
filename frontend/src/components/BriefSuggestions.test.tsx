@@ -95,7 +95,7 @@ describe('Suggest brief additions (issue #42)', () => {
     const items = within(list).getAllByRole('listitem');
     expect(items).toHaveLength(3);
     // Each item: an unticked checkbox, the editable sentence, its quote and why
-    expect(within(items[0]).getByRole('checkbox')).not.toBeChecked();
+    for (const item of items) expect(within(item).getByRole('checkbox')).not.toBeChecked();
     expect(within(items[0]).getByLabelText('Suggested sentence 1')).toHaveValue('Acme Relay runs on macOS and Linux.');
     expect(within(items[0]).getByText(/From the page: “Runs on macOS and Linux x86-64\.”/)).toBeInTheDocument();
     expect(within(items[0]).getByText('Why: Answers which-platform posts.')).toBeInTheDocument();
