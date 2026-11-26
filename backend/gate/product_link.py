@@ -61,11 +61,29 @@ def product_url_error(url: str) -> Optional[str]:
 def append_product_link(body: str, url: str) -> str:
     """The draft as it is posted: the checked sentences, one space, the URL.
 
-    A body that already holds the URL (a brief sentence quoting it, inserted
-    verbatim or paraphrased) gets no second copy."""
-    if url in body:
+    A body that already holds the URL as a word of its own (a brief
+    sentence quoting it, inserted verbatim or paraphrased) gets no second
+    copy. A longer URL that starts with it ("<url>/pricing") is another link
+    and does not count."""
+    if holds_product_link(body, url):
         return body
     return f"{body.rstrip()} {url}"
+
+
+# Punctuation that can close a sentence or a bracket right after a link
+_AFTER_LINK = ".,;:!?)]}\"'\u201d\u2019"
+
+
+def holds_product_link(body: str, url: str) -> bool:
+    """Whether a word of `body` is exactly `url`, or `url` between opening
+    and closing or sentence punctuation only."""
+    for word in body.split():
+        word = word.lstrip("([{\"'\u201c\u2018")
+        if word == url:
+            return True
+        if word.startswith(url) and word[len(url):] and all(ch in _AFTER_LINK for ch in word[len(url):]):
+            return True
+    return False
 
 
 def linked_max_chars(text: str, url: str, body: str, max_chars: int) -> int:

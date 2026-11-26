@@ -582,3 +582,24 @@ async def test_an_assembled_claim_that_quotes_the_url_carries_it_once(make_revie
             draft = card["evidence"]["draft"]
             assert any(URL in (seg.get("text") or "") for seg in draft["segments"])  # the claim quotes it
             assert draft["text"].count(URL) == 1
+
+
+def test_only_the_product_url_itself_counts_as_already_there():
+    from backend.gate.product_link import holds_product_link
+
+    assert holds_product_link(f"Acme is at {URL}. Try it.", URL)
+    assert holds_product_link(f"Acme ({URL}) retries.", URL)
+    assert not holds_product_link(f"See {URL}/pricing for plans.", URL)
+    assert not holds_product_link(f"See {URL}-docs for plans.", URL)
+    assert append_product_link(f"See {URL}/pricing for plans.", URL) == f"See {URL}/pricing for plans. {URL}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["written", "assembled"])
+async def test_an_edit_down_to_the_link_alone_fails_its_check(make_review_input, mode):
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, agent=WritingAgent(plans=[mention_plan()]), draft_mode=mode):
+            handle = await _start(env, make_review_input, f"41_link_only_{mode}", product_url=URL)
+            await wait_for_card_ready(handle)
+            await handle.execute_update("edit", args=[URL, str(uuid.uuid4())])
+            assert (await query_card(handle))["edited_text_gate_state"] == "failed"
