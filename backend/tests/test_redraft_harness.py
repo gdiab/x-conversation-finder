@@ -1824,3 +1824,30 @@ async def test_cards_left_out_at_load_count_in_order(tmp_path, no_x, limit_n, sk
         skipped, not_reached, reached,
     )
     assert len({r.workflow_id for r in records}) == min(limit_n, 2)
+
+
+@pytest.mark.asyncio
+async def test_an_error_before_any_model_call_does_not_count_toward_the_limit(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)  # 2001 (no stored plan), 2002
+    plans = {"review:t:2001": {"not": "a plan"}}  # does not decode: an error before any call
+    limit = harness.DraftLimit(1)
+
+    records, _, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans=plans, max_attempts=2, limit=limit,
+    )
+
+    assert [(r.workflow_id, r.outcome) for r in records][0] == ("review:t:2001", "error")
+    assert records[-1].workflow_id == "review:t:2002" and records[-1].outcome != "error"
+    assert (limit.drafted, limit.skipped_before_limit) == (1, 1)
+
+    # The cap refusing the first call: nothing drafted, the limit not reached
+    class Refused(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            raise SpendCapReached("synthetic cap")
+
+    refused = harness.DraftLimit(1)
+    records, _, stopped = await run_harness(
+        reviews[1:], SETTINGS, Refused(), CountingChecker(), plans={}, max_attempts=2, limit=refused,
+    )
+    assert stopped and [r.outcome for r in records] == ["error"]
+    assert (refused.drafted, refused.reached) == (0, False)

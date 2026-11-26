@@ -880,6 +880,12 @@ class _StoppedByCap(Exception):
 NOT_DRAFTED_OUTCOMES = ("plan_invalid", "removed")
 
 
+def _drafted(record: "PostRecord") -> bool:
+    if record.outcome in NOT_DRAFTED_OUTCOMES:
+        return False
+    return record.outcome != "error" or bool(record.attempts) or record.model_calls > 0
+
+
 @dataclass
 class DraftLimit:
     """--limit N (issue #34): stop once N cards are drafted, not after the
@@ -889,13 +895,16 @@ class DraftLimit:
     runs, its removal is found at re-fetch or recorded during its run, its
     plan is invalid, its lookup failed, it has no settings). A small run
     so still drafts N cards when the database has that many. Once N are
-    drafted no further card is looked up on X, so N also bounds the X
-    lookups (at most one per card drafted, plus one per post found gone or
-    whose lookup failed on the way).
+    drafted no further card is looked up on X. The lookups made are at
+    most one per examined card (none for a running Review; cards of the
+    same post share one); a post is looked up before its plan is checked,
+    so a card skipped for an invalid plan costs a lookup too.
 
     A card counts as drafted when one of its runs has another outcome than
-    NOT_DRAFTED_OUTCOMES and its post's removal is not recorded: a run cut
-    off by an error counts (its calls were made).
+    NOT_DRAFTED_OUTCOMES and its post's removal is not recorded. A run cut
+    off by an error counts only when it made a model call (on the spend
+    cap) or finished a draft attempt: an error before any call (a cached
+    plan that does not decode, the cap refusing the first call) does not.
 
     `excluded_at_load` is how many cards load_stored_reviews left out; with
     the reviews' `position`, it places those cards before or after the
@@ -924,7 +933,7 @@ class DraftLimit:
     def count(self, card_records: Sequence["PostRecord"], removed: bool) -> None:
         """Count one examined card from the records its runs made; `removed`:
         its post's removal is recorded (also after a sample had finished)."""
-        if not removed and any(r.outcome not in NOT_DRAFTED_OUTCOMES for r in card_records):
+        if not removed and any(_drafted(r) for r in card_records):
             self.drafted += 1
         else:
             self.skipped_in_run += 1
