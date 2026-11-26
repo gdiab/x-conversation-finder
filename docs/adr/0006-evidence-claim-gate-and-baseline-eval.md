@@ -201,4 +201,17 @@ The 2026-11-21 amendment deferred two options to allow more than verbatim quotes
 
 **What stays in history.** The founder's own text: the brief, the watch query, product name, aliases and key features, and a founder's skip reason. Ids: post, conversation, reply ids and the founder's reply URL. Code-written reasons. Histories recorded before this change keep their text until Temporal's retention deletes them.
 
-**Not changed.** The removal duty's own rules from issue #9 and issue #12: a card keeps the post's author fields, and a founder's edit of an assembled draft is kept as the founder's words. Worker logs are not history and can still print draft sentences. Activity failure messages are history: text-free activities replace other libraries' error messages (a database's statement parameters, a model provider's echo of the request) with the error's type name.
+**Not changed.** The removal duty's own rules from issue #9 and issue #12: a card keeps the post's author fields, and a founder's edit of an assembled draft is kept as the founder's words (both changed by the issue #35 amendment below). Worker logs are not history and can still print draft sentences. Activity failure messages are history: text-free activities replace other libraries' error messages (a database's statement parameters, a model provider's echo of the request) with the error's type name.
+
+## Amendment 2026-11-25: A removal also deletes the author and the founder's edit (issue #35)
+
+**Context.** After the issue #9, #12 and #23 rules, a removed post's cards still kept the author's name, username (handle) and profile link, the post URL (which holds the handle), and, in assembled mode, the founder's edited draft, which can quote or paraphrase the deleted post.
+
+**Decision (George, 2026-11-25).** A removal deletes both, on every stored card of the post, on the stored post, and in the `get_card` result:
+
+1. The removed post keeps only its id, created time, counts, conversation id and reply setting (`REMOVED_POST_KEPT_FIELDS`, an allowlist), with the text placeholder and `text_removed`. The author (id, name, username, follower count, verified flag), the URL and the id of the user it replied to go. A later search that finds the post again stores it the same way.
+2. A founder's edit of the draft goes in either draft mode (the draft text when `steers_applied` holds `manual_edit`), with the edit's check results (sentence and reason) and the "Post anyway" sentences. An unedited assembled draft and the founder's nudges on it stay: code-inserted text and the founder's own words.
+3. The card keeps its ids, status and timestamps. The UI's "Post removed" card shows no author line, follower count or "View on X" link.
+4. Removals recorded before this change get the same rules once: `init_db` (at API start) runs `redact_recorded_removals`, which rewrites only the rows that change.
+
+**Not changed.** Follow-up replies are other posts and keep their authors. No workflow command changes: the redaction is in the activities and in the pure `redact_removed_card`, so no patch is needed.

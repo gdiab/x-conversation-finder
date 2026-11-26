@@ -179,6 +179,6 @@ export function makeCardBy(username: string, overrides: Partial<ReviewCard> = {}
   const card = makeCard(overrides);
   return {
     ...card,
-    post: { ...card.post, author: { ...card.post.author, username, name: `${username} (synthetic)` } },
+    post: { ...card.post, author: { ...card.post.author!, username, name: `${username} (synthetic)` } },
   };
 }

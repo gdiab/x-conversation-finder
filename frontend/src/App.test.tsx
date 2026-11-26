@@ -115,7 +115,7 @@ describe('App review queue', () => {
     try {
       const byName = (username: string) => {
         const card = makeCard({ workflow_id: `review:test:${username}` });
-        card.post = { ...card.post, author: { ...card.post.author, username } };
+        card.post = { ...card.post, author: { ...card.post.author!, username } };
         return { cards: [card], count: 1 };
       };
       listReviewsMock.mockResolvedValueOnce(byName('initial'));

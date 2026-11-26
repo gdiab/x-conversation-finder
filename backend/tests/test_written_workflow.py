@@ -817,22 +817,39 @@ def test_removal_redacts_everything_a_model_wrote_on_a_written_card():
     assert redact_removed_card(redacted) == redacted  # idempotent
 
 
-def test_removal_keeps_an_assembled_cards_draft_and_edit_results():
-    """Unchanged from issue #9: an assembled draft is code-inserted text and
-    its edit results are the founder's own words."""
+def test_removal_keeps_an_unedited_assembled_draft():
+    """Unchanged from issue #9: an assembled draft is code-inserted text, and
+    the founder's nudges are the founder's own words."""
     card = _written_card()
     card["evidence"]["draft_mode"] = "assembled"
     card["evidence"]["draft"].update(mode="assembled", text="Thanks! Happy to help.", sentence_checks=[], written=None)
-    card["evidence"]["draft"]["steers_applied"] = ["Make it shorter", "manual_edit"]
-    card["edited_text_gate_results"] = [{"sentence": "Thanks!", "passed": True, "kind": "non_claim", "reason": ""}]
-    card["post_anyway_failing_sentences"] = ["Founder's own sentence."]
+    card["evidence"]["draft"]["steers_applied"] = ["Make it shorter"]
 
     redacted = redact_removed_card(card)
 
     assert redacted["evidence"]["draft"]["text"] == "Thanks! Happy to help."
+    assert redacted["evidence"]["draft"]["steers_applied"] == ["Make it shorter"]
+
+
+def test_removal_drops_an_assembled_cards_edit_and_its_results():
+    """Issue #35: the founder's edited draft can quote or paraphrase the
+    post, so a removal drops it and its check results in assembled mode too."""
+    card = _written_card()
+    card["evidence"]["draft_mode"] = "assembled"
+    edit = "As you said, eventual consistency hides a lot."
+    card["evidence"]["draft"].update(mode="assembled", text=edit, sentence_checks=[], written=None)
+    card["evidence"]["draft"]["steers_applied"] = ["Make it shorter", "manual_edit"]
+    card["edited_text_gate_results"] = [{"sentence": edit, "passed": False, "kind": "claim", "reason": f"'{edit}' unsupported"}]
+    card["post_anyway_failing_sentences"] = [edit]
+
+    redacted = redact_removed_card(card)
+
+    assert redacted["evidence"]["draft"]["text"] == POST_TEXT_REMOVED
     assert redacted["evidence"]["draft"]["steers_applied"] == ["Make it shorter", "manual_edit"]
-    assert redacted["edited_text_gate_results"] == card["edited_text_gate_results"]
-    assert redacted["post_anyway_failing_sentences"] == ["Founder's own sentence."]
+    assert redacted["edited_text_gate_results"][0]["sentence"] == POST_TEXT_REMOVED
+    assert redacted["edited_text_gate_results"][0]["passed"] is False
+    assert redacted["post_anyway_failing_sentences"] == [POST_TEXT_REMOVED]
+    assert "eventual consistency" not in json.dumps(redacted)
 
 
 @pytest.mark.asyncio

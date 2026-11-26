@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List, Union
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 import asyncio
+import logging
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -20,6 +21,8 @@ from backend.models.written import (
 # Placeholder for post text removed under X's removal duty (ADR-0006); the
 # Review workflow's get_card query uses the same value.
 POST_TEXT_REMOVED = "[removed - post deleted]"
+
+logger = logging.getLogger(__name__)
 
 # Issue #9: skip reason for a pending Review whose target post returned 404 on
 # the re-fetch at approve time. The frontend shows "Post removed" for it.
@@ -148,33 +151,52 @@ def redact_sentence_check(check: Any) -> Any:
     return redacted
 
 
-def is_written_evidence(evidence_data: Any) -> bool:
-    """Whether a card's evidence dict belongs to a written-mode Review (issue #12)."""
-    if not isinstance(evidence_data, dict):
-        return False
-    draft = evidence_data.get("draft")
-    return evidence_data.get("draft_mode") == DRAFT_MODE_WRITTEN or (
-        isinstance(draft, dict) and draft.get("mode") == DRAFT_MODE_WRITTEN
-    )
+def redact_edit_results(results: Any) -> Any:
+    """A card's edited-text check results after a removal.
 
-
-def redact_edit_results(results: Any, evidence_data: Any) -> Any:
-    """A card's edited-text check results after a removal (issue #12).
-
-    In written mode an edit starts from text a model wrote after reading the
-    post, so its sentences are redacted like the draft's. In assembled mode
-    the edited sentences are the founder's own words and stay, as before.
+    The sentences are the founder's edited draft, which can quote or
+    paraphrase the removed post, and a reason can echo a sentence: both go,
+    in either draft mode (issue #35; issue #12 did it for written mode).
     """
-    if not is_written_evidence(evidence_data) or not isinstance(results, list):
+    if not isinstance(results, list):
         return results
     return [redact_sentence_check(r) for r in results]
 
 
-def redact_failing_sentences(sentences: Any, evidence_data: Any) -> Any:
-    """A card's post_anyway failing sentences after a removal; see redact_edit_results."""
-    if not is_written_evidence(evidence_data) or not isinstance(sentences, list):
+def redact_failing_sentences(sentences: Any) -> Any:
+    """A card's post_anyway failing sentences (sentences of the founder's
+    edit) after a removal; see redact_edit_results."""
+    if not isinstance(sentences, list):
         return sentences
     return [POST_TEXT_REMOVED for _ in sentences]
+
+
+# Issue #35: the post fields a removed post keeps. Everything else goes: the
+# author's id, name, username (handle), follower count and verified flag, the
+# post URL (it holds the handle), and the id of the user it replied to.
+# An allowlist, so a field added to Post later is removed until listed here.
+REMOVED_POST_KEPT_FIELDS = (
+    "id",
+    "created_at",
+    "like_count",
+    "reply_count",
+    "repost_count",
+    "quote_count",
+    "conversation_id",
+    "reply_settings",
+)
+
+
+def redact_removed_post(post: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A post dict (a card's, or the stored post's) after a removal: the text
+    replaced, the removal recorded, and no author identity or URL (issue #35).
+    Pure and deterministic (the workflow calls it from a query)."""
+    post = post if isinstance(post, dict) else {}
+    return {
+        **{key: post[key] for key in REMOVED_POST_KEPT_FIELDS if key in post},
+        "text": POST_TEXT_REMOVED,
+        "text_removed": True,
+    }
 
 
 def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
@@ -183,8 +205,9 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
     The assembled draft text and segments inserted by code are kept; free
     text or unknown identifiers in segments and gate-generated steers are
     removed, and the claim-gate details are dropped as a whole (older cards
-    can hold echoed model values in any of them). Founder nudges and edits
-    are the founder's own text and stay.
+    can hold echoed model values in any of them). Founder nudges are the
+    founder's own text and stay; a founder edit of the draft goes (issue
+    #35): the edited text can quote or paraphrase the post.
 
     A written draft (issue #12) is different: the model wrote its text after
     reading the post, so the text goes, with each sentence check's sentence
@@ -218,6 +241,11 @@ def _redact_draft(draft: Dict[str, Any], materials: Any) -> Dict[str, Any]:
             "claims": [],
             "failed_claims": [],
         }
+    edited = isinstance(redacted.get("steers_applied"), list) and MANUAL_EDIT_STEER in redacted["steers_applied"]
+    if edited and redacted.get("text"):
+        # issue #35: the founder's edited draft can quote or paraphrase the
+        # post, so it goes in either draft mode
+        redacted["text"] = POST_TEXT_REMOVED
     if redacted.get("mode") == DRAFT_MODE_WRITTEN:
         if redacted.get("text"):
             redacted["text"] = POST_TEXT_REMOVED
@@ -308,16 +336,17 @@ def redact_removed_card(card: Dict[str, Any]) -> Dict[str, Any]:
     """A card dict (the get_card query's, or a stored card's) after a removal.
 
     The one place that lists every card field a removal touches: the post
-    text, the evidence copies (redact_post_text_copies), the skip reason and,
-    in written mode (issue #12), the edited-text results and the post_anyway
-    failing sentences. Pure and deterministic (the workflow calls it from a
-    query).
+    text, the author and the post URL (redact_removed_post, issue #35), the
+    evidence copies (redact_post_text_copies, which also drops an edited
+    draft's text), the skip reason, and the founder's edit: its check
+    results and the post_anyway failing sentences (issue #12 in written
+    mode, issue #35 in both). Pure and deterministic (the workflow calls it
+    from a query).
     """
-    evidence = card.get("evidence")
     redacted = {
         **card,
-        "post": {**(card.get("post") or {}), "text": POST_TEXT_REMOVED, "text_removed": True},
-        "evidence": redact_post_text_copies(evidence),
+        "post": redact_removed_post(card.get("post")),
+        "evidence": redact_post_text_copies(card.get("evidence")),
         "skip_reason": redact_skip_reason(card.get("skip_reason")),
     }
     for key, redact in (
@@ -325,7 +354,7 @@ def redact_removed_card(card: Dict[str, Any]) -> Dict[str, Any]:
         ("post_anyway_failing_sentences", redact_failing_sentences),
     ):
         if key in card:
-            redacted[key] = redact(card[key], evidence)
+            redacted[key] = redact(card[key])
     return redacted
 from backend.database import get_db, ReviewCardDB
 from backend.review_docs import text_free_activity as _text_free_activity
@@ -621,7 +650,14 @@ def _compose_card(workflow_id: str, ref: CardRef) -> ReviewCard:
         raise ApplicationError(
             f"Post {ref.post_id} is not stored", type=review_docs.DOC_MISSING_ERROR_TYPE, non_retryable=True
         )
-    post_data.pop("text_removed", None)
+    if post_data.pop("text_removed", None):
+        # issue #35: a removed stored post has no author or URL. The card is
+        # built with empty ones; store_card finds the removal recorded and
+        # stores the card redacted (redact_removed_post)
+        post_data.update({
+            "author": {"id": "", "username": "", "name": "", "followers_count": 0, "verified": False},
+            "url": POST_TEXT_REMOVED,
+        })
     post = review_docs.from_json(post_data, Post)
     evidence = review_docs.find_doc(workflow_id, ref.post_id, ref.evidence_slot, Evidence)
     if evidence is None:
@@ -697,8 +733,11 @@ def _store_card_in_transaction(input: StoreCardInput, make_current: bool) -> boo
         
         # issue #9: a removal already recorded for this post (by another
         # account's Review, or this card's own earlier removal) also applies to
-        # this write, so a late or retried store cannot put the text back
-        if _post_removal_recorded(db, card_db.post_data["id"]):
+        # this write, so a late or retried store cannot put the text back.
+        # issue #35: the stored post's record counts too (a removal before
+        # any card of the post was stored), so the card never keeps the
+        # placeholder author _compose_card gives a removed post
+        if review_docs._post_removed(db, card_db.post_data["id"]):
             _remove_card_post_text(card_db)
             # A late store (a timed-out attempt finishing after the removal)
             # must not revert the removed card's later status either
@@ -1056,17 +1095,25 @@ async def get_card(input: GetCardInput) -> Optional[Dict]:
     return result
 
 
-def _redact_removed_card_db(card_db: ReviewCardDB) -> None:
-    """Redact every copy of the post text on a stored card but the post's own
-    (redact_removed_card lists the fields). Used when the removal is recorded
-    and on every later write to the card."""
-    redacted = redact_removed_card({
+def _removed_card_fields(card_db: ReviewCardDB) -> Dict[str, Any]:
+    """The stored card's fields a removal redacts, as redact_removed_card takes them."""
+    return {
         "post": card_db.post_data,
         "evidence": card_db.evidence_data,
         "skip_reason": card_db.skip_reason,
         "edited_text_gate_results": card_db.edited_text_gate_results,
         "post_anyway_failing_sentences": card_db.post_anyway_failing_sentences,
-    })
+    }
+
+
+def _redact_removed_card_db(card_db: ReviewCardDB) -> None:
+    """Redact a stored card after a removal (redact_removed_card lists the
+    fields): the post, its author and URL, and every copy of the post text.
+    Used when the removal is recorded (issue #9 marks the post, so the UI
+    shows "Post removed") and on every later write to the card."""
+    redacted = redact_removed_card(_removed_card_fields(card_db))
+    card_db.post_data = redacted["post"]
+    flag_modified(card_db, "post_data")
     card_db.evidence_data = redacted["evidence"]
     flag_modified(card_db, "evidence_data")
     card_db.skip_reason = redacted["skip_reason"]
@@ -1076,15 +1123,46 @@ def _redact_removed_card_db(card_db: ReviewCardDB) -> None:
             flag_modified(card_db, key)
 
 
-def _remove_card_post_text(card_db: ReviewCardDB) -> None:
-    """Replace a stored card's post text and every copy of it on the card."""
-    post_data = dict(card_db.post_data)
-    post_data["text"] = POST_TEXT_REMOVED
-    # issue #9: record the removal on the card (the UI shows "Post removed")
-    post_data["text_removed"] = True
-    card_db.post_data = post_data
-    flag_modified(card_db, "post_data")
+def redact_recorded_removals() -> int:
+    """Apply the current removal rules to every post whose removal is already
+    recorded (issue #35: cards and stored posts removed before the author,
+    the URL and the founder's edit were removed too). Idempotent: only rows
+    that change are written. Returns how many rows changed. Runs at startup
+    (database.init_db)."""
+    from backend.database import StoredPostDB, checkpoint_wal
 
+    changed = 0
+    db = get_db()
+    try:
+        db.execute(sql_text("BEGIN IMMEDIATE"))
+        cards = db.query(ReviewCardDB).filter(
+            ReviewCardDB.post_data["text_removed"].as_boolean() == True,  # noqa: E712
+        ).all()
+        for card_db in cards:
+            fields = _removed_card_fields(card_db)
+            if redact_removed_card(fields) != fields:
+                _redact_removed_card_db(card_db)
+                changed += 1
+        for stored in db.query(StoredPostDB).filter(
+            StoredPostDB.post_data["text_removed"].as_boolean() == True,  # noqa: E712
+        ).all():
+            redacted_post = redact_removed_post(stored.post_data)
+            if redacted_post != stored.post_data:
+                stored.post_data = redacted_post
+                changed += 1
+        db.commit()
+    finally:
+        db.close()
+    if changed and not checkpoint_wal():
+        # The rows are redacted; the old pages leave the -wal file at the next
+        # checkpoint (the next removal, or the next start)
+        logger.warning("Redacted recorded removals; the WAL checkpoint is pending (a reader holds an old snapshot)")
+    return changed
+
+
+def _remove_card_post_text(card_db: ReviewCardDB) -> None:
+    """Replace a stored card's post text, author and URL, and every copy of
+    the text on the card."""
     _redact_removed_card_db(card_db)
 
 

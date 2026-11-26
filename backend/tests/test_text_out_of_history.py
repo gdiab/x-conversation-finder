@@ -137,7 +137,8 @@ def _db_has_marker() -> bool:
     try:
         rows = db.execute(text(
             "SELECT post_data FROM stored_posts UNION ALL SELECT data FROM review_docs "
-            "UNION ALL SELECT evidence_data FROM review_cards"
+            "UNION ALL SELECT post_data || evidence_data || coalesce(edited_text_gate_results, '') "
+            "|| coalesce(post_anyway_failing_sentences, '') FROM review_cards"
         )).all()
         return any(MARKER in str(r[0]) for r in rows)
     finally:
@@ -280,11 +281,9 @@ async def test_after_a_removal_the_text_is_in_neither_the_database_nor_its_wal(
     make_review_input, test_db_isolation, draft_mode
 ):
     db_path = Path(test_db_isolation)
-    # The removal duty (issue #9) removes the post's text and keeps its
-    # author on the card, so the word is only in the text here
-    post = replace(
-        marker_post(), url="", author=Author(id="author_9", username="pat_dev", name="Pat", followers_count=5000)
-    )
+    # The word is in the post's text, its author's handle and name, and its
+    # URL: issue #35 removes the author and the URL with the text
+    post = marker_post()
     # Written drafts here make no product claim; an assembled draft follows the fake plan
     agent = WritingAgent(
         texts=[f"Good question about {MARKER} clusters. What are you using today?"],
@@ -296,10 +295,9 @@ async def test_after_a_removal_the_text_is_in_neither_the_database_nor_its_wal(
                 env, make_review_input, f"removal_{draft_mode}", product_name=PRODUCT, post=post
             )
             await wait_for_card_ready(handle)
-            # The removal keeps a founder's edit of an assembled draft (the
-            # founder's own words, issue #9) and removes one of a written
-            # draft (it starts from model text that can quote the post)
-            edit = f"Is {MARKER} your stack?" if draft_mode == "written" else "What is your stack?"
+            # The removal removes a founder's edit in either draft mode (issue
+            # #35): the edit can quote or paraphrase the post
+            edit = f"Is {MARKER} your stack?"
             await handle.execute_update("edit", args=[edit, str(uuid.uuid4())])
             assert MARKER.encode() in _sqlite_bytes(db_path), "the test must start with the text stored"
 
@@ -394,9 +392,9 @@ async def test_a_removal_is_retried_until_its_checkpoint_completes(make_review_i
     from backend.review_docs import save_doc
 
     db_path = Path(test_db_isolation)
-    # The author is kept on removal (issue #9), so the word is only in the text
-    plain_author = Author(id="author_9", username="pat_dev", name="Pat", followers_count=5000)
-    review_input = make_review_input(post=replace(marker_post(), url="", author=plain_author))
+    # The word is in the stored post's text, author and URL (issue #35
+    # removes all three)
+    review_input = make_review_input(post=marker_post())
     save_doc("review:test:1001_busy", review_input.post_id, "evidence", f"a draft about {MARKER}")
     reader = sqlite3.connect(db_path, timeout=0.1)
     reader.execute("BEGIN")

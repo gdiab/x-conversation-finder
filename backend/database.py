@@ -231,6 +231,13 @@ def init_db():
     
     # QA R13: Run migrations for existing databases
     _migrate_add_edit_seq(engine)
+    # issue #35: removals recorded before the author, the post URL and the
+    # founder's edit were removed too
+    from backend.activities.store_activities import redact_recorded_removals
+
+    changed = redact_recorded_removals()
+    if changed:
+        logger.info(f"Applied the removal rules to {changed} rows of removed posts")
 
 
 def _migrate_add_edit_seq(engine):
