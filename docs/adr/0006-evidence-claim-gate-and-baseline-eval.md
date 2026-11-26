@@ -214,4 +214,4 @@ The 2026-11-21 amendment deferred two options to allow more than verbatim quotes
 3. The card keeps its ids, status and timestamps. The UI's "Post removed" card shows no author line, follower count or "View on X" link.
 4. Removals recorded before this change get the same rules once: `init_db` (at API start) runs `redact_recorded_removals`, which rewrites only the rows that change.
 
-**Not changed.** Follow-up replies are other posts and keep their authors. No workflow command changes: the redaction is in the activities and in the pure `redact_removed_card`, so no patch is needed.
+**Not changed.** Follow-up replies are other posts and keep their authors. A Review recorded before issue #23 holds the post in its workflow state; when another Review or the eval records the removal, that Review's raw `get_card` query is not redacted, and `GET /api/reviews/{id}` redacts it from the stored removal (`apply_stored_removal`), as for issue #9. No workflow command changes: the redaction is in the activities and in the pure `redact_removed_card`, so no patch is needed.

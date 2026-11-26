@@ -340,11 +340,11 @@ def test_a_start_retries_a_checkpoint_an_earlier_start_could_not_complete(test_d
     calls = []
     real_checkpoint = backend.database.checkpoint_wal
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("blocked") and False)
-    assert redact_recorded_removals(checkpoint_attempts=3, retry_delay_sec=0) == 1
-    assert calls == ["blocked"] * 3  # retried, then left for the next start
+    assert redact_recorded_removals() == 1
+    assert calls == ["blocked"]  # one attempt (it waits out the busy timeout), then left for the next start
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("ok") or real_checkpoint())
     assert redact_recorded_removals() == 0
-    assert calls == ["blocked"] * 3 + ["ok"]
+    assert calls == ["blocked", "ok"]
     assert HANDLE.encode() not in _sqlite_bytes(Path(test_db_isolation))
 
 

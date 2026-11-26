@@ -1123,7 +1123,7 @@ def _redact_removed_card_db(card_db: ReviewCardDB) -> None:
             flag_modified(card_db, key)
 
 
-def redact_recorded_removals(checkpoint_attempts: int = 10, retry_delay_sec: float = 0.5) -> int:
+def redact_recorded_removals() -> int:
     """Apply the current removal rules to every post whose removal is already
     recorded (issue #35: cards and stored posts removed before the author,
     the URL and the founder's edit were removed too). Idempotent: only rows
@@ -1157,19 +1157,12 @@ def redact_recorded_removals(checkpoint_attempts: int = 10, retry_delay_sec: flo
     # Checkpoint whenever a removal is recorded, not only when this run
     # changed rows: a checkpoint an earlier start could not complete (a
     # reader held an old snapshot) leaves the old pages in the -wal file,
-    # and the next start finds the rows already redacted. A reader's
-    # snapshot is short-lived, so the checkpoint is retried for a few
-    # seconds before the start goes on (the next removal or start retries)
-    if cards or stored_posts:
-        import time
-
-        for attempt in range(checkpoint_attempts):
-            if checkpoint_wal():
-                break
-            if attempt + 1 < checkpoint_attempts:
-                time.sleep(retry_delay_sec)
-        else:
-            logger.warning("Recorded removals redacted; the WAL checkpoint is pending (a reader holds an old snapshot)")
+    # and the next start finds the rows already redacted. One attempt:
+    # checkpoint_wal already waits out SQLite's busy timeout (5 s) for a
+    # reader, so a start is delayed by at most that; the next removal or
+    # start retries a checkpoint still pending
+    if (cards or stored_posts) and not checkpoint_wal():
+        logger.warning("Recorded removals redacted; the WAL checkpoint is pending (a reader holds an old snapshot)")
     return changed
 
 
