@@ -1,0 +1,85 @@
+=== X Conversation Finder Full E2E Test ===
+Wed Nov 25 16:12:52 PST 2026
+
+Configuration:
+  Adapters: X=fake, Reply=fake (no credentials)
+  Temporal: 127.0.0.1:7243 (in memory), UI port 8243
+  API: http://127.0.0.1:8012/api
+  Database: data/e2e/e2e-full.db
+  Follow-up delay: 8s (real durable timer)
+
+✓ Database initialized
+
+Starting Temporal dev server...
+✓ Temporal ready
+Starting worker...
+✓ Worker running
+Starting API...
+✓ API ready
+
+=== E2E Flow Execution ===
+
+[1] Starting TopicWatch...
+{
+    "workflow_id": "watch:e2e-full-test:distributed-systems",
+    "message": "Started watch for topic 'distributed-systems'"
+}
+
+[2] Waiting for the poll to create the card for review:e2e-full-test:1001...
+✓ Card is pending
+  Draft: Thanks! Acme Tools helps teams handle eventual consistency in distributed systems. Happy to share details.
+  Edited-text gate state: None
+
+[3] Editing the draft: dropping its closing sentence (the edited text is checked again)...
+{
+    "message": "Edited",
+    "new_text": "Thanks! Acme Tools helps teams handle eventual consistency in distributed systems."
+}
+✓ Card shows the edited draft, gate state: passed
+
+[4] Approving the draft shown before the edit (must be refused)...
+{
+    "code": "draft_changed",
+    "detail": "The draft changed since it was shown. Review the current draft and approve again."
+}
+✓ Stale approve refused with draft_changed; card still pending
+
+[5] Approving the edited draft on the card (its text and gate state)...
+{
+    "message": "Approved"
+}
+✓ Review approved
+
+[6] Confirming posted reply...
+{
+    "message": "Confirmed",
+    "result": "Confirmed reply 9999"
+}
+✓ Reply confirmed
+
+[7] Waiting for the follow-up timer (8s) and check_followup...
+
+[8] Checking final card...
+  Status: followup_due
+  Draft: Thanks! Acme Tools helps teams handle eventual consistency in distributed system
+  Posted URL: https://x.com/founder/status/12345
+  Reply post id: 9999
+  Follow-up replies: 2
+✓ The approved draft is the edited one
+
+=== E2E Test Complete ===
+
+All assertions passed:
+  - TopicWatch started and polled; Review card created with status 'pending'
+  - Edited draft re-checked (gate state 'passed')
+  - Approve of the draft shown before the edit refused (409 draft_changed)
+  - Edited draft approved with the text and gate state on the card
+  - Posted reply confirmed
+  - Follow-up timer fired (8s, real durable timer); check_followup stored the replies
+
+All operations used fake adapters (no X or OpenAI calls)
+
+Wed Nov 25 16:13:09 PST 2026
+
+=== Cleanup ===
+✓ Services stopped

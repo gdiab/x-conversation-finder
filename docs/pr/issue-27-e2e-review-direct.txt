@@ -1,0 +1,66 @@
+=== X Conversation Finder E2E Test (Direct Review) ===
+Wed Nov 25 16:13:10 PST 2026
+
+Configuration:
+  Adapters: X=fake, Reply=fake (no credentials)
+  Temporal: 127.0.0.1:7243 (in memory), UI port 8243
+  API: http://127.0.0.1:8011/api
+  Database: data/e2e/e2e-review-direct.db
+  Follow-up delay: 8s (real durable timer)
+
+✓ Database initialized
+
+Starting Temporal dev server...
+✓ Temporal ready
+Starting worker...
+✓ Worker running
+Starting API...
+✓ API ready
+
+=== Starting Review Workflow ===
+
+[1] Storing the post and starting the Review with its id...
+✓ Workflow started: review:e2e-test:e2e_9999
+
+[2] Waiting for the card...
+✓ Card created
+  Status: pending
+  Post: How do you keep distributed systems reliable when the networ
+  Draft: Thanks! Our product helps developers build reliable distributed systems. Happy t
+
+[3] Approving the draft on the card (never edited, so gate state null)...
+{
+    "message": "Approved"
+}
+✓ Review approved
+
+[4] Confirming posted reply...
+{
+    "message": "Confirmed",
+    "result": "Confirmed reply 99999"
+}
+✓ Reply confirmed, follow-up timer starting
+
+[5] Waiting for the follow-up timer (8s) and check_followup...
+
+[6] Checking final card...
+  Status: followup_due
+  Draft: Thanks! Our product helps developers build reliable distributed systems. Happy t
+  Posted URL: https://x.com/founder/status/12345
+  Reply post id: 99999
+  Follow-up replies: 1
+
+=== E2E Test Complete ===
+
+✓ Post stored; Review workflow started with its id
+✓ Card created with a draft
+✓ Draft approved with the text and gate state on the card
+✓ Posted reply confirmed
+✓ Follow-up timer fired and check_followup stored the replies
+
+All operations used fake adapters (no X or OpenAI calls)
+
+Wed Nov 25 16:13:23 PST 2026
+
+=== Cleanup ===
+✓ Services stopped
