@@ -604,6 +604,8 @@ async def run_written_path(
             continue
         # Issue #41: checked without a trailing product link, as live
         text = strip_product_link(evidence.draft.text, settings.product_url)[0]
+        # and the next redraft sees the draft without it, as a live redraft does
+        evidence.draft.text = text
         reused = text in checks
         if not reused:
             if cap is not None:

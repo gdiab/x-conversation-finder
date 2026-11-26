@@ -481,3 +481,48 @@ async def test_the_redraft_harness_checks_with_the_link_budget(product_brief):
     assert (await check_text(too_long, without, True, FakeClaimChecker(), "k2")).passed
     # Settings exported before the field still load
     assert WatchSettings(**{"product_brief": "b", "product_name": "A"}).product_url is None
+
+
+@pytest.mark.asyncio
+async def test_the_harness_redraft_never_sees_a_link_the_model_wrote(product_brief, sample_post):
+    from backend.adapters.fake_claim_checker import FakeClaimChecker
+    from backend.eval.written_harness import StoredReview, WatchSettings, run_written_path
+    from backend.models import Evidence
+
+    too_long = f"{OPENER} {CLAIM} {LONG_QUESTION}"
+    agent = WritingAgent(texts=[_linked(too_long), FAKE_DRAFT])
+    review = StoredReview(
+        workflow_id="review:test:1001", topic="reliability", post=sample_post,
+        evidence=Evidence(post_id="1001", matched_topic="reliability", why_it_fits="It asks.",
+                          confidence_score=0.9, confidence_inputs={}, founder_materials=[]),
+    )
+    settings = WatchSettings(product_brief=product_brief, product_name=PRODUCT, product_url=URL)
+    attempts = await run_written_path(
+        review, settings, mention_plan(), agent, FakeClaimChecker(), max_attempts=2,
+    )
+    assert [a.passed for a in attempts] == [False, True]
+    assert attempts[0].text == too_long  # checked without the link
+    assert agent.previous_texts[1] == too_long  # and redrafted from it without the link
+    assert agent.requests[0].max_chars == 256
+
+
+@pytest.mark.asyncio
+async def test_an_assembled_draft_too_long_for_the_link_is_not_carded(make_review_input):
+    """A claim sentence that leaves no room for the link: the draft fails its
+    gate with the reason, is redrafted, then skipped. Without a URL it passes."""
+    long_claim = (
+        "Our product helps developers build reliable distributed systems with automatic failover, "
+        "strong consistency guarantees and real-time monitoring for every service in the cluster, "
+        "across every region the team runs in, without extra configuration."
+    )
+    brief = f"# Product Brief\n\n{long_claim}\n"
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with _worker(env, draft_mode="assembled"):
+            linked = await _start(env, make_review_input, "41_assembled_long", product_url=URL, product_brief=brief)
+            card = await wait_for_card_ready(linked)
+            assert card["status"] == "skipped"
+            assert "at most 256 characters" in (card.get("skip_reason") or "")
+            plain = await _start(env, make_review_input, "41_assembled_long_no_url", product_brief=brief)
+            card = await wait_for_card_ready(plain)
+            assert card["status"] == "pending"
+            assert len(card["evidence"]["draft"]["text"]) > 256
