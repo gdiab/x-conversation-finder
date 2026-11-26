@@ -87,6 +87,9 @@ class StoredReview:
     post: Post
     evidence: Evidence
     account: str = ""
+    # Its row's place among all stored cards, oldest first, counting the
+    # cards load_stored_reviews left out (DraftLimit counts those in order)
+    position: Optional[int] = None
 
     @property
     def settings_key(self) -> str:
@@ -186,7 +189,7 @@ def load_stored_reviews(
         removed_ids = _removed_post_ids(conn)
     finally:
         conn.close()
-    for workflow_id, post_data, evidence_data in rows:
+    for position, (workflow_id, post_data, evidence_data) in enumerate(rows):
         try:
             post_dict = json.loads(post_data) if isinstance(post_data, str) else post_data
             evidence_dict = json.loads(evidence_data) if isinstance(evidence_data, str) else evidence_data
@@ -218,7 +221,7 @@ def load_stored_reviews(
         if not topic:
             excluded[EXCLUDED_NO_TOPIC] += 1
             continue
-        reviews.append(StoredReview(workflow_id, topic, post, evidence, _account_of(workflow_id)))
+        reviews.append(StoredReview(workflow_id, topic, post, evidence, _account_of(workflow_id), position))
     return reviews, excluded
 
 
@@ -880,37 +883,65 @@ NOT_DRAFTED_OUTCOMES = ("plan_invalid", "removed")
 @dataclass
 class DraftLimit:
     """--limit N (issue #34): stop once N cards are drafted, not after the
-    first N cards. A card the run passes over (its Review still runs, its
-    removal is recorded or found at re-fetch, its plan is invalid, its
-    lookup failed, it has no settings) does not count toward N, so a small
-    run still drafts N cards when the database has that many. Once N are
+    first N cards. A card passed over on the way does not count toward N:
+    one load_stored_reviews left out (its removal is recorded, its stored
+    plan was invalid twice, ...) or one the run skips (its Review still
+    runs, its removal is found at re-fetch or recorded during its run, its
+    plan is invalid, its lookup failed, it has no settings). A small run
+    so still drafts N cards when the database has that many. Once N are
     drafted no further card is looked up on X, so N also bounds the X
     lookups (at most one per card drafted, plus one per post found gone or
     whose lookup failed on the way).
 
     A card counts as drafted when one of its runs has another outcome than
-    NOT_DRAFTED_OUTCOMES: a run cut off by an error counts (its calls were
-    made), a post removed during its run does not."""
+    NOT_DRAFTED_OUTCOMES and its post's removal is not recorded: a run cut
+    off by an error counts (its calls were made).
+
+    `excluded_at_load` is how many cards load_stored_reviews left out; with
+    the reviews' `position`, it places those cards before or after the
+    point where the limit was reached."""
 
     limit: int
+    excluded_at_load: int = 0
     drafted: int = 0
-    skipped_before_limit: int = 0  # cards passed over while fewer than N were drafted
-    not_reached: int = 0  # cards after the Nth drafted one: never examined, never looked up
+    skipped_in_run: int = 0  # examined cards the run skipped
+    skipped_at_load: int = 0  # cards left out at load, before the stop (finish)
+    not_reached: int = 0  # cards after the stop: never examined, never looked up (finish)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.limit, int) or isinstance(self.limit, bool) or self.limit < 1:
-            raise ValueError("the limit must be a whole number of 1 or more")
+        for name, value, low in (("limit", self.limit, 1), ("excluded_at_load", self.excluded_at_load, 0)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < low:
+                raise ValueError(f"the {name} must be a whole number of {low} or more")
 
     @property
     def reached(self) -> bool:
         return self.drafted >= self.limit
 
-    def count(self, card_records: Sequence["PostRecord"]) -> None:
-        """Count one examined card from the records its runs made."""
-        if any(r.outcome not in NOT_DRAFTED_OUTCOMES for r in card_records):
+    @property
+    def skipped_before_limit(self) -> int:
+        return self.skipped_in_run + self.skipped_at_load
+
+    def count(self, card_records: Sequence["PostRecord"], removed: bool) -> None:
+        """Count one examined card from the records its runs made; `removed`:
+        its post's removal is recorded (also after a sample had finished)."""
+        if not removed and any(r.outcome not in NOT_DRAFTED_OUTCOMES for r in card_records):
             self.drafted += 1
         else:
-            self.skipped_before_limit += 1
+            self.skipped_in_run += 1
+
+    def finish(self, reviews: Sequence[StoredReview], examined: int, ended: bool) -> None:
+        """Place the cards that were not examined. `examined`: how many of
+        `reviews` were; `ended`: the run went through all of them without
+        reaching the limit or a cap stop."""
+        if ended or not examined:  # not examined: no reviews, so ended
+            # Every card left out at load came before the end of the run
+            self.skipped_at_load, self.not_reached = self.excluded_at_load, 0
+            return
+        total = len(reviews) + self.excluded_at_load
+        last = reviews[examined - 1]
+        row = last.position if last.position is not None else examined - 1
+        self.skipped_at_load = max(0, min(self.excluded_at_load, row - (examined - 1)))
+        self.not_reached = max(0, total - row - 1)
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -951,15 +982,17 @@ async def run_harness(
     `max_attempts` is the default for a watch without a saved limit.
 
     `limit` (a DraftLimit, issue #34) ends the run once that many cards are
-    drafted; the cards after it are not looked up or drafted, and count in
-    its `not_reached`. None: every review.
+    drafted; the cards after it are not looked up or drafted. It is counted
+    also when the spend cap stops the run. None: every review.
     """
     excluded = Counter(excluded or {})
     records: List[PostRecord] = []
-    for index, review in enumerate(reviews):
+    examined = 0
+    stopped = False
+    for review in reviews:
         if limit is not None and limit.reached:
-            limit.not_reached = len(reviews) - index
             break
+        examined += 1
         card_start = len(records)
         try:
             await _run_card(
@@ -968,12 +1001,21 @@ async def run_harness(
                 is_removed=is_removed, refetch=refetch,
             )
         except _StoppedByCap:
-            apply_removals(records, plans, is_removed, excluded)
-            return records, excluded, True
+            stopped = True
         if limit is not None:
-            limit.count(records[card_start:])
+            # Asked again here: a removal recorded after an earlier sample
+            # finished leaves that sample's record as it was until
+            # apply_removals below
+            removed = is_removed is not None and is_removed(review.post.id)
+            limit.count(records[card_start:], removed)
+        if stopped:
+            break
+    if limit is not None:
+        # ended: every card was passed over or drafted without reaching the
+        # limit or a cap stop, so every card left out at load came before it
+        limit.finish(reviews, examined, ended=examined == len(reviews) and not (stopped or limit.reached))
     apply_removals(records, plans, is_removed, excluded)
-    return records, excluded, False
+    return records, excluded, stopped
 
 
 async def _run_card(

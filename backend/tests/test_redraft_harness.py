@@ -1738,3 +1738,89 @@ def test_the_script_applies_limit_after_the_skips(tmp_path, monkeypatch):
     assert "| limit | `1` |" in summary
     assert "| limit_reached | `True` |" in summary
     assert "| skipped_before_limit | `1` |" in summary
+
+
+@pytest.mark.asyncio
+async def test_a_card_removed_after_an_earlier_sample_does_not_count_toward_the_limit(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)  # 2001, 2002
+    removed = set()
+
+    class RemovesAfterFirstSample(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            evidence = await super().draft_written(request, idempotency_key)
+            if request.post.id == "2001":
+                removed.add("2001")  # recorded while the first sample is checked
+            return evidence
+
+    limit = harness.DraftLimit(1)
+    records, _, _ = await run_harness(
+        reviews, SETTINGS, RemovesAfterFirstSample(), CountingChecker(), plans={}, max_attempts=2, samples=2,
+        is_removed=lambda post_id: post_id in removed, limit=limit,
+    )
+
+    # 2001's finished first sample became "removed"; the run went on to 2002
+    assert {r.workflow_id for r in records if r.outcome != "removed"} == {"review:t:2002"}
+    assert (limit.drafted, limit.skipped_before_limit, limit.reached) == (1, 1, True)
+
+
+@pytest.mark.asyncio
+async def test_the_limit_is_counted_when_the_spend_cap_stops_the_run(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+
+    class FailingRedraft(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            if request.steer:
+                raise SpendCapReached("synthetic cap")
+            return await super().draft_written(request, idempotency_key)
+
+    limit = harness.DraftLimit(1)
+    records, _, stopped = await run_harness(
+        reviews[1:], SETTINGS, FailingRedraft(texts=[UNSUPPORTED]), CountingChecker(), plans={}, max_attempts=2,
+        limit=limit,
+    )
+
+    assert stopped and [r.outcome for r in records] == ["error"]
+    summary = summarize(records, harness.Counter(), None, stopped_by_cap=True, limit=limit)
+    assert summary["limit_reached"] is True and summary["skipped_before_limit"] == 0
+
+
+def _ordered_db(path: Path, rows) -> Path:
+    """Cards stored oldest first: (post id, kind), kind "ok" or "removed"."""
+    engine = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as session:
+        for index, (post_id, kind) in enumerate(rows):
+            at = f"2026-11-20T00:00:0{index}+00:00"
+            session.add(ReviewCardDB(
+                workflow_id=f"review:t:{post_id}", post_data=_post(post_id, removed=kind == "removed"),
+                evidence_data=_evidence(post_id), status="skipped", created_at=at, updated_at=at, edit_seq=0,
+            ))
+        session.commit()
+    engine.dispose()
+    return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit_n, skipped, not_reached, reached", [
+    (1, 1, 3, True),   # stops at 2002: the removed 2001 came before, 2003-2005 after
+    (2, 2, 1, True),   # stops at 2004: 2001 and 2003 before, 2005 after
+    (5, 3, 0, False),  # the database runs out: every removed card came before the end
+])
+async def test_cards_left_out_at_load_count_in_order(tmp_path, no_x, limit_n, skipped, not_reached, reached):
+    db = _ordered_db(tmp_path / "cards.db", [
+        ("2001", "removed"), ("2002", "ok"), ("2003", "removed"), ("2004", "ok"), ("2005", "removed"),
+    ])
+    reviews, excluded = load_stored_reviews(db, TOPICS)
+    assert [r.post.id for r in reviews] == ["2002", "2004"] and excluded["post_text_removed"] == 3
+    limit = harness.DraftLimit(limit_n, excluded_at_load=sum(excluded.values()))
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        excluded=excluded, limit=limit,
+    )
+
+    summary = summarize(records, excluded, None, limit=limit)
+    assert (summary["skipped_before_limit"], summary["not_reached_by_limit"], summary["limit_reached"]) == (
+        skipped, not_reached, reached,
+    )
+    assert len({r.workflow_id for r in records}) == min(limit_n, 2)

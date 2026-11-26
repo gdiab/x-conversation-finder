@@ -282,9 +282,9 @@ async def run(args) -> None:
 
     if args.limit < 0:
         sys.exit("--limit must be 0 (no limit) or more")
-    # Applied while the run goes (issue #34): N cards drafted, not the first N
-    limit = DraftLimit(args.limit) if args.limit else None
     reviews, excluded = load_stored_reviews(db, raw["review_topics"])
+    # Applied while the run goes (issue #34): N cards drafted, not the first N
+    limit = DraftLimit(args.limit, excluded_at_load=sum(excluded.values())) if args.limit else None
     plans = json.loads(plans_path.read_text()) if plans_path.exists() else {}
 
     try:
