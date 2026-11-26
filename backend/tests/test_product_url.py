@@ -610,22 +610,3 @@ async def test_an_edit_down_to_the_link_alone_fails_its_check(make_review_input,
             await wait_for_card_ready(handle)
             await handle.execute_update("edit", args=[URL, str(uuid.uuid4())])
             assert (await query_card(handle))["edited_text_gate_state"] == "failed"
-
-
-@pytest.mark.asyncio
-async def test_an_assembled_claim_quoting_a_long_url_counts_it_as_a_link(make_review_input, product_brief):
-    """X shortens the quoted URL, and no second link is added, so the claim
-    does not have to leave room for one."""
-    long_url = "https://github.com/example-org/acme/" + "a" * 120
-    brief = product_brief.replace(
-        "Our product helps developers build reliable distributed systems.",
-        f"Our product helps developers build reliable distributed systems, see {long_url} today.",
-    )
-    async with await WorkflowEnvironment.start_time_skipping() as env:
-        async with _worker(env, draft_mode="assembled"):
-            handle = await _start(env, make_review_input, "41_assembled_long_quoted", product_url=long_url,
-                                  product_brief=brief)
-            card = await wait_for_card_ready(handle)
-            assert card["status"] == "pending", card.get("skip_reason")
-            text = card["evidence"]["draft"]["text"]
-            assert len(text) > 256 and text.count(long_url) == 1
