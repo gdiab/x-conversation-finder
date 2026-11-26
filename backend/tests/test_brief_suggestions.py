@@ -143,16 +143,27 @@ async def test_flags_name_real_brief_sentences_and_a_contradiction_needs_a_quote
     assert result["flags"] == [{
         "brief_sentence_id": "b2",
         "brief_sentence": "Relay retries a failed delivery up to five times.",
+        "brief_sentence_context": "",
         "kind": "contradicted",
         "quote": "Relay retries a failed delivery up to three times.",
         "note": "The page says three.",
     }, {
         "brief_sentence_id": "b1",
         "brief_sentence": "Acme Relay delivers webhooks to your services.",
+        "brief_sentence_context": "",
         "kind": "not_mentioned",
         "quote": "",
         "note": "Not on the page.",
     }]
+
+
+async def test_a_flag_carries_the_heading_its_sentence_stands_under():
+    result, _, _ = await _suggest(
+        SuggestResponse(flags=[RawFlag("b2", "not_mentioned", "Not on the page.")]),
+        brief="Acme Relay delivers webhooks.\n\n## Not supported yet\n\n- Slack",
+    )
+    [flag] = result["flags"]
+    assert (flag["brief_sentence"], flag["brief_sentence_context"]) == ("Slack", "Not supported yet")
 
 
 async def test_a_suggestion_with_two_sentences_is_dropped():
@@ -202,8 +213,9 @@ async def test_the_api_returns_suggestions_and_stores_neither_the_page_nor_them(
             data = path.read_bytes()
             assert b"Synthetic-page-marker-7f3a" not in data
             assert b"needs no API key" not in data
-    # Nor in the log
-    assert "Synthetic-page-marker-7f3a" not in caplog.text
+    # Nor in the log: the marker, any other page line, or the suggestion
+    for line in ("Synthetic-page-marker-7f3a", "Runs on **macOS**", "no API key is needed", "needs no API key"):
+        assert line not in caplog.text
     # And no Temporal call: a connected client's every method is a spy
     assert temporal_calls == []
 
@@ -339,7 +351,8 @@ async def test_the_kill_switch_refuses_the_call_with_a_clear_error(monkeypatch):
     assert completions.calls == []
 
 
-async def test_a_provider_error_is_reported_by_type_without_its_message(monkeypatch):
+async def test_a_provider_error_is_reported_by_type_without_its_message(monkeypatch, caplog):
+    caplog.set_level("DEBUG")
     class _Failing:
         async def create(self, **kwargs):
             raise RuntimeError("provider echoed: " + kwargs["messages"][1]["content"][:40])
@@ -351,6 +364,10 @@ async def test_a_provider_error_is_reported_by_type_without_its_message(monkeypa
 
     assert response.status_code == 502
     assert json.loads(response.body) == {"code": "model_failed", "detail": "The suggestion call failed (RuntimeError). Try again."}
+    # Neither the provider's message (it echoed the prompt) nor page text is logged
+    assert "provider echoed" not in caplog.text
+    for line in ("Runs on **macOS**", "no API key is needed", "three times"):
+        assert line not in caplog.text
 
 
 def test_the_parser_skips_entries_of_the_wrong_shape():

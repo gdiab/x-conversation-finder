@@ -474,6 +474,8 @@ export interface BriefSuggestion {
 export interface BriefFlag {
   brief_sentence_id: string;
   brief_sentence: string;
+  /** The heading or lead-in it stands under ("Not supported yet"), or "". */
+  brief_sentence_context: string;
   kind: 'contradicted' | 'not_mentioned';
   quote: string;
   note: string;

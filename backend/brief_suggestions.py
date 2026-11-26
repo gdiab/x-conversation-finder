@@ -212,6 +212,8 @@ async def suggest_brief_additions(
         flags.append({
             "brief_sentence_id": sentence.id,
             "brief_sentence": sentence.text,
+            # The heading or lead-in it stands under ("Not supported yet"), as the model saw it
+            "brief_sentence_context": sentence.context or "",
             "kind": raw.kind,
             "quote": quote if raw.kind == "contradicted" else "",
             "note": _one_line(raw.note)[:MAX_NOTE_CHARS],

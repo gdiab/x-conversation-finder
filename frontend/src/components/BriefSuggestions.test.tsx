@@ -28,7 +28,7 @@ const RESULT: BriefSuggestionsResult = {
     { sentence: 'Acme Relay has no required UI.', quote: 'No UI is required.', why: 'Answers headless posts.' },
   ],
   flags: [
-    { brief_sentence_id: 'b2', brief_sentence: 'Relay retries five times.', kind: 'contradicted', quote: 'retries up to three times', note: 'The page says three.' },
+    { brief_sentence_id: 'b2', brief_sentence: 'Relay retries five times.', brief_sentence_context: 'Delivery', kind: 'contradicted', quote: 'retries up to three times', note: 'The page says three.' },
   ],
   dropped_quote_not_on_page: 1,
   dropped_other: 0,
@@ -102,7 +102,7 @@ describe('Suggest brief additions (issue #42)', () => {
     expect(screen.getByText(/1 suggestion was dropped because the quote is not on the page/)).toBeInTheDocument();
     // The flag is information
     const flags = screen.getByRole('list', { name: 'Brief sentences the page does not support' });
-    expect(within(flags).getByText(/the page contradicts it/)).toBeInTheDocument();
+    expect(within(flags).getByText(/the page contradicts it/)).toHaveTextContent('(Delivery) “Relay retries five times.”');
 
     // Nothing ticked: nothing to add
     expect(screen.getByRole('button', { name: 'Add checked to brief' })).toBeDisabled();
@@ -202,6 +202,22 @@ describe('Suggest brief additions (issue #42)', () => {
 
     expect(screen.queryByRole('list', { name: 'Suggested brief additions' })).not.toBeInTheDocument();
     expect(button()).toBeEnabled();
+  });
+
+  it.each([
+    ['Product Brief:', ' More.'],
+    ['Product name:', ' Pro'],
+  ])('clears a shown checklist when %s changes', async (label, extra) => {
+    suggestMock.mockResolvedValue(RESULT);
+    const user = await setUp();
+    await screen.findByText(/at most \$0\.0134/);
+    await user.click(button());
+    await screen.findByRole('list', { name: 'Suggested brief additions' });
+
+    await user.type(screen.getByLabelText(label), extra);
+
+    expect(screen.queryByRole('list', { name: 'Suggested brief additions' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Brief sentences the page does not support' })).not.toBeInTheDocument();
   });
 
   it('clears the suggestions when the Product URL changes', async () => {

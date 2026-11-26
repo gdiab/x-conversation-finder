@@ -254,7 +254,7 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
               <ul aria-label="Brief sentences the page does not support" style={{ margin: 0, paddingLeft: '18px' }}>
                 {flags.map((flag) => (
                   <li key={flag.brief_sentence_id} style={{ marginBottom: '4px', fontSize: '13px' }}>
-                    “{flag.brief_sentence}”: {flag.kind === 'contradicted' ? 'the page contradicts it' : 'the page does not mention it'}
+                    {flag.brief_sentence_context && `(${flag.brief_sentence_context}) `}“{flag.brief_sentence}”: {flag.kind === 'contradicted' ? 'the page contradicts it' : 'the page does not mention it'}
                     {flag.note && `. ${flag.note}`}
                     {flag.quote && <> Page: “{flag.quote}”</>}
                   </li>
