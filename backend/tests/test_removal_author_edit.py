@@ -141,6 +141,8 @@ async def test_a_removal_drops_the_author_the_url_and_the_edits_on_every_card(
             for value in (HANDLE, NAME, *EDIT_WORDS):
                 assert value.encode() in stored_before, f"the test must start with {value!r} stored"
             before = {h.id: get_stored_card(h.id) for h in handles}
+            for card in before.values():
+                assert card["edited_text_gate_results"], "the edit must have check results to remove"
 
             # approve re-fetches the post: 404, the removal duty runs
             with pytest.raises(WorkflowUpdateFailedError) as refused:
@@ -338,10 +340,11 @@ def test_a_start_retries_a_checkpoint_an_earlier_start_could_not_complete(test_d
     calls = []
     real_checkpoint = backend.database.checkpoint_wal
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("blocked") and False)
-    assert redact_recorded_removals() == 1
+    assert redact_recorded_removals(checkpoint_attempts=3, retry_delay_sec=0) == 1
+    assert calls == ["blocked"] * 3  # retried, then left for the next start
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("ok") or real_checkpoint())
     assert redact_recorded_removals() == 0
-    assert calls == ["blocked", "ok"]
+    assert calls == ["blocked"] * 3 + ["ok"]
     assert HANDLE.encode() not in _sqlite_bytes(Path(test_db_isolation))
 
 
