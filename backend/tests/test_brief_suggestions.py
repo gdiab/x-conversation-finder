@@ -137,6 +137,7 @@ async def test_flags_name_real_brief_sentences_and_a_contradiction_needs_a_quote
         RawFlag("b1", "contradicted", "No quote.", "Relay never delivers webhooks."),
         RawFlag("b9", "not_mentioned", "No such sentence."),
         RawFlag("b1", "invented_kind", "Bad kind."),
+        RawFlag("b1", "not_mentioned", "Not on the page.", "a quote is not kept for this kind"),
     ]))
 
     assert result["flags"] == [{
@@ -145,7 +146,22 @@ async def test_flags_name_real_brief_sentences_and_a_contradiction_needs_a_quote
         "kind": "contradicted",
         "quote": "Relay retries a failed delivery up to three times.",
         "note": "The page says three.",
+    }, {
+        "brief_sentence_id": "b1",
+        "brief_sentence": "Acme Relay delivers webhooks to your services.",
+        "kind": "not_mentioned",
+        "quote": "",
+        "note": "Not on the page.",
     }]
+
+
+async def test_a_suggestion_with_two_sentences_is_dropped():
+    result, _, _ = await _suggest(SuggestResponse(suggestions=[
+        _suggestion("Acme Relay needs no API key. It runs on Linux.", "no API key is needed"),
+        _suggestion("Acme Relay runs on Linux, e.g. Ubuntu.", "no API key is needed"),
+    ]))
+    assert [s["sentence"] for s in result["suggestions"]] == ["Acme Relay runs on Linux, e.g. Ubuntu."]
+    assert result["dropped_other"] == 1
 
 
 async def test_a_malformed_model_answer_is_an_error_not_an_empty_list():
@@ -156,7 +172,8 @@ async def test_a_malformed_model_answer_is_an_error_not_an_empty_list():
 
 # ---------- nothing is stored or added ----------
 
-async def test_the_api_returns_suggestions_and_stores_neither_the_page_nor_them(monkeypatch, test_db_isolation):
+async def test_the_api_returns_suggestions_and_stores_neither_the_page_nor_them(monkeypatch, test_db_isolation, caplog):
+    caplog.set_level("DEBUG")
     marker_page = PAGE + "\nSynthetic-page-marker-7f3a appears only on the page.\n"
     fetcher = FakePageFetcher({URL: marker_page})
     suggester = FakeBriefSuggester(scripted=SuggestResponse(suggestions=[
@@ -177,6 +194,10 @@ async def test_the_api_returns_suggestions_and_stores_neither_the_page_nor_them(
             data = path.read_bytes()
             assert b"Synthetic-page-marker-7f3a" not in data
             assert b"needs no API key" not in data
+    # Nor in the log
+    assert "Synthetic-page-marker-7f3a" not in caplog.text
+    # And no Temporal call: the route never touches the client
+    assert api.temporal_client is None or not getattr(api.temporal_client, "start_workflow", None)
 
 
 async def test_a_fetch_failure_is_a_clear_error_and_no_model_call(monkeypatch):
@@ -282,13 +303,14 @@ async def test_the_call_is_metered_in_the_ledger_and_within_the_shown_estimate(m
     assert reservation.cost_usd <= cost_estimate()["max_cost_usd"]
 
 
-async def test_the_reservation_never_passes_the_estimate_at_the_caps(monkeypatch):
+@pytest.mark.parametrize("url", [URL, REPO_URL])
+async def test_the_reservation_never_passes_the_estimate_at_the_caps(monkeypatch, url):
     s = get_settings()
     page = "\U0001F600" * (s.suggest_max_page_bytes // 4)
     brief = "Acme Relay works " + "\U0001F600" * ((MAX_BRIEF_BYTES - 40) // 4) + "."
     suggester, _ = _plain({"suggestions": [], "flags": []})
 
-    await suggest_brief_additions(URL, brief, "\U0001F600" * 80, FakePageFetcher({URL: page}), suggester)
+    await suggest_brief_additions(url, brief, "\U0001F600" * 80, FakePageFetcher({url: page}), suggester)
 
     db = get_db()
     try:
@@ -365,7 +387,8 @@ class _Recorder:
         self.requests.append(request)
         key = (request.headers["host"], request.url.path)
         status, headers, body = self.routes[key]
-        return httpx.Response(status, headers=headers, content=body)
+        # A streamed body, as a real transport gives (the fetcher reads it raw)
+        return httpx.Response(status, headers=headers, stream=httpx.ByteStream(body))
 
 
 def _fetcher(routes, table, max_text_bytes=60000):
@@ -500,6 +523,35 @@ async def test_github_404_and_rate_limit_are_clear_errors():
     with pytest.raises(PageFetchError) as error:
         await fetcher.fetch(REPO_URL)
     assert error.value.code == "rate_limited" and "22:13 UTC" in error.value.message
+
+
+async def test_a_github_repo_url_with_a_query_still_reads_the_readme():
+    fetcher, recorder = _fetcher(
+        {("api.github.com", "/repos/synthetic-org/acme-relay/readme"): (200, {}, PAGE.encode())},
+        {"api.github.com": ["140.82.112.6"]},
+    )
+    page = await fetcher.fetch(REPO_URL + "?tab=readme-ov-file#install")
+    assert page.source == "github_readme"
+
+
+async def test_a_compressed_body_is_capped_while_it_is_decompressed():
+    import gzip
+    bomb = gzip.compress(b"a" * (MAX_RAW_BYTES * 20))  # about 40 MB expanded, small on the wire
+    fetcher, _ = _fetcher(
+        {("example.com", "/acme-relay"): (200, {"content-type": "text/plain", "content-encoding": "gzip"}, bomb)},
+        {"example.com": ["93.184.215.14"]},
+        max_text_bytes=MAX_RAW_BYTES * 2,
+    )
+    page = await fetcher.fetch(URL)
+    assert page.truncated and len(page.text) == MAX_RAW_BYTES
+
+    small = gzip.compress(b"Acme Relay delivers webhooks.")
+    fetcher, _ = _fetcher(
+        {("example.com", "/acme-relay"): (200, {"content-type": "text/plain", "content-encoding": "gzip"}, small)},
+        {"example.com": ["93.184.215.14"]},
+    )
+    page = await fetcher.fetch(URL)
+    assert page.text == "Acme Relay delivers webhooks." and not page.truncated
 
 
 async def test_other_github_pages_are_read_as_web_pages():

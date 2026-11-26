@@ -121,12 +121,11 @@ describe('Suggest brief additions (issue #42)', () => {
     expect(brief()).toBe(
       `${BRIEF}\n\n${ADDED_HEADING}\n\n- Acme Relay runs on macOS and Linux.\n- Acme Relay runs without a UI.`,
     );
-    // The unticked suggestion stays in the list and was not added
-    const left = within(screen.getByRole('list', { name: 'Suggested brief additions' })).getAllByRole('listitem');
-    expect(left).toHaveLength(1);
-    expect(within(left[0]).getByLabelText('Suggested sentence 1')).toHaveValue('Acme Relay needs no API key.');
+    // The unticked suggestion is dropped, not added; the checklist is done
     expect(brief()).not.toContain('no API key');
+    expect(screen.queryByRole('list', { name: 'Suggested brief additions' })).not.toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('Added 2 sentences to the brief');
+    expect(screen.getByRole('status')).toHaveTextContent('1 unticked suggestion was dropped');
   });
 
   it('starts the watch with the brief as the founder left it', async () => {
@@ -144,6 +143,29 @@ describe('Suggest brief additions (issue #42)', () => {
     await user.click(screen.getByRole('button', { name: 'Start Watch' }));
 
     expect(vi.mocked(startWatch).mock.calls[0][0].product_brief).toBe(BRIEF);
+  });
+
+  it('rounds the shown maximum cost up', async () => {
+    costMock.mockResolvedValue({
+      max_cost_usd: 0.013041, max_input_tokens: 1, max_output_tokens: 1, model: 'fake', max_page_bytes: 1, max_suggestions: 8,
+    });
+    await setUp();
+    expect(await screen.findByText(/at most \$0\.0131/)).toBeInTheDocument();
+  });
+
+  it('removes earlier suggestions when a new request fails', async () => {
+    suggestMock.mockResolvedValueOnce(RESULT);
+    const user = await setUp();
+    await screen.findByText(/at most \$0\.0134/);
+    await user.click(button());
+    await screen.findByRole('list', { name: 'Suggested brief additions' });
+
+    suggestMock.mockRejectedValueOnce(new BriefSuggestionError('The site did not answer in time.', 'fetch_failed'));
+    await user.click(button());
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The site did not answer in time.');
+    expect(screen.queryByRole('list', { name: 'Suggested brief additions' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add checked to brief' })).not.toBeInTheDocument();
   });
 
   it('shows a fetch error and leaves the form usable', async () => {
@@ -180,8 +202,8 @@ describe('Suggest brief additions (issue #42)', () => {
 describe('appendToBrief', () => {
   it('adds list items under a heading that ends any earlier heading or lead-in', () => {
     expect(appendToBrief('', ['Acme runs on Linux.'])).toBe(`${ADDED_HEADING}\n\n- Acme runs on Linux.`);
-    expect(appendToBrief('## Not supported yet\n\nSlack.\n\n', ['Acme  runs\non Linux. '])).toBe(
-      `## Not supported yet\n\nSlack.\n\n${ADDED_HEADING}\n\n- Acme runs on Linux.`,
+    expect(appendToBrief('# Not supported\n\n## Integrations\n\nSlack.\n\n', ['Acme  runs\non Linux. '])).toBe(
+      `# Not supported\n\n## Integrations\n\nSlack.\n\n${ADDED_HEADING}\n\n- Acme runs on Linux.`,
     );
     expect(appendToBrief('Not offered yet:', ['Acme runs on Linux.'])).toBe(
       `Not offered yet:\n\n${ADDED_HEADING}\n\n- Acme runs on Linux.`,
@@ -192,5 +214,13 @@ describe('appendToBrief', () => {
     const once = appendToBrief('Acme works.', ['One fact.']);
     expect(appendToBrief(once, ['Two fact.', '  '])).toBe(`Acme works.\n\n${ADDED_HEADING}\n\n- One fact.\n- Two fact.`);
     expect(appendToBrief(once, [' ', ''])).toBe(once);
+  });
+
+  it('starts a new heading when the brief ends with anything but that list', () => {
+    const once = appendToBrief('Acme works.', ['One fact.']);
+    const edited = `${once}\n\nNot supported yet:`;
+    expect(appendToBrief(edited, ['Two fact.'])).toBe(`${edited}\n\n${ADDED_HEADING}\n\n- Two fact.`);
+    const leadInItem = `${once}\n- Not supported yet:`;
+    expect(appendToBrief(leadInItem, ['Two fact.'])).toBe(`${leadInItem}\n\n${ADDED_HEADING}\n\n- Two fact.`);
   });
 });

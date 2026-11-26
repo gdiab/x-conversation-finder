@@ -22,10 +22,12 @@ here enters Temporal history):
 The page text is untrusted: it is never logged, and no error message quotes it.
 """
 
+import math
 from typing import List, Optional
 
 from backend.adapters.plain_brief_suggester import (
     MARKER_HEX_CHARS,
+    PAGE_SOURCES,
     build_suggest_messages,
 )
 from backend.budget import meter_api_inference, prompt_token_bound
@@ -33,6 +35,7 @@ from backend.config import get_settings
 from backend.gate.brief import render_brief_sentence, split_brief
 from backend.gate.product_link import product_url_error
 from backend.gate.reply_fit import quote_in_text
+from backend.gate.sentence_split import split_into_sentences
 from backend.ports.brief_suggester import (
     MAX_SUGGESTIONS,
     BriefSuggesterPort,
@@ -90,8 +93,13 @@ def cost_estimate() -> dict:
     """
     settings = get_settings()
     longest_name = "\U0001F600" * MAX_PRODUCT_NAME_CHARS
-    empty = SuggestRequest(page_text="", page_source="web_page", brief_sentences=[], product_name=longest_name)
-    template = prompt_token_bound(build_suggest_messages(empty, "0" * MARKER_HEX_CHARS))
+    template = max(
+        prompt_token_bound(build_suggest_messages(
+            SuggestRequest(page_text="", page_source=source, brief_sentences=[], product_name=longest_name),
+            "0" * MARKER_HEX_CHARS,
+        ))
+        for source in PAGE_SOURCES
+    )
     input_tokens = template + settings.suggest_max_page_bytes + MAX_BRIEF_BYTES
     output_tokens = settings.suggest_max_output_tokens
     cost = (
@@ -99,7 +107,8 @@ def cost_estimate() -> dict:
         + output_tokens * settings.inference_output_token_cost_usd
     )
     return {
-        "max_cost_usd": round(cost, 6),
+        # Rounded up: the maximum is never shown lower than it is
+        "max_cost_usd": math.ceil(cost * 1e6 - 1e-6) / 1e6,
         "max_input_tokens": input_tokens,
         "max_output_tokens": output_tokens,
         "model": settings.openai_model if settings.reply_agent_adapter == "plain" else "fake",
@@ -172,7 +181,11 @@ async def suggest_brief_additions(
         if not quote_in_text(quote, page.text) or len(quote.split()) < MIN_QUOTE_WORDS or len(quote) > MAX_QUOTE_CHARS:
             dropped_quote += 1
             continue
-        if not sentence or len(sentence) > MAX_SENTENCE_CHARS or folded in seen or folded in brief_folded:
+        # One checkbox, one fact: a field holding two sentences is dropped
+        if (
+            not sentence or len(sentence) > MAX_SENTENCE_CHARS or len(split_into_sentences(sentence)) != 1
+            or folded in seen or folded in brief_folded
+        ):
             dropped_other += 1
             continue
         if len(suggestions) == MAX_SUGGESTIONS:

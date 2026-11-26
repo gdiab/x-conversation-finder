@@ -25,6 +25,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+import zlib
 from html.parser import HTMLParser
 from typing import Awaitable, Callable, List, Optional, Tuple
 from urllib.parse import quote, urljoin, urlsplit
@@ -116,14 +117,16 @@ def check_fetch_url(url: str) -> Tuple[str, str]:
 
 
 def github_repo(url: str) -> Optional[Tuple[str, str]]:
-    """(owner, repo) for https://github.com/<owner>/<repo> (a trailing slash
-    or ".git" allowed), else None: other GitHub pages are read as web pages."""
+    """(owner, repo) for https://github.com/<owner>/<repo> (a trailing slash,
+    ".git", a query or a fragment allowed), else None: other GitHub pages are
+    read as web pages."""
     try:
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
     except ValueError:
         return None
-    if parts.scheme.lower() != "https" or host not in _GITHUB_HOSTS or parts.query:
+    # The query and fragment (?tab=readme-ov-file) do not change the repository
+    if parts.scheme.lower() != "https" or host not in _GITHUB_HOSTS:
         return None
     segments = [s for s in parts.path.split("/") if s]
     if len(segments) != 2:
@@ -271,7 +274,12 @@ class HttpPageFetcher(PageFetcherPort):
             request = client.build_request(
                 "GET",
                 target,
-                headers={"Host": f"[{host}]" if ":" in host else host, "User-Agent": USER_AGENT, **headers},
+                headers={
+                    "Host": f"[{host}]" if ":" in host else host,
+                    "User-Agent": USER_AGENT,
+                    "Accept-Encoding": "gzip, deflate",
+                    **headers,
+                },
                 extensions={"sni_hostname": host},
             )
             try:
@@ -313,15 +321,51 @@ class HttpPageFetcher(PageFetcherPort):
 
     @staticmethod
     async def _read_capped(response: httpx.Response) -> Tuple[bytes, bool]:
+        """At most MAX_RAW_BYTES of the body, and whether it was cut.
+
+        The raw (still compressed) bytes are read and decompressed here in
+        bounded steps, so a small compressed body cannot expand past the cap
+        in memory (httpx's own decoding would expand each chunk in full).
+        """
+        encoding = response.headers.get("content-encoding", "identity").strip().lower()
+        if encoding in ("", "identity"):
+            decoder = None
+        elif encoding in ("gzip", "x-gzip"):
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        elif encoding == "deflate":
+            decoder = zlib.decompressobj()
+        else:
+            raise PageFetchError(FETCH_FAILED, f"The site sent an encoding this reader does not take ({encoding}).")
         chunks: List[bytes] = []
         size = 0
+        raw_size = 0
+
+        def take(data: bytes) -> bool:
+            nonlocal size
+            room = MAX_RAW_BYTES - size
+            chunks.append(data[:room])
+            size += min(len(data), room)
+            return len(data) > room
+
         try:
-            async for chunk in response.aiter_bytes():
-                if size + len(chunk) > MAX_RAW_BYTES:
-                    chunks.append(chunk[: MAX_RAW_BYTES - size])
+            async for raw in response.aiter_raw():
+                raw_size += len(raw)
+                if decoder is None:
+                    if take(raw):
+                        return b"".join(chunks), True
+                    continue
+                data = raw
+                while data:
+                    out = decoder.decompress(data, MAX_RAW_BYTES - size + 1)
+                    if take(out):
+                        return b"".join(chunks), True
+                    data = decoder.unconsumed_tail
+                if raw_size > MAX_RAW_BYTES:
                     return b"".join(chunks), True
-                chunks.append(chunk)
-                size += len(chunk)
+            if decoder is not None and take(decoder.flush(MAX_RAW_BYTES - size + 1)):
+                return b"".join(chunks), True
+        except zlib.error:
+            raise PageFetchError(FETCH_FAILED, "The site sent a body that does not decompress.")
         except httpx.TimeoutException:
             raise PageFetchError(FETCH_FAILED, "The site did not answer in time.")
         except httpx.HTTPError as e:

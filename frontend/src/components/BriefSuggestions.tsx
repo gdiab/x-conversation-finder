@@ -21,24 +21,28 @@ import {
 } from '../api/client';
 
 /** The heading the added sentences stand under in the brief. */
-export const ADDED_HEADING = '## From the product page';
+export const ADDED_HEADING = '# From the product page';
 
 /**
  * The brief with the sentences appended as list items under ADDED_HEADING.
  *
- * The heading ends whatever the brief's last heading or lead-in line was
- * ("## Not supported yet", "Not offered yet:"), so an added fact is never
- * read as standing under it. Each list item is one brief sentence. When the
- * brief already ends under that heading, the items continue its list.
+ * The heading is level 1, so it ends whatever heading, nested heading or
+ * lead-in line the brief ended under ("# Not supported", "Not offered yet:"):
+ * an added fact is never read as standing under it. Each list item is one
+ * brief sentence. The items continue an existing list only when the brief
+ * ends with exactly that heading followed by plain list items, and nothing
+ * else; otherwise a new heading starts.
  */
 export function appendToBrief(brief: string, sentences: string[]): string {
   const items = sentences.map((s) => s.trim().replace(/\s+/g, ' ')).filter(Boolean);
   if (items.length === 0) return brief;
   const base = brief.replace(/\s+$/, '');
-  const headings = base.split('\n').filter((line) => /^\s{0,3}#{1,6}\s/.test(line));
-  const underHeading = headings.length > 0 && headings[headings.length - 1].trim() === ADDED_HEADING;
   const list = items.map((s) => `- ${s}`).join('\n');
-  if (underHeading) return `${base}\n${list}`;
+  const lines = base.split('\n');
+  const at = lines.map((line) => line.trim()).lastIndexOf(ADDED_HEADING);
+  const tail = at >= 0 ? lines.slice(at + 1).filter((line) => line.trim()) : [];
+  const continuesList = tail.length > 0 && tail.every((line) => /^- \S/.test(line) && !/:\s*$/.test(line));
+  if (continuesList) return `${base}\n${list}`;
   return `${base ? `${base}\n\n` : ''}${ADDED_HEADING}\n\n${list}`;
 }
 
@@ -60,8 +64,12 @@ interface BriefSuggestionsProps {
   onBriefChange: (brief: string) => void;
 }
 
-function formatUsd(value: number): string {
-  return `$${value < 1 ? value.toFixed(4) : value.toFixed(2)}`;
+/** A cost in dollars; with `ceil`, rounded up, so a maximum is never shown lower than it is. */
+function formatUsd(value: number, ceil = false): string {
+  const digits = value < 1 ? 4 : 2;
+  const factor = 10 ** digits;
+  const shown = ceil ? Math.ceil(value * factor - 1e-9) / factor : value;
+  return `$${shown.toFixed(digits)}`;
 }
 
 const box = { border: '1px solid #ddd', borderRadius: '4px', padding: '10px', marginBottom: '8px' } as const;
@@ -104,6 +112,10 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
     setLoading(true);
     setError(null);
     setNotice(null);
+    // A new request replaces the list: results of an earlier brief or name are never left to tick
+    setResult(null);
+    setItems([]);
+    setFlags([]);
     try {
       const response = await suggestBriefAdditions({
         product_url: productUrl.trim(),
@@ -127,11 +139,15 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
   const handleAdd = () => {
     if (checked.length === 0) return;
     onBriefChange(appendToBrief(productBrief, checked.map((item) => item.sentence)));
-    const added = new Set(checked.map((item) => item.key));
-    setItems((current) => current.filter((item) => !added.has(item.key)));
+    const dropped = items.length - checked.length;
+    // The checklist is done: ticked items are in the brief, the others are dropped
+    setResult(null);
+    setItems([]);
+    setFlags([]);
     setNotice(
-      `Added ${checked.length} sentence${checked.length === 1 ? '' : 's'} to the brief under "From the product page". ` +
-        'Read the brief before you start the watch.',
+      `Added ${checked.length} sentence${checked.length === 1 ? '' : 's'} to the brief under "From the product page"` +
+        (dropped > 0 ? `; ${dropped} unticked suggestion${dropped === 1 ? ' was' : 's were'} dropped` : '') +
+        '. Read the brief before you start the watch.',
     );
   };
 
@@ -152,7 +168,7 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
         {cost && (
           <>
             Reads the Product URL (for a GitHub repository, its README) and makes one model call, at most{' '}
-            {formatUsd(cost.max_cost_usd)}, for up to {cost.max_suggestions} facts your brief does not state.
+            {formatUsd(cost.max_cost_usd, true)}, for up to {cost.max_suggestions} facts your brief does not state.
             Nothing is added to the brief until you tick it.
           </>
         )}
