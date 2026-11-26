@@ -605,14 +605,14 @@ def _post_removal_recorded(db, post_id: str) -> bool:
 
 
 def post_removal_recorded(post_id: str) -> bool:
-    """Whether any stored card of this post records a removal: this Review's
-    own card, or the card of another account's Review of the same post
-    (issue #12: asked before a written-mode model call)."""
-    db = get_db()
-    try:
-        return _post_removal_recorded(db, post_id)
-    finally:
-        db.close()
+    """Whether the post's removal is recorded: on its stored post, or on any
+    stored card of it (this Review's own card, or the card of another
+    account's Review of the same post). Asked before each model call that is
+    sent the post or text written from it, and before approve's X re-fetch
+    (issues #12, #22)."""
+    from backend import review_docs
+
+    return review_docs.post_removed(post_id)
 
 
 def card_post_text_removed(workflow_id: str) -> bool:
@@ -734,9 +734,9 @@ def _store_card_in_transaction(input: StoreCardInput, make_current: bool) -> boo
         # issue #9: a removal already recorded for this post (by another
         # account's Review, or this card's own earlier removal) also applies to
         # this write, so a late or retried store cannot put the text back.
-        # issue #35: the stored post's record counts too (a removal before
-        # any card of the post was stored), so the card never keeps the
-        # placeholder author _compose_card gives a removed post
+        # issue #22: a removal recorded on the stored post counts too (issue
+        # #35: so the card never keeps the placeholder author _compose_card
+        # gives a removed stored post)
         if review_docs._post_removed(db, card_db.post_data["id"]):
             _remove_card_post_text(card_db)
             # A late store (a timed-out attempt finishing after the removal)

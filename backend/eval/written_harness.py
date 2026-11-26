@@ -87,6 +87,9 @@ class StoredReview:
     post: Post
     evidence: Evidence
     account: str = ""
+    # Its row's place among all stored cards, oldest first, counting the
+    # cards load_stored_reviews left out (DraftLimit counts those in order)
+    position: Optional[int] = None
 
     @property
     def settings_key(self) -> str:
@@ -186,7 +189,7 @@ def load_stored_reviews(
         removed_ids = _removed_post_ids(conn)
     finally:
         conn.close()
-    for workflow_id, post_data, evidence_data in rows:
+    for position, (workflow_id, post_data, evidence_data) in enumerate(rows):
         try:
             post_dict = json.loads(post_data) if isinstance(post_data, str) else post_data
             evidence_dict = json.loads(evidence_data) if isinstance(evidence_data, str) else evidence_data
@@ -218,7 +221,7 @@ def load_stored_reviews(
         if not topic:
             excluded[EXCLUDED_NO_TOPIC] += 1
             continue
-        reviews.append(StoredReview(workflow_id, topic, post, evidence, _account_of(workflow_id)))
+        reviews.append(StoredReview(workflow_id, topic, post, evidence, _account_of(workflow_id), position))
     return reviews, excluded
 
 
@@ -869,6 +872,99 @@ class Refetcher:
         }
 
 
+class _StoppedByCap(Exception):
+    """The spend cap refused a call of a card: run_harness ends the run."""
+
+
+# Outcomes of a card's runs that do not count as drafting it (DraftLimit)
+NOT_DRAFTED_OUTCOMES = ("plan_invalid", "removed")
+
+
+def _drafted(record: "PostRecord") -> bool:
+    if record.outcome in NOT_DRAFTED_OUTCOMES:
+        return False
+    return record.outcome != "error" or bool(record.attempts) or record.model_calls > 0
+
+
+@dataclass
+class DraftLimit:
+    """--limit N (issue #34): stop once N cards are drafted, not after the
+    first N cards. A card passed over on the way does not count toward N:
+    one load_stored_reviews left out (its removal is recorded, its stored
+    plan was invalid twice, ...) or one the run skips (its Review still
+    runs, its removal is found at re-fetch or recorded during its run, its
+    plan is invalid, its lookup failed, it has no settings). A small run
+    so still drafts N cards when the database has that many. Once N are
+    drafted no further card is looked up on X. The lookups made are at
+    most one per examined card (none for a running Review; cards of the
+    same post share one); a post is looked up before its plan is checked,
+    so a card skipped for an invalid plan costs a lookup too.
+
+    A card counts as drafted when one of its runs has another outcome than
+    NOT_DRAFTED_OUTCOMES, none has an invalid plan, and its post's removal
+    is not recorded. A run cut
+    off by an error counts only when it made a model call (on the spend
+    cap) or finished a draft attempt: an error before any call (a cached
+    plan that does not decode, the cap refusing the first call) does not.
+
+    `excluded_at_load` is how many cards load_stored_reviews left out; with
+    the reviews' `position`, it places those cards before or after the
+    point where the limit was reached."""
+
+    limit: int
+    excluded_at_load: int = 0
+    drafted: int = 0
+    skipped_in_run: int = 0  # examined cards the run skipped
+    skipped_at_load: int = 0  # cards left out at load, before the stop (finish)
+    not_reached: int = 0  # cards after the stop: never examined, never looked up (finish)
+
+    def __post_init__(self) -> None:
+        for name, value, low in (("limit", self.limit, 1), ("excluded_at_load", self.excluded_at_load, 0)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < low:
+                raise ValueError(f"the {name} must be a whole number of {low} or more")
+
+    @property
+    def reached(self) -> bool:
+        return self.drafted >= self.limit
+
+    @property
+    def skipped_before_limit(self) -> int:
+        return self.skipped_in_run + self.skipped_at_load
+
+    def count(self, card_records: Sequence["PostRecord"], removed: bool) -> None:
+        """Count one examined card from the records its runs made; `removed`:
+        its post's removal is recorded (also after a sample had finished)."""
+        # A plan invalid twice is invalid for every sample (cached), even
+        # when an earlier sample was cut off by an error after a call
+        invalid_plan = any(r.outcome == "plan_invalid" for r in card_records)
+        if not removed and not invalid_plan and any(_drafted(r) for r in card_records):
+            self.drafted += 1
+        else:
+            self.skipped_in_run += 1
+
+    def finish(self, reviews: Sequence[StoredReview], examined: int, ended: bool) -> None:
+        """Place the cards that were not examined. `examined`: how many of
+        `reviews` were; `ended`: the run went through all of them without
+        reaching the limit or a cap stop."""
+        if ended or not examined:  # not examined: no reviews, so ended
+            # Every card left out at load came before the end of the run
+            self.skipped_at_load, self.not_reached = self.excluded_at_load, 0
+            return
+        total = len(reviews) + self.excluded_at_load
+        last = reviews[examined - 1]
+        row = last.position if last.position is not None else examined - 1
+        self.skipped_at_load = max(0, min(self.excluded_at_load, row - (examined - 1)))
+        self.not_reached = max(0, total - row - 1)
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "limit": self.limit,
+            "limit_reached": self.reached,
+            "skipped_before_limit": self.skipped_before_limit,
+            "not_reached_by_limit": self.not_reached,
+        }
+
+
 async def run_harness(
     reviews: Sequence[StoredReview],
     settings_by_key: Dict[str, WatchSettings],
@@ -882,6 +978,7 @@ async def run_harness(
     excluded: Optional[Counter] = None,
     is_removed: Optional[Callable[[str], bool]] = None,
     refetch: Optional[Callable[[StoredReview], Awaitable[str]]] = None,
+    limit: Optional[DraftLimit] = None,
 ) -> Tuple[List[PostRecord], Counter, bool]:
     """Run every review `samples` times. Returns the per-post records, the
     count of reviews left out by reason, and whether the spend cap stopped
@@ -896,76 +993,124 @@ async def run_harness(
     (removal_recorded on the database read); a post removed during its run
     is left out from then on, and its run is recorded as "removed".
     `max_attempts` is the default for a watch without a saved limit.
+
+    `limit` (a DraftLimit, issue #34) ends the run once that many cards are
+    drafted; the cards after it are not looked up or drafted. It is counted
+    also when the spend cap stops the run. None: every review.
     """
     excluded = Counter(excluded or {})
     records: List[PostRecord] = []
+    examined = 0
+    stopped = False
     for review in reviews:
-        settings = settings_by_key.get(review.settings_key)
-        if settings is None:
-            excluded[EXCLUDED_NO_SETTINGS] += 1
-            continue
-        if not clean_names(settings.product_name, settings.product_aliases)[0]:
-            excluded[EXCLUDED_NO_PRODUCT_NAME] += 1
-            continue
-        attempt_limit = (
-            max_attempts if settings.claim_gate_max_attempts is None else settings.claim_gate_max_attempts
-        )
-        if refetch is not None:
-            try:
-                found = await refetch(review)
-            except SpendCapReached:
-                apply_removals(records, plans, is_removed, excluded)
-                return records, excluded, True
-            if found != "found":
-                excluded[REFETCH_EXCLUDED.get(found, EXCLUDED_LOOKUP_FAILED)] += 1
-                continue
-        for sample in range(1, samples + 1):
-            attempts: List[AttemptRecord] = []
-            source, mention = "", None
-            calls_before = len(cap.calls) if cap is not None else 0
-
-            def record(outcome: str, error: str = "") -> None:
-                new_calls = cap.calls[calls_before:] if cap is not None else []
-                records.append(PostRecord(
-                    review.workflow_id, review.topic, sample, source, mention, outcome, attempts, error,
-                    model_calls=len(new_calls), cost_usd=round(sum(c.cost_usd for c in new_calls), 6),
-                    post_id=review.post.id,
-                ))
-
-            try:
-                _stop_if_removed(is_removed, review.post.id)
-                plan, source = await plan_for(review, agent, plans, cap, is_removed)
-                if plan is None:
-                    record("plan_invalid")
-                    break  # a plan that fails twice fails for every sample
-                mention = plan.mention_product
-                await run_written_path(
-                    review, settings, plan, agent, checker,
-                    max_attempts=attempt_limit, sample=sample, cap=cap, attempts=attempts,
-                    is_removed=is_removed,
-                )
-                record(outcome_of(attempts))
-            except PostRemovedDuringRun:
-                paid = cap is not None and len(cap.calls) > calls_before or bool(attempts)
-                # Counted once per post: here, unless an earlier sample's
-                # record exists and this one makes none (apply_removals then
-                # counts the post when it marks that record removed)
-                if paid or not any(r.post_id == review.post.id for r in records):
-                    excluded[EXCLUDED_REMOVED] += 1
-                if paid:
-                    # Its calls were paid for; the run is not a result, and
-                    # apply_removals below drops its text
-                    record("removed")
-                break
-            except SpendCapReached as e:
-                # The attempts that finished are kept: their calls were paid
-                record("error", str(e))
-                apply_removals(records, plans, is_removed, excluded)
-                return records, excluded, True
-            except Exception as e:  # one post's failure does not end the run
-                record("error", f"{type(e).__name__}: {e}")
+        if limit is not None and limit.reached:
+            break
+        examined += 1
+        card_start = len(records)
+        try:
+            await _run_card(
+                review, settings_by_key, agent, checker, records, excluded,
+                plans=plans, max_attempts=max_attempts, samples=samples, cap=cap,
+                is_removed=is_removed, refetch=refetch,
+            )
+        except _StoppedByCap:
+            stopped = True
+        if limit is not None:
+            # Asked again here: a removal recorded after an earlier sample
+            # finished leaves that sample's record as it was until
+            # apply_removals below
+            removed = is_removed is not None and is_removed(review.post.id)
+            limit.count(records[card_start:], removed)
+        if stopped:
+            break
+    if limit is not None:
+        # ended: every card was passed over or drafted without reaching the
+        # limit or a cap stop, so every card left out at load came before it
+        limit.finish(reviews, examined, ended=examined == len(reviews) and not (stopped or limit.reached))
     apply_removals(records, plans, is_removed, excluded)
-    return records, excluded, False
+    return records, excluded, stopped
+
+
+async def _run_card(
+    review: StoredReview,
+    settings_by_key: Dict[str, WatchSettings],
+    agent: ReplyAgentPort,
+    checker: ClaimCheckerPort,
+    records: List[PostRecord],
+    excluded: Counter,
+    *,
+    plans: Dict[str, Any],
+    max_attempts: int,
+    samples: int,
+    cap: Optional[SpendCap],
+    is_removed: Optional[Callable[[str], bool]],
+    refetch: Optional[Callable[[StoredReview], Awaitable[str]]],
+) -> None:
+    """One review's samples for run_harness: appends its records, counts a
+    card left out in `excluded`. Raises _StoppedByCap when the spend cap
+    refused a call (the records then hold what finished)."""
+    settings = settings_by_key.get(review.settings_key)
+    if settings is None:
+        excluded[EXCLUDED_NO_SETTINGS] += 1
+        return
+    if not clean_names(settings.product_name, settings.product_aliases)[0]:
+        excluded[EXCLUDED_NO_PRODUCT_NAME] += 1
+        return
+    attempt_limit = (
+        max_attempts if settings.claim_gate_max_attempts is None else settings.claim_gate_max_attempts
+    )
+    if refetch is not None:
+        try:
+            found = await refetch(review)
+        except SpendCapReached as e:
+            raise _StoppedByCap() from e
+        if found != "found":
+            excluded[REFETCH_EXCLUDED.get(found, EXCLUDED_LOOKUP_FAILED)] += 1
+            return
+    for sample in range(1, samples + 1):
+        attempts: List[AttemptRecord] = []
+        source, mention = "", None
+        calls_before = len(cap.calls) if cap is not None else 0
+
+        def record(outcome: str, error: str = "") -> None:
+            new_calls = cap.calls[calls_before:] if cap is not None else []
+            records.append(PostRecord(
+                review.workflow_id, review.topic, sample, source, mention, outcome, attempts, error,
+                model_calls=len(new_calls), cost_usd=round(sum(c.cost_usd for c in new_calls), 6),
+                post_id=review.post.id,
+            ))
+
+        try:
+            _stop_if_removed(is_removed, review.post.id)
+            plan, source = await plan_for(review, agent, plans, cap, is_removed)
+            if plan is None:
+                record("plan_invalid")
+                return  # a plan that fails twice fails for every sample
+            mention = plan.mention_product
+            await run_written_path(
+                review, settings, plan, agent, checker,
+                max_attempts=attempt_limit, sample=sample, cap=cap, attempts=attempts,
+                is_removed=is_removed,
+            )
+            record(outcome_of(attempts))
+        except PostRemovedDuringRun:
+            paid = cap is not None and len(cap.calls) > calls_before or bool(attempts)
+            # Counted once per post: here, unless an earlier sample's
+            # record exists and this one makes none (apply_removals then
+            # counts the post when it marks that record removed)
+            if paid or not any(r.post_id == review.post.id for r in records):
+                excluded[EXCLUDED_REMOVED] += 1
+            if paid:
+                # Its calls were paid for; the run is not a result, and
+                # apply_removals drops its text
+                record("removed")
+            return
+        except SpendCapReached as e:
+            # The attempts that finished are kept: their calls were paid
+            record("error", str(e))
+            raise _StoppedByCap() from e
+        except Exception as e:  # one post's failure does not end the run
+            record("error", f"{type(e).__name__}: {e}")
 
 
 def apply_removals(
@@ -1074,6 +1219,7 @@ def summarize(
     *,
     stopped_by_cap: bool = False,
     refetch: "Optional[Refetcher | bool]" = None,
+    limit: Optional[DraftLimit] = None,
 ) -> Dict[str, Any]:
     """Aggregate numbers only: no post, draft or brief text, no ids. This is
     what may be pasted into a pull request of the public repo.
@@ -1081,7 +1227,11 @@ def summarize(
     `refetch` (issue #31): the run's Refetcher ("refetch": "on" and its
     outcomes), False for a run without X lookups ("refetch": "off"), None
     to leave the key out (a recount of an earlier report keeps its own).
-    The X lookups' count and cost are under "calls" (X_LOOKUP_CALL)."""
+    The X lookups' count and cost are under "calls" (X_LOOKUP_CALL).
+
+    `limit` (issue #34): the run's DraftLimit; its counts (the limit,
+    whether it was reached, the cards skipped before it was, the cards it
+    left unexamined) are added. None: no limit keys."""
     outcomes = Counter(r.outcome for r in records)
     # A removed post's runs are not results: they count only in "outcomes"
     drafted = [r for r in records if r.attempts and r.outcome != "removed"]
@@ -1126,6 +1276,8 @@ def summarize(
     elif isinstance(refetch, Refetcher):
         summary["refetch"] = "on"
         summary.update(refetch.summary())
+    if limit is not None:
+        summary.update(limit.summary())
     if cap is not None:
         by_call: Dict[str, Dict[str, float]] = {}
         for c in cap.calls:

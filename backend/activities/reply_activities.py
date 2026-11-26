@@ -22,7 +22,7 @@ from backend.planning import (
 from backend.ports import ReplyAgentPort
 from backend.ports.reply_agent import WrittenDraftRequest
 from backend.budget import meter_inference
-from backend.activities.store_activities import card_post_text_removed, post_removal_recorded
+from backend.activities.store_activities import post_removal_recorded
 from backend.gate.reply_fit import assess_reply_fit
 from backend.gate.failures import (
     MISSING_DRAFT_REASON,
@@ -122,6 +122,19 @@ class PlanReplyResult:
     reply_type: str = ""
 
 
+def refuse_if_removed(post_id: str, what: str) -> None:
+    """Raise PostRemoved when the post's removal is recorded (issue #22).
+
+    A Review whose input carries the post (recorded before issue #23) sends
+    it to the model from its input, so it asks here, before the call: a
+    removal found by another account's Review of the same post, or by the
+    eval re-fetch, then stops it at this activity. A text-free Review gets
+    the same refusal from review_docs.load_post / load_doc.
+    """
+    if post_removal_recorded(post_id):
+        raise review_docs.post_removed_error(what)
+
+
 class ReplyActivities:
     """Reply agent activities with injected agent."""
     
@@ -155,7 +168,11 @@ class ReplyActivities:
             # workflow id (a restarted watch); it is closed and writes nothing
             raise ApplicationError("A later run of this Review owns its documents", type="RunSuperseded",
                                    non_retryable=True)
-        post = review_docs.load_post(input.post_id, "not researching it") if text_free else input.post
+        if text_free:
+            post = review_docs.load_post(input.post_id, "not researching it")
+        else:
+            post = input.post
+            refuse_if_removed(post.id, "not researching it")
         activity.logger.info(
             f"Researching post {post.id} for topic '{input.topic}' "
             f"(key: {input.idempotency_key})"
@@ -214,6 +231,7 @@ class ReplyActivities:
             )
         else:
             post, evidence = input.post, input.evidence
+            refuse_if_removed(post.id, "not planning a reply")
         activity.logger.info(
             f"Planning reply for post {post.id} "
             f"(retry={'yes' if input.feedback else 'no'}, key: {input.idempotency_key})"
@@ -299,30 +317,17 @@ class ReplyActivities:
             f"steer={input.steer} (key: {input.idempotency_key})"
         )
         
-        # Issue #9: once this Review's stored card records that the post was
-        # removed (here or through another account's Review of it), its
-        # evidence may quote a deleted post: do not send it to the model.
-        if card_post_text_removed(activity.info().workflow_id):
-            raise ApplicationError(
-                "Post removed: the target post was deleted or is no longer visible on X; not redrafting",
-                type="PostRemoved",
-                non_retryable=True,
-            )
+        # Issues #9, #12, #22: the evidence (and a written draft's post) may
+        # quote a deleted post. Once its removal is recorded, on this Review's
+        # card or another account's card of the post, or on the stored post,
+        # nothing is sent to the model, in either mode; the Review then ends
+        # as skipped "post removed" (a nudge is refused).
+        refuse_if_removed(input.evidence.post_id, "not drafting")
         
         written = input.draft_mode == DRAFT_MODE_WRITTEN
         if written and (input.plan is None or input.post is None):
             raise ApplicationError(
                 "A written draft needs the reply plan and the post", non_retryable=True
-            )
-        # Issue #12: the written drafter is sent the post itself, so it also
-        # stops when another Review of this post (another account's) has
-        # recorded its removal, before this Review has a card of its own.
-        # The Review then ends as skipped "post removed".
-        if written and post_removal_recorded(input.evidence.post_id):
-            raise ApplicationError(
-                "Post removed: the target post was deleted or is no longer visible on X; not drafting",
-                type="PostRemoved",
-                non_retryable=True,
             )
         
         # Budget (issue #8): metered per paid call of this attempt; see research_post.

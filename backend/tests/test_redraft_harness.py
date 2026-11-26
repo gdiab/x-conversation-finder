@@ -1600,3 +1600,265 @@ def test_a_post_x_reported_gone_is_dropped_from_the_harness_files_even_if_its_re
 
     assert json.loads((out / "plans.json").read_text()) == {}
     assert not _stored_card("review:t:3101").get("text_removed")  # the database removal is what failed
+
+
+# ---------- issue #34: --limit counts drafted cards, after the skips ----------
+
+
+TOPICS_34 = {f"review:t:{n}": TOPIC for n in range(3401, 3408)}
+
+
+@pytest.mark.asyncio
+async def test_the_limit_counts_drafted_posts_and_bounds_the_x_lookups():
+    # Oldest first: two cards whose Reviews still wait for the founder, one
+    # post X reports gone, then four eligible posts
+    db = _app_db_with_cards([(f"review:t:{n}", str(n)) for n in range(3401, 3408)])
+    reviews, _ = load_stored_reviews(db, TOPICS_34)
+    assert [r.workflow_id for r in reviews] == sorted(TOPICS_34)
+    pending = {"review:t:3401", "review:t:3402"}
+
+    async def running(workflow_id):
+        return workflow_id in pending
+
+    x = LookupX({"3403": "gone", **{str(n): "found" for n in range(3404, 3408)}})
+    cap = _cap()
+    refetch = _refetcher(x, cap, is_running=running)
+    limit = harness.DraftLimit(2)
+    agent = ScriptedAgent()
+
+    records, excluded, stopped = await run_harness(
+        reviews, SETTINGS, agent, CountingChecker(), plans={}, max_attempts=2, cap=cap,
+        is_removed=lambda post_id: harness.removal_recorded(db, post_id), refetch=refetch, limit=limit,
+    )
+
+    assert not stopped
+    assert [r.workflow_id for r in records] == ["review:t:3404", "review:t:3405"]
+    assert all(r.outcome in ("passed_first", "passed_redraft", "skipped") for r in records)
+    # The pending cards are not looked up; the gone one is; nothing after the 2nd drafted
+    assert x.lookups == ["3403", "3404", "3405"]
+    assert {request.post.id for request in agent.requests} == {"3404", "3405"}
+    assert dict(excluded) == {"review_running": 2, "removed_at_refetch": 1}
+    summary = summarize(records, excluded, cap, refetch=refetch, limit=limit)
+    assert summary["limit"] == 2 and summary["limit_reached"] is True
+    assert summary["skipped_before_limit"] == 3
+    assert summary["not_reached_by_limit"] == 2
+    assert summary["calls"]["x_lookup"]["calls"] == 3
+    assert "| skipped_before_limit | `3` |" in summary_markdown(summary)
+
+
+@pytest.mark.asyncio
+async def test_invalid_plans_and_recorded_removals_do_not_count_toward_the_limit(tmp_path, no_x):
+    db = _make_db(tmp_path / "cards.db")
+    reviews, _ = load_stored_reviews(db, TOPICS)  # 2001 (no stored plan), 2002 (stored plan)
+    invalid_then_valid = [reviews[0], reviews[1]]
+    plans = {"review:t:2001": {"invalid": ["synthetic"]}}
+    limit = harness.DraftLimit(1)
+
+    records, _, _ = await run_harness(
+        invalid_then_valid, SETTINGS, ScriptedAgent(), CountingChecker(), plans=plans, max_attempts=2,
+        limit=limit,
+    )
+
+    assert [(r.workflow_id, r.outcome) for r in records][0] == ("review:t:2001", "plan_invalid")
+    assert records[-1].workflow_id == "review:t:2002" and records[-1].outcome != "plan_invalid"
+    assert (limit.drafted, limit.skipped_before_limit, limit.reached) == (1, 1, True)
+
+    # A post whose removal is recorded before its first model call is skipped too
+    removed = harness.DraftLimit(1)
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        is_removed=lambda post_id: post_id == "2001", limit=removed,
+    )
+    assert [r.workflow_id for r in records] == ["review:t:2002"]
+    assert excluded["post_text_removed"] == 1
+    assert (removed.drafted, removed.skipped_before_limit) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_limit_larger_than_the_database_drafts_what_there_is(tmp_path, no_x):
+    db = _make_db(tmp_path / "cards.db")
+    reviews, _ = load_stored_reviews(db, TOPICS)
+    limit = harness.DraftLimit(5)
+
+    records, _, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2, limit=limit,
+    )
+
+    assert len({r.workflow_id for r in records}) == 2
+    summary = summarize(records, harness.Counter(), None, limit=limit)
+    assert summary["limit_reached"] is False
+    assert (summary["skipped_before_limit"], summary["not_reached_by_limit"]) == (0, 0)
+    assert "limit" not in summarize(records, harness.Counter(), None)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_a_limit_below_one_is_refused(value):
+    with pytest.raises(ValueError):
+        harness.DraftLimit(value)
+
+
+def test_the_script_applies_limit_after_the_skips(tmp_path, monkeypatch):
+    """--limit 1 on the script: the first card's plan is cached invalid,
+    so the run goes on to the next card and drafts it; summary.md says so."""
+    redraft_harness = _script()
+    monkeypatch.setattr(redraft_harness, "_settings", lambda: SimpleNamespace(
+        openai_api_key="synthetic", openai_base_url=None, openai_model="m", claim_gate_max_attempts=2,
+        inference_input_token_cost_usd=1e-6, inference_output_token_cost_usd=1e-6,
+    ))
+    drafted = []
+
+    class Agent(ScriptedAgent):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+        async def draft_written(self, request, idempotency_key=None):
+            drafted.append(request.post.id)
+            return await super().draft_written(request, idempotency_key)
+
+    import backend.adapters.plain_claim_checker as checker_module
+    import backend.adapters.plain_reply_agent as agent_module
+
+    monkeypatch.setattr(agent_module, "PlainReplyAgent", Agent)
+    monkeypatch.setattr(checker_module, "PlainClaimChecker", lambda *a, **k: CountingChecker())
+    exported = tmp_path / "settings.json"
+    exported.write_text(json.dumps({"watches": {f"t:{TOPIC}": dataclasses.asdict(SETTINGS[f"t:{TOPIC}"])},
+                                    "review_topics": TOPICS}))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "plans.json").write_text(json.dumps({"review:t:2001": {"invalid": ["synthetic"]}}))
+    monkeypatch.setattr(sys, "argv", [
+        "redraft_harness.py", "run", "--db", str(_make_db(tmp_path / "cards.db")), "--settings", str(exported),
+        "--out-root", str(out), "--label", "t", "--limit", "1", "--no-refetch",
+    ])
+
+    redraft_harness.main()
+
+    assert drafted and set(drafted) == {"2002"}
+    summary = (out / "t" / "summary.md").read_text()
+    assert "| limit | `1` |" in summary
+    assert "| limit_reached | `True` |" in summary
+    assert "| skipped_before_limit | `1` |" in summary
+
+
+@pytest.mark.asyncio
+async def test_a_card_removed_after_an_earlier_sample_does_not_count_toward_the_limit(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)  # 2001, 2002
+    removed = set()
+
+    class RemovesAfterFirstSample(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            evidence = await super().draft_written(request, idempotency_key)
+            if request.post.id == "2001":
+                removed.add("2001")  # recorded while the first sample is checked
+            return evidence
+
+    limit = harness.DraftLimit(1)
+    records, _, _ = await run_harness(
+        reviews, SETTINGS, RemovesAfterFirstSample(), CountingChecker(), plans={}, max_attempts=2, samples=2,
+        is_removed=lambda post_id: post_id in removed, limit=limit,
+    )
+
+    # 2001's finished first sample became "removed"; the run went on to 2002
+    assert {r.workflow_id for r in records if r.outcome != "removed"} == {"review:t:2002"}
+    assert (limit.drafted, limit.skipped_before_limit, limit.reached) == (1, 1, True)
+
+
+@pytest.mark.asyncio
+async def test_the_limit_is_counted_when_the_spend_cap_stops_the_run(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)
+
+    class FailingRedraft(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            if request.steer:
+                raise SpendCapReached("synthetic cap")
+            return await super().draft_written(request, idempotency_key)
+
+    limit = harness.DraftLimit(1)
+    records, _, stopped = await run_harness(
+        reviews[1:], SETTINGS, FailingRedraft(texts=[UNSUPPORTED]), CountingChecker(), plans={}, max_attempts=2,
+        limit=limit,
+    )
+
+    assert stopped and [r.outcome for r in records] == ["error"]
+    summary = summarize(records, harness.Counter(), None, stopped_by_cap=True, limit=limit)
+    assert summary["limit_reached"] is True and summary["skipped_before_limit"] == 0
+
+
+def _ordered_db(path: Path, rows) -> Path:
+    """Cards stored oldest first: (post id, kind), kind "ok" or "removed"."""
+    engine = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as session:
+        for index, (post_id, kind) in enumerate(rows):
+            at = f"2026-11-20T00:00:0{index}+00:00"
+            session.add(ReviewCardDB(
+                workflow_id=f"review:t:{post_id}", post_data=_post(post_id, removed=kind == "removed"),
+                evidence_data=_evidence(post_id), status="skipped", created_at=at, updated_at=at, edit_seq=0,
+            ))
+        session.commit()
+    engine.dispose()
+    return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit_n, skipped, not_reached, reached", [
+    (1, 1, 3, True),   # stops at 2002: the removed 2001 came before, 2003-2005 after
+    (2, 2, 1, True),   # stops at 2004: 2001 and 2003 before, 2005 after
+    (5, 3, 0, False),  # the database runs out: every removed card came before the end
+])
+async def test_cards_left_out_at_load_count_in_order(tmp_path, no_x, limit_n, skipped, not_reached, reached):
+    db = _ordered_db(tmp_path / "cards.db", [
+        ("2001", "removed"), ("2002", "ok"), ("2003", "removed"), ("2004", "ok"), ("2005", "removed"),
+    ])
+    reviews, excluded = load_stored_reviews(db, TOPICS)
+    assert [r.post.id for r in reviews] == ["2002", "2004"] and excluded["post_text_removed"] == 3
+    limit = harness.DraftLimit(limit_n, excluded_at_load=sum(excluded.values()))
+
+    records, excluded, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans={}, max_attempts=2,
+        excluded=excluded, limit=limit,
+    )
+
+    summary = summarize(records, excluded, None, limit=limit)
+    assert (summary["skipped_before_limit"], summary["not_reached_by_limit"], summary["limit_reached"]) == (
+        skipped, not_reached, reached,
+    )
+    assert len({r.workflow_id for r in records}) == min(limit_n, 2)
+
+
+@pytest.mark.asyncio
+async def test_an_error_before_any_model_call_does_not_count_toward_the_limit(tmp_path, no_x):
+    reviews, _ = load_stored_reviews(_make_db(tmp_path / "cards.db"), TOPICS)  # 2001 (no stored plan), 2002
+    plans = {"review:t:2001": {"not": "a plan"}}  # does not decode: an error before any call
+    limit = harness.DraftLimit(1)
+
+    records, _, _ = await run_harness(
+        reviews, SETTINGS, ScriptedAgent(), CountingChecker(), plans=plans, max_attempts=2, limit=limit,
+    )
+
+    assert [(r.workflow_id, r.outcome) for r in records][0] == ("review:t:2001", "error")
+    assert records[-1].workflow_id == "review:t:2002" and records[-1].outcome != "error"
+    assert (limit.drafted, limit.skipped_before_limit) == (1, 1)
+
+    # The cap refusing the first call: nothing drafted, the limit not reached
+    class Refused(ScriptedAgent):
+        async def draft_written(self, request, idempotency_key=None):
+            raise SpendCapReached("synthetic cap")
+
+    refused = harness.DraftLimit(1)
+    records, _, stopped = await run_harness(
+        reviews[1:], SETTINGS, Refused(), CountingChecker(), plans={}, max_attempts=2, limit=refused,
+    )
+    assert stopped and [r.outcome for r in records] == ["error"]
+    assert (refused.drafted, refused.reached) == (0, False)
+
+
+def test_a_card_with_an_invalid_plan_in_any_sample_does_not_count_toward_the_limit():
+    def run(outcome, model_calls=0):
+        return harness.PostRecord("review:t:1", TOPIC, 1, "planned", None, outcome, [], model_calls=model_calls)
+
+    limit = harness.DraftLimit(1)
+    limit.count([run("error", model_calls=1), run("plan_invalid")], removed=False)
+    assert (limit.drafted, limit.skipped_in_run) == (0, 1)
+    limit.count([run("error", model_calls=1)], removed=False)
+    assert limit.drafted == 1
