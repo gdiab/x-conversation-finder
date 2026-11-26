@@ -1851,3 +1851,14 @@ async def test_an_error_before_any_model_call_does_not_count_toward_the_limit(tm
     )
     assert stopped and [r.outcome for r in records] == ["error"]
     assert (refused.drafted, refused.reached) == (0, False)
+
+
+def test_a_card_with_an_invalid_plan_in_any_sample_does_not_count_toward_the_limit():
+    def run(outcome, model_calls=0):
+        return harness.PostRecord("review:t:1", TOPIC, 1, "planned", None, outcome, [], model_calls=model_calls)
+
+    limit = harness.DraftLimit(1)
+    limit.count([run("error", model_calls=1), run("plan_invalid")], removed=False)
+    assert (limit.drafted, limit.skipped_in_run) == (0, 1)
+    limit.count([run("error", model_calls=1)], removed=False)
+    assert limit.drafted == 1

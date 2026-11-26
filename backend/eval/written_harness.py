@@ -901,7 +901,8 @@ class DraftLimit:
     so a card skipped for an invalid plan costs a lookup too.
 
     A card counts as drafted when one of its runs has another outcome than
-    NOT_DRAFTED_OUTCOMES and its post's removal is not recorded. A run cut
+    NOT_DRAFTED_OUTCOMES, none has an invalid plan, and its post's removal
+    is not recorded. A run cut
     off by an error counts only when it made a model call (on the spend
     cap) or finished a draft attempt: an error before any call (a cached
     plan that does not decode, the cap refusing the first call) does not.
@@ -933,7 +934,10 @@ class DraftLimit:
     def count(self, card_records: Sequence["PostRecord"], removed: bool) -> None:
         """Count one examined card from the records its runs made; `removed`:
         its post's removal is recorded (also after a sample had finished)."""
-        if not removed and any(_drafted(r) for r in card_records):
+        # A plan invalid twice is invalid for every sample (cached), even
+        # when an earlier sample was cut off by an error after a call
+        invalid_plan = any(r.outcome == "plan_invalid" for r in card_records)
+        if not removed and not invalid_plan and any(_drafted(r) for r in card_records):
             self.drafted += 1
         else:
             self.skipped_in_run += 1
