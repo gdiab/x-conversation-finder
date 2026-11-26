@@ -211,7 +211,7 @@ def store_posts(posts: Iterable[Post]) -> List[str]:
     search cannot bring the text back and its Review can still store a
     "post removed" card.
     """
-    from backend.activities.store_activities import POST_TEXT_REMOVED
+    from backend.activities.store_activities import redact_removed_post
 
     ids = []
     db = get_db()
@@ -221,7 +221,7 @@ def store_posts(posts: Iterable[Post]) -> List[str]:
             ids.append(post.id)
             data = to_json(post)
             if _post_removed(db, post.id):
-                data.update({"text": POST_TEXT_REMOVED, "text_removed": True})
+                data = redact_removed_post(data)  # issue #35: no author or URL either
             db.merge(StoredPostDB(post_id=post.id, post_data=data, stored_at=_now()))
         db.commit()
         return ids
@@ -472,17 +472,15 @@ def store_founder_text(workflow_id: str, post_id: str, kind: str, client_request
 
 def remove_post_docs(db, post_id: str, workflow_ids: Iterable[str]) -> None:
     """Removal duty (issue #23), inside delete_post_text's transaction: record
-    the removal on the stored post, replace its text, and delete every
-    working document of the post (by post id, and by the workflows of its
-    cards)."""
-    from backend.activities.store_activities import POST_TEXT_REMOVED
+    the removal on the stored post, replace its text, drop its author and
+    URL (issue #35), and delete every working document of the post (by post
+    id, and by the workflows of its cards: the founder's edit and nudge
+    texts are among them)."""
+    from backend.activities.store_activities import redact_removed_post
 
     stored = db.get(StoredPostDB, post_id)
     if stored is not None:
-        data = dict(stored.post_data or {})
-        data["text"] = POST_TEXT_REMOVED
-        data["text_removed"] = True
-        stored.post_data = data
+        stored.post_data = redact_removed_post(stored.post_data)
     ids = [w for w in workflow_ids if w]
     query = db.query(ReviewDocDB).filter(ReviewDocDB.post_id == post_id)
     query.delete(synchronize_session=False)

@@ -62,6 +62,10 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   // written draft is model text that can quote the post, and neither it nor
   // a quote of it may stay on screen (issue #12).
   const textRemoved = card.post.text_removed === true;
+  // issue #35: a removal also removes the author and the post URL. A card
+  // that still has them (a stale response) does not show them once removed.
+  const author = textRemoved ? undefined : card.post.author;
+  const postUrl = textRemoved ? undefined : card.post.url;
   useEffect(() => {
     if (textRemoved) {
       setIsEditing(false);
@@ -287,7 +291,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       {/* Header */}
       <div style={{ marginBottom: '20px', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h3 style={{ margin: 0 }}>Review: {card.post.author.username}</h3>
+          <h3 style={{ margin: 0 }}>{author ? `Review: ${author.username}` : 'Review'}</h3>
           <span style={{
             padding: '4px 12px',
             borderRadius: '4px',
@@ -313,24 +317,28 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           borderRadius: '4px',
           marginBottom: '8px',
         }}>
-          <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-            {card.post.author.name} (@{card.post.author.username})
-          </div>
+          {author && (
+            <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
+              {author.name} (@{author.username})
+            </div>
+          )}
           {card.post.text_removed ? (
             <div style={{ fontStyle: 'italic', color: '#666' }}>
-              Post removed: it was deleted or is no longer visible on X, so its text and the research quoting it were removed.
+              Post removed: it was deleted or is no longer visible on X, so its text, its author, and the research and edits quoting it were removed.
             </div>
           ) : (
             <div>{card.post.text}</div>
           )}
           <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-            {card.post.like_count} likes · {card.post.reply_count} replies · 
-            {' '}{card.post.author.followers_count.toLocaleString()} followers
+            {card.post.like_count} likes · {card.post.reply_count} replies
+            {author && <> · {author.followers_count.toLocaleString()} followers</>}
           </div>
         </div>
-        <a href={card.post.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: '14px' }}>
-          View on X →
-        </a>
+        {postUrl && (
+          <a href={postUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: '14px' }}>
+            View on X →
+          </a>
+        )}
       </div>
 
       {/* Evidence Trail */}

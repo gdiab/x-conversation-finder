@@ -91,8 +91,9 @@ export interface ReviewCard {
   post: {
     id: string;
     text: string;
-    url: string;
-    author: {
+    // issue #35: absent on a removed post (text_removed), with the author
+    url?: string;
+    author?: {
       username: string;
       name: string;
       followers_count: number;

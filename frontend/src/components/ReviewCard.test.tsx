@@ -607,6 +607,35 @@ describe('ReviewCard: post removed (issue #9)', () => {
     expect(screen.queryByText('[removed - post deleted]')).not.toBeInTheDocument();
   });
 
+  it('renders a removed card without its author or post link (issue #35)', () => {
+    const card = makeCard({
+      status: 'skipped',
+      skip_reason: 'Post removed: the target post was deleted or is no longer visible on X',
+    });
+    const { author: _author, url: _url, ...kept } = card.post;
+    card.post = { ...kept, text: '[removed - post deleted]', text_removed: true };
+    card.evidence.draft!.text = '[removed - post deleted]';
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    expect(screen.getByRole('heading', { name: 'Review' })).toBeInTheDocument();
+    expect(screen.getByText(/Post removed: it was deleted or is no longer visible on X/)).toBeInTheDocument();
+    expect(screen.getByText(/likes · \d+ replies$/)).toBeInTheDocument();
+    expect(screen.queryByText(/followers/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/@/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /View on X/ })).not.toBeInTheDocument();
+  });
+
+  it('hides a stale author and post link once the card records the removal (issue #35)', () => {
+    const card = makeCard({ status: 'skipped' });
+    const { username, name } = card.post.author!;
+    card.post = { ...card.post, text: '[removed - post deleted]', text_removed: true };
+    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    expect(screen.queryByText(new RegExp(username))).not.toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(name))).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /View on X/ })).not.toBeInTheDocument();
+  });
+
   it('reloads the queue without an error when approve finds the post removed', async () => {
     const { PostRemovedError } = await import('../api/client');
     const user = userEvent.setup();
