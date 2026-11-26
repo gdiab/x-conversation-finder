@@ -218,8 +218,9 @@ def get_db() -> Session:
     return SessionLocal()
 
 
-def init_db():
-    """Initialize database with WAL mode (B3)."""
+def init_db() -> bool:
+    """Initialize database with WAL mode (B3). Returns whether a WAL
+    checkpoint after the issue #35 backfill is still pending."""
     engine = get_engine()
     Base.metadata.create_all(engine)
     
@@ -235,9 +236,10 @@ def init_db():
     # founder's edit were removed too
     from backend.activities.store_activities import redact_recorded_removals
 
-    changed = redact_recorded_removals()
-    if changed:
-        logger.info(f"Applied the removal rules to {changed} rows of removed posts")
+    result = redact_recorded_removals()
+    if result.changed:
+        logger.info(f"Applied the removal rules to {result.changed} rows of removed posts")
+    return result.checkpoint_pending
 
 
 def _migrate_add_edit_seq(engine):

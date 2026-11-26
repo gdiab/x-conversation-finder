@@ -1123,12 +1123,19 @@ def _redact_removed_card_db(card_db: ReviewCardDB) -> None:
             flag_modified(card_db, key)
 
 
-def redact_recorded_removals() -> int:
+@dataclass
+class RecordedRemovals:
+    """What redact_recorded_removals did."""
+
+    changed: int  # rows rewritten under the current rules
+    checkpoint_pending: bool  # the WAL checkpoint did not complete (a reader holds an old snapshot)
+
+
+def redact_recorded_removals() -> RecordedRemovals:
     """Apply the current removal rules to every post whose removal is already
     recorded (issue #35: cards and stored posts removed before the author,
     the URL and the founder's edit were removed too). Idempotent: only rows
-    that change are written. Returns how many rows changed. Runs at startup
-    (database.init_db)."""
+    that change are written. Runs at startup (database.init_db)."""
     from backend.database import StoredPostDB, checkpoint_wal
 
     changed = 0
@@ -1159,11 +1166,12 @@ def redact_recorded_removals() -> int:
     # reader held an old snapshot) leaves the old pages in the -wal file,
     # and the next start finds the rows already redacted. One attempt:
     # checkpoint_wal already waits out SQLite's busy timeout (5 s) for a
-    # reader, so a start is delayed by at most that; the next removal or
-    # start retries a checkpoint still pending
-    if (cards or stored_posts) and not checkpoint_wal():
+    # reader; the API retries a pending one in the background
+    # (api.retry_wal_checkpoint)
+    pending = bool(cards or stored_posts) and not checkpoint_wal()
+    if pending:
         logger.warning("Recorded removals redacted; the WAL checkpoint is pending (a reader holds an old snapshot)")
-    return changed
+    return RecordedRemovals(changed=changed, checkpoint_pending=pending)
 
 
 def _remove_card_post_text(card_db: ReviewCardDB) -> None:

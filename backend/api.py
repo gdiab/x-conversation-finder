@@ -7,6 +7,7 @@ Provides endpoints for:
 - Sending signals/updates to Review workflows
 """
 
+import asyncio
 import logging
 import sys
 from typing import List, Optional
@@ -61,6 +62,24 @@ logger = logging.getLogger(__name__)
 temporal_client: Optional[Client] = None
 
 
+# issue #35: how often a WAL checkpoint the startup backfill could not
+# complete is retried
+WAL_CHECKPOINT_RETRY_SEC = 30.0
+
+
+async def retry_wal_checkpoint(interval_sec: float = WAL_CHECKPOINT_RETRY_SEC) -> None:
+    """Retry the WAL checkpoint until it completes (issue #35): the startup
+    backfill redacted rows of removed posts, but a reader holding an old
+    snapshot kept their old pages in the -wal file."""
+    from backend.database import checkpoint_wal
+
+    while True:
+        await asyncio.sleep(interval_sec)
+        if await asyncio.to_thread(checkpoint_wal):
+            logger.info("WAL checkpoint after the removal backfill completed")
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
@@ -68,7 +87,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     
     # Startup: Initialize database
-    init_db()
+    checkpoint_task = asyncio.create_task(retry_wal_checkpoint()) if init_db() else None
     logger.info("Database initialized")
     
     # Startup: Connect to Temporal
@@ -82,6 +101,8 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    if checkpoint_task is not None:
+        checkpoint_task.cancel()
     logger.info("Shutting down")
 
 

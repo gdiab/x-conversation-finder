@@ -13,6 +13,7 @@ The card keeps its ids, status and timestamps.
 Synthetic data only.
 """
 
+import asyncio
 import json
 import uuid
 from dataclasses import replace
@@ -314,7 +315,7 @@ def test_removals_recorded_before_the_change_are_redacted_at_startup(test_db_iso
 
     from backend.activities.store_activities import redact_recorded_removals
 
-    assert redact_recorded_removals() == 0
+    assert redact_recorded_removals().changed == 0
 
 
 def test_a_start_retries_a_checkpoint_an_earlier_start_could_not_complete(test_db_isolation, monkeypatch):
@@ -340,12 +341,28 @@ def test_a_start_retries_a_checkpoint_an_earlier_start_could_not_complete(test_d
     calls = []
     real_checkpoint = backend.database.checkpoint_wal
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("blocked") and False)
-    assert redact_recorded_removals() == 1
-    assert calls == ["blocked"]  # one attempt (it waits out the busy timeout), then left for the next start
+    first = redact_recorded_removals()
+    assert (first.changed, first.checkpoint_pending) == (1, True)
+    assert calls == ["blocked"]  # one attempt: it waits out the busy timeout
     monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append("ok") or real_checkpoint())
-    assert redact_recorded_removals() == 0
+    again = redact_recorded_removals()
+    assert (again.changed, again.checkpoint_pending) == (0, False)
     assert calls == ["blocked", "ok"]
     assert HANDLE.encode() not in _sqlite_bytes(Path(test_db_isolation))
+
+
+@pytest.mark.asyncio
+async def test_the_api_retries_a_pending_backfill_checkpoint_until_it_completes(monkeypatch):
+    """A start whose checkpoint is blocked does not wait for the next start:
+    the API retries it in the background until it completes."""
+    import backend.database
+    from backend.api import retry_wal_checkpoint
+
+    results = iter([False, False, True])
+    calls = []
+    monkeypatch.setattr(backend.database, "checkpoint_wal", lambda: calls.append(1) or next(results))
+    await asyncio.wait_for(retry_wal_checkpoint(interval_sec=0), timeout=5)
+    assert len(calls) == 3
 
 
 def test_redact_removed_post_tolerates_a_post_without_fields():
