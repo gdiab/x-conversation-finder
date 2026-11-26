@@ -24,6 +24,9 @@ export function parseCommaList(value: string): string[] {
   return entries;
 }
 
+// The server's limit (backend/gate/product_link.py MAX_PRODUCT_URL_CHARS)
+const MAX_PRODUCT_URL_CHARS = 2048;
+
 /**
  * Why a value cannot be the product URL, or null (issue #41). The server
  * checks the same rules: an https link to a site, without spaces.
@@ -31,6 +34,9 @@ export function parseCommaList(value: string): string[] {
 export function productUrlError(value: string): string | null {
   const url = value.trim();
   if (!url) return 'Enter the product URL.';
+  if (url.length > MAX_PRODUCT_URL_CHARS) {
+    return `Enter a product URL of at most ${MAX_PRODUCT_URL_CHARS} characters.`;
+  }
   if (/\s/.test(url) || !/^https:\/\//i.test(url)) {
     return 'Enter the product URL as one https:// link, for example https://example.com.';
   }

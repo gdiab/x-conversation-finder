@@ -145,6 +145,7 @@ describe('productUrlError', () => {
     expect(productUrlError('  https://example.com  ')).toBeNull();
     expect(productUrlError('')).toBe('Enter the product URL.');
     expect(productUrlError('ftp://example.com')).not.toBeNull();
+    expect(productUrlError(`https://example.com/${'a'.repeat(2048)}`)).toMatch(/at most 2048 characters/);
   });
 });
 
