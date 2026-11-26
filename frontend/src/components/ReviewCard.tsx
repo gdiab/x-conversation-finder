@@ -716,13 +716,13 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                 }}
               />
               <div
-                style={{ fontSize: '12px', color: xLength(editText, card.product_url) > X_MAX_CHARS ? '#c62828' : '#666', marginTop: '4px' }}
+                style={{ fontSize: '12px', color: xLength(editText, card.evidence.product_url) > X_MAX_CHARS ? '#c62828' : '#666', marginTop: '4px' }}
               >
-                {xLength(editText, card.product_url)}/{X_MAX_CHARS} characters, as X counts them (a link counts as {X_LINK_CHARS})
+                {xLength(editText, card.evidence.product_url)}/{X_MAX_CHARS} characters, as X counts them (a link counts as {X_LINK_CHARS})
               </div>
               <button
                 onClick={handleEdit}
-                disabled={loading || xLength(editText, card.product_url) > X_MAX_CHARS}
+                disabled={loading || xLength(editText, card.evidence.product_url) > X_MAX_CHARS}
                 style={{ marginTop: '8px', marginRight: '8px' }}
               >
                 Save Edit

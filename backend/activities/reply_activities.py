@@ -424,6 +424,8 @@ class ReplyActivities:
             key_features=input.key_features,
             product_url=input.product_url,
         ))
+        # issue #41: the card names the watch's product URL
+        drafted.product_url = input.product_url
         review_docs.save_doc(workflow_id, input.post_id, input.out_slot, drafted)
         # The claim gate reads this copy, not out_slot (which it rewrites), so a
         # retried gate activity gates the same draft

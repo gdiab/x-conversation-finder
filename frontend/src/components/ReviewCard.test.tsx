@@ -156,7 +156,7 @@ describe('ReviewCard: pending card', () => {
     const text = `${body} ${url}`;
     render(
       <ReviewCard
-        card={makeCard({ product_url: url, evidence: makeEvidence({ draft: makeDraft({ text }) }) })}
+        card={makeCard({ evidence: makeEvidence({ product_url: url, draft: makeDraft({ text }) }) })}
         onUpdate={vi.fn()}
       />,
     );

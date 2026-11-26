@@ -194,4 +194,5 @@ def draft_mode_card_fields(evidence: Any) -> Dict[str, Any]:
     return {
         "draft_mode": getattr(evidence, "draft_mode", None),
         "draft_mode_note": getattr(evidence, "draft_mode_note", None),
+        "product_url": getattr(evidence, "product_url", None),  # issue #41
     }
