@@ -174,6 +174,14 @@ async def test_a_malformed_model_answer_is_an_error_not_an_empty_list():
 
 async def test_the_api_returns_suggestions_and_stores_neither_the_page_nor_them(monkeypatch, test_db_isolation, caplog):
     caplog.set_level("DEBUG")
+    temporal_calls = []
+
+    class _SpyTemporal:
+        def __getattr__(self, name):
+            temporal_calls.append(name)
+            raise AssertionError(f"Temporal used: {name}")
+
+    monkeypatch.setattr(api, "temporal_client", _SpyTemporal())
     marker_page = PAGE + "\nSynthetic-page-marker-7f3a appears only on the page.\n"
     fetcher = FakePageFetcher({URL: marker_page})
     suggester = FakeBriefSuggester(scripted=SuggestResponse(suggestions=[
@@ -196,8 +204,8 @@ async def test_the_api_returns_suggestions_and_stores_neither_the_page_nor_them(
             assert b"needs no API key" not in data
     # Nor in the log
     assert "Synthetic-page-marker-7f3a" not in caplog.text
-    # And no Temporal call: the route never touches the client
-    assert api.temporal_client is None or not getattr(api.temporal_client, "start_workflow", None)
+    # And no Temporal call: a connected client's every method is a spy
+    assert temporal_calls == []
 
 
 async def test_a_fetch_failure_is_a_clear_error_and_no_model_call(monkeypatch):
@@ -534,16 +542,44 @@ async def test_a_github_repo_url_with_a_query_still_reads_the_readme():
     assert page.source == "github_readme"
 
 
-async def test_a_compressed_body_is_capped_while_it_is_decompressed():
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+async def test_a_compressed_body_is_capped_while_it_is_decompressed(monkeypatch, encoding):
     import gzip
-    bomb = gzip.compress(b"a" * (MAX_RAW_BYTES * 20))  # about 40 MB expanded, small on the wire
+    import zlib
+    from backend.adapters import http_page_fetcher
+
+    expanded = b"a" * (MAX_RAW_BYTES * 20)  # about 40 MB expanded, small on the wire
+    bomb = gzip.compress(expanded) if encoding == "gzip" else zlib.compress(expanded)
+    steps = []
+    real = zlib.decompressobj
+
+    class _Spy:
+        def __init__(self, *args):
+            self._d = real(*args)
+
+        def decompress(self, data, max_length=0):
+            out = self._d.decompress(data, max_length)
+            steps.append((max_length, len(out)))
+            return out
+
+        def flush(self, *args):
+            return self._d.flush(*args)
+
+        @property
+        def unconsumed_tail(self):
+            return self._d.unconsumed_tail
+
+    monkeypatch.setattr(http_page_fetcher.zlib, "decompressobj", _Spy)
     fetcher, _ = _fetcher(
-        {("example.com", "/acme-relay"): (200, {"content-type": "text/plain", "content-encoding": "gzip"}, bomb)},
+        {("example.com", "/acme-relay"): (200, {"content-type": "text/plain", "content-encoding": encoding}, bomb)},
         {"example.com": ["93.184.215.14"]},
         max_text_bytes=MAX_RAW_BYTES * 2,
     )
     page = await fetcher.fetch(URL)
     assert page.truncated and len(page.text) == MAX_RAW_BYTES
+    # Every step was bounded: no step produced more than the cap plus one byte
+    assert steps and all(0 < limit <= MAX_RAW_BYTES + 1 and out <= limit for limit, out in steps)
+    monkeypatch.setattr(http_page_fetcher.zlib, "decompressobj", real)
 
     small = gzip.compress(b"Acme Relay delivers webhooks.")
     fetcher, _ = _fetcher(

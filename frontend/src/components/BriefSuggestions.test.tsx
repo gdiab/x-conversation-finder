@@ -186,6 +186,24 @@ describe('Suggest brief additions (issue #42)', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['Product Brief:', ' More.'],
+    ['Product name:', ' Pro'],
+  ])('clears the suggestions and ignores a pending reply when %s changes', async (label, extra) => {
+    let resolve: (r: BriefSuggestionsResult) => void = () => {};
+    suggestMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const user = await setUp();
+    await screen.findByText(/at most \$0\.0134/);
+    await user.click(button());
+    await user.type(screen.getByLabelText(label), extra);
+
+    resolve(RESULT);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.queryByRole('list', { name: 'Suggested brief additions' })).not.toBeInTheDocument();
+    expect(button()).toBeEnabled();
+  });
+
   it('clears the suggestions when the Product URL changes', async () => {
     suggestMock.mockResolvedValue(RESULT);
     const user = await setUp();
@@ -201,7 +219,8 @@ describe('Suggest brief additions (issue #42)', () => {
 
 describe('appendToBrief', () => {
   it('adds list items under a heading that ends any earlier heading or lead-in', () => {
-    expect(appendToBrief('', ['Acme runs on Linux.'])).toBe(`${ADDED_HEADING}\n\n- Acme runs on Linux.`);
+    // Level 1, so no earlier heading of any level stays in force
+    expect(appendToBrief('', ['Acme runs on Linux.'])).toBe('# From the product page\n\n- Acme runs on Linux.');
     expect(appendToBrief('# Not supported\n\n## Integrations\n\nSlack.\n\n', ['Acme  runs\non Linux. '])).toBe(
       `# Not supported\n\n## Integrations\n\nSlack.\n\n${ADDED_HEADING}\n\n- Acme runs on Linux.`,
     );

@@ -96,7 +96,10 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
     };
   }, []);
 
-  // Suggestions belong to the page they came from
+  // Suggestions describe the page, brief and product name they were asked
+  // with: a change to any of them drops the results and any reply still on
+  // its way. (Adding to the brief changes it too; the list is already
+  // cleared then, and its notice stays.)
   useEffect(() => {
     requestSeq.current += 1;
     setLoading(false);
@@ -104,6 +107,9 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
     setItems([]);
     setFlags([]);
     setError(null);
+  }, [productUrl, productBrief, productName]);
+
+  useEffect(() => {
     setNotice(null);
   }, [productUrl]);
 
@@ -199,7 +205,7 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
           </div>
 
           {items.length === 0 && result.suggestions.length === 0 && (
-            <div style={{ fontSize: '14px', marginBottom: '8px' }}>No suggestions: the page states no fact the brief lacks that passed the quote check.</div>
+            <div style={{ fontSize: '14px', marginBottom: '8px' }}>No suggestions passed the checks{result.dropped_other > 0 ? ` (${result.dropped_other} more dropped: a repeat, already in the brief, longer than one sentence, or over the limit)` : ''}.</div>
           )}
 
           {items.length > 0 && (
