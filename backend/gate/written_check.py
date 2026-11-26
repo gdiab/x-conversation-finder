@@ -355,6 +355,10 @@ class PreparedCheck:
     structural_failures: List[List[str]] = field(default_factory=list)
     # The reply plan's product decision, where code alone can see it is broken
     plan_failures: List[str] = field(default_factory=list)
+    # issue #41: the length limit, and the characters the product link takes
+    # when the text names the product (it is appended after the check)
+    max_chars: int = MAX_CHARS
+    product_link_chars: int = 0
 
     @property
     def needs_checker(self) -> bool:
@@ -451,11 +455,21 @@ def prepare_check(
     product_aliases: Optional[Sequence[str]] = None,
     feature_terms: Optional[Sequence[str]] = None,
     mention_product: Optional[bool] = None,
+    max_chars: int = MAX_CHARS,
+    product_link_chars: int = 0,
 ) -> PreparedCheck:
     """Split the text, run the triggers and apply everything code can decide alone.
 
     `feature_terms` is the watch's "Key features" list. `mention_product` is
     the reply plan's decision (None for a founder edit).
+
+    Issue #41: `max_chars` is the text's limit (lower for a founder edit
+    that ends with the product link, which is checked without it), and
+    `product_link_chars` what the product link takes if the text names the
+    product: a model draft that passes with a product claim gets the link
+    appended, so its sentences must leave room for it. Code knows here that
+    the text names the product when the plan says to mention it or a trigger
+    fired; judge() applies the same limit once the checker found a claim.
     """
     name, aliases = clean_names(product_name, product_aliases)
     terms = clean_feature_terms(feature_terms)
@@ -468,11 +482,11 @@ def prepare_check(
         failures.append(
             ["[reply]", f"The reply must have at most {MAX_SENTENCES} sentences (got {len(sentences)})"]
         )
-    if len((text or "").strip()) > MAX_CHARS:
-        failures.append(
-            ["[reply]", f"The reply must be at most {MAX_CHARS} characters (got {len(text.strip())})"]
-        )
     triggered = [i for i, hits in enumerate(triggers) if hits]
+    names_product = mention_product is True or bool(triggered)
+    length_failure = _length_failure(text, max_chars, product_link_chars if names_product else 0)
+    if length_failure:
+        failures.append(["[reply]", length_failure])
     if len(triggered) > MAX_PRODUCT_CLAIMS:
         failures.append([
             "[reply]",
@@ -527,7 +541,26 @@ def prepare_check(
         feature_terms=terms,
         structural_failures=failures,
         plan_failures=plan_failures,
+        max_chars=max_chars,
+        product_link_chars=product_link_chars,
     )
+
+
+def _length_failure(text: Optional[str], max_chars: int, link_chars: int) -> Optional[str]:
+    """The length rule, or None. With the product link (issue #41) the
+    sentences get what X leaves after it."""
+    length = len((text or "").strip())
+    if link_chars:
+        limit = max_chars - link_chars
+        if length > limit:
+            return (
+                f"The reply must be at most {limit} characters, because the product link is added "
+                f"after it and X counts a link as {link_chars - 1} characters (got {length})"
+            )
+        return None
+    if length > max_chars:
+        return f"The reply must be at most {max_chars} characters (got {length})"
+    return None
 
 
 def _judge_sentence(
@@ -730,6 +763,13 @@ def judge(
             claim.reason = f"{claim.reason} {too_many}".strip() if not claim.passed else too_many
             claim.passed = False
     failures += [[c.sentence, c.reason] for c in checks if not c.passed]
+    if claims and prepared.product_link_chars:
+        # issue #41: the checker found a product claim code did not trigger
+        # on, so the product link will follow; prepare_check left the room
+        # for it unchecked. (A text already too long has its failure.)
+        length_failure = _length_failure(prepared.text, prepared.max_chars, prepared.product_link_chars)
+        if length_failure and not any(f[1] == length_failure for f in failures):
+            failures.append(["[reply]", length_failure])
     plan_failures = plan_product_failures(checks, mention_product)
     passed = not failures and not plan_failures
     if passed:

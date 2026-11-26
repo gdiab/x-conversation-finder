@@ -34,6 +34,10 @@ class WrittenDraftRequest:
     product_aliases: List[str] = field(default_factory=list)
     feature_terms: List[str] = field(default_factory=list)
     steer: Optional[str] = None
+    # issue #41: the reply's length limit. Lower than X's 280 when code will
+    # append the watch's product URL (the plan says to mention the product):
+    # X counts the link as 23 characters, plus the space before it.
+    max_chars: int = 280
 
 
 class ReplyAgentPort(ABC):
@@ -88,6 +92,7 @@ class ReplyAgentPort(ABC):
         steer: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         plan: Optional[ReplyPlan] = None,
+        max_chars: int = 280,
     ) -> Evidence:
         """
         Draft a reply based on evidence.
@@ -103,6 +108,9 @@ class ReplyAgentPort(ABC):
         checks the result against the plan in code
         (backend.planning.plan_conformance_failures); a non-conforming draft is
         redrafted once, then skipped.
+
+        `max_chars` is the reply's length limit after text insertion (issue
+        #41: lower when code will append the watch's product URL).
         
         Returns updated evidence.
         """

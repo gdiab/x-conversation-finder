@@ -202,6 +202,8 @@ async def export_settings(args) -> None:
             "key_features": list(watch.key_features) if watch.key_features is not None else None,
             # The limit the watch's Reviews keep (ReviewConfig, saved at start)
             "claim_gate_max_attempts": watch.review_config.claim_gate_max_attempts,
+            # issue #41: None for a watch started before the field
+            "product_url": watch.product_url,
         }
         print(f"{workflow_id}: topic {watch.topic!r}, product name {'set' if watch.product_name else 'missing'}")
     async for execution in client.list_workflows("WorkflowType='Review'"):

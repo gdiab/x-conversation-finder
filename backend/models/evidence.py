@@ -161,6 +161,11 @@ class Evidence:
     draft_mode: Optional[str] = None
     draft_mode_note: Optional[str] = None
     # --- end written drafts ---
+    # Issue #41: the watch's product URL, recorded by the text-free
+    # draft_reply with each draft, so every card the founder edits names it
+    # (the edit box counts the link as the check does). None for a watch
+    # started without one, and on cards drafted before the field existed.
+    product_url: Optional[str] = None
     
     def compute_confidence(self) -> float:
         """

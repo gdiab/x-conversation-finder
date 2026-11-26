@@ -16,7 +16,8 @@ from temporalio.exceptions import ApplicationError
 from backend.activities.store_activities import card_post_text_removed, post_removal_recorded
 from backend.budget import meter_inference
 from backend.gate.brief import split_brief
-from backend.gate.written_check import judge, prepare_check
+from backend.gate.product_link import PRODUCT_LINK_CHARS, append_product_link, linked_max_chars, strip_product_link
+from backend.gate.written_check import MAX_CHARS, judge, prepare_check
 from backend import review_docs
 from backend.gate.failures import PLAN_FAILURE_MARKER, DraftFailures
 from backend.models import ClaimGateResult, Evidence
@@ -82,6 +83,21 @@ class CheckWrittenDraftInput:
     source_is_founder_text: bool = False
     kind: str = "draft"
     record_slot: str = ""
+    # Issue #41: the watch's "Product URL" (None for a watch started without
+    # it). A model draft that passes and names the product gets it appended
+    # when its check is recorded (record_slot), and its sentences must leave
+    # room for it. A founder's text that ends with it is checked without it.
+    # Text-free inputs only.
+    product_url: Optional[str] = None
+
+
+def names_product(result: WrittenCheckResult, mention_product: Optional[bool]) -> bool:
+    """Whether a passing written draft gets the product link (issue #41):
+    the plan says to mention the product, or a sentence was checked as a
+    product claim (and, the draft having passed, supported)."""
+    return result.passed and (
+        mention_product is True or any(s.kind == "claim" for s in result.sentences)
+    )
 
 
 class WrittenCheckActivities:
@@ -115,8 +131,15 @@ class WrittenCheckActivities:
         """
         if input.source_slot:
             return await self._check_text_free(input)
+        return await self._check(input.text, input)
+
+    async def _check(
+        self, text: str, input: CheckWrittenDraftInput, max_chars: int = MAX_CHARS, product_link_chars: int = 0
+    ) -> WrittenCheckResult:
+        """The check itself; `max_chars` and `product_link_chars` are the
+        length rule (issue #41, see prepare_check)."""
         activity.logger.info(
-            f"Checking written text: {len(input.text)} chars (key: {input.idempotency_key})"
+            f"Checking written text: {len(text)} chars (key: {input.idempotency_key})"
         )
 
         # Issue #9: once this Review's stored card records that the post was
@@ -133,12 +156,14 @@ class WrittenCheckActivities:
             )
 
         prepared = prepare_check(
-            input.text,
+            text,
             split_brief(input.product_brief),
             input.product_name,
             input.product_aliases,
             input.key_features,
             input.mention_product,
+            max_chars=max_chars,
+            product_link_chars=product_link_chars,
         )
         if not prepared.needs_checker:
             result = judge(prepared, None, input.mention_product)
@@ -171,19 +196,41 @@ class WrittenCheckActivities:
         else:
             evidence = review_docs.load_doc(workflow_id, input.post_id, input.source_slot, Evidence, what)
             text = evidence.draft.text if evidence.draft else ""
-        digest = review_docs.text_digest(text)
+        # Issue #41: the sentences are checked without a trailing product
+        # link. A founder's text keeps its link and is checked under the
+        # budget X leaves after it; its result is kept by the whole text, as
+        # the card names it. A model draft gets the link only after it
+        # passed: a link already on it (this activity's own output, read
+        # again on a retry, or the model's) is taken off, and the result is
+        # kept by the sentences, so the link changes no check.
+        body, linked = strip_product_link(text, input.product_url)
+        if input.source_is_founder_text:
+            max_chars = linked_max_chars(text, input.product_url, body, MAX_CHARS) if linked else MAX_CHARS
+            link_chars = 0
+            digest = review_docs.text_digest(text)
+        else:
+            max_chars, link_chars = MAX_CHARS, (PRODUCT_LINK_CHARS if input.product_url else 0)
+            digest = review_docs.text_digest(body)
         cache = review_docs.check_slot(input.kind, digest)
         result = review_docs.find_doc(workflow_id, input.post_id, cache, WrittenCheckResult)
         if result is None:
-            checked = await self.check_written_draft(replace(input, text=text, source_slot=""))
+            checked = await self._check(body, input, max_chars, link_chars)
             # The first finished check of a text stands (another update may
             # have checked the same text meanwhile)
             result = review_docs.save_doc(workflow_id, input.post_id, cache, checked, first_wins=True)
         rows = written_failure_rows(result)
+        draft_digest = digest
         if input.record_slot:
             target = review_docs.load_doc(workflow_id, input.post_id, input.record_slot, Evidence, what)
             if target.draft is not None:
                 record_written_check(target.draft, result)
+                if input.product_url:
+                    # Issue #41: code, never the model, adds the link
+                    target.draft.text = (
+                        append_product_link(body, input.product_url)
+                        if names_product(result, input.mention_product) else body
+                    )
+                draft_digest = review_docs.text_digest(target.draft.text)
                 review_docs.save_doc(workflow_id, input.post_id, input.record_slot, target)
             review_docs.save_doc(
                 workflow_id, input.post_id, review_docs.failures_slot(input.record_slot),
@@ -196,4 +243,5 @@ class WrittenCheckActivities:
             result_count=len(result.sentences),
             failing_count=sum(1 for r in result.sentences if not r.passed),
             text_sha256=digest,
+            draft_sha256=draft_digest,
         )

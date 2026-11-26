@@ -156,6 +156,9 @@ def test_the_port_and_the_activity_input_have_no_field_for_the_post_the_plan_or_
         # activity reads only the draft text from the slot; the request below
         # is still built from that text alone.
         "source_slot", "source_is_founder_text", "kind", "record_slot",
+        # issue #41: the watch's product URL, taken off the text before the
+        # check and appended to a passing draft after it; never sent to the checker
+        "product_url",
     }
     assert list(ClaimCheckerPort.check.__code__.co_varnames[:3]) == ["self", "request", "idempotency_key"]
 

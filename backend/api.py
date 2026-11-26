@@ -49,6 +49,7 @@ from backend.activities.store_activities import (
 from backend import review_docs
 from backend.gate.failures import DraftFailures, nudge_rejection_message, nudge_rejection_reasons
 from backend.database import init_db
+from backend.gate.product_link import product_url_error
 from backend.gate.written_check import MAX_FEATURE_TERM_WORDS, clean_feature_terms, feature_term_words
 from backend.budget import get_today_budget
 
@@ -316,6 +317,18 @@ class StartWatchRequest(BaseModel):
     # features" list. The written-draft feature-term trigger reads only this
     # field, never the brief text.
     key_features: List[str] = Field(default_factory=list)
+    # issue #41 (George's decision, 2026-11-26): the form's required "Product
+    # URL" (https). Code appends it to drafts that name the product.
+    product_url: str
+
+    @field_validator("product_url")
+    @classmethod
+    def product_url_is_https(cls, value: str) -> str:
+        url = value.strip()
+        error = product_url_error(url)
+        if error:
+            raise ValueError(error)
+        return url
 
     @field_validator("product_name")
     @classmethod
@@ -452,6 +465,7 @@ async def start_watch(request: StartWatchRequest):
                 product_name=request.product_name,
                 product_aliases=request.product_aliases,
                 key_features=request.key_features,
+                product_url=request.product_url,
             ),
             id=workflow_id,
             task_queue="x-conversation-finder",
@@ -464,14 +478,15 @@ async def start_watch(request: StartWatchRequest):
     
     except Exception as e:
         if "already exists" in str(e).lower():
-            # A running watch keeps the brief, product name, other names and
-            # key features it was started with (issue #12: stop it first to
-            # change them)
+            # A running watch keeps the brief, product name, other names, key
+            # features and product URL it was started with (issues #12, #41:
+            # stop it first to change them)
             return StartWatchResponse(
                 workflow_id=workflow_id,
                 message=(
                     f"Watch already running for topic '{request.topic}'. Its product name, other "
-                    "names, key features and brief were not changed; stop the watch first to change them."
+                    "names, key features, product URL and brief were not changed; stop the watch "
+                    "first to change them."
                 ),
             )
         raise HTTPException(status_code=500, detail=str(e))

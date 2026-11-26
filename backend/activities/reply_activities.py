@@ -7,7 +7,8 @@ from temporalio.exceptions import ApplicationError
 
 from backend.config import get_settings
 from backend.gate.brief import split_brief
-from backend.gate.written_check import clean_feature_terms, clean_names
+from backend.gate.product_link import strip_product_link, writer_max_chars
+from backend.gate.written_check import MAX_CHARS, clean_feature_terms, clean_names
 from backend.models import Evidence, Post, ReplyPlan
 from backend.models.reply_plan import REPLY_TYPES
 from backend.models.summaries import DraftSummary, ResearchSummary
@@ -75,6 +76,10 @@ class DraftReplyInput:
     out_slot: str = ""
     steer_slot: str = ""
     steer_from_slot: str = ""
+    # Issue #41: the watch's "Product URL". A text-free draft is written
+    # with room for it, and the previous draft (with the link appended, or
+    # a founder's edit ending with it) is shown to the drafter without it.
+    product_url: Optional[str] = None
 
 
 @dataclass
@@ -330,6 +335,12 @@ class ReplyActivities:
                 "A written draft needs the reply plan and the post", non_retryable=True
             )
         
+        # issue #41: with the watch's product URL, a reply the plan says
+        # names the product gets the link from code after its check, so the
+        # drafter is given the length X leaves after it
+        max_chars = writer_max_chars(
+            MAX_CHARS, input.product_url, input.plan.mention_product if input.plan else None
+        )
         # Budget (issue #8): metered per paid call of this attempt; see research_post.
         with meter_inference() as meter:
             if written:
@@ -347,6 +358,7 @@ class ReplyActivities:
                         product_aliases=aliases,
                         feature_terms=clean_feature_terms(input.key_features),
                         steer=input.steer,
+                        max_chars=max_chars,
                     ),
                     idempotency_key=input.idempotency_key,
                 )
@@ -356,6 +368,7 @@ class ReplyActivities:
                     steer=input.steer,
                     idempotency_key=input.idempotency_key,
                     plan=input.plan,
+                    max_chars=max_chars,
                 )
         
         if evidence.draft and input.plan is not None and not written:
@@ -386,6 +399,10 @@ class ReplyActivities:
         what = "not drafting"
         evidence = review_docs.load_doc(workflow_id, input.post_id, input.source_slot, Evidence, what)
         written = evidence.draft_mode == DRAFT_MODE_WRITTEN
+        if evidence.draft is not None and input.product_url:
+            # issue #41: the drafter rewrites the sentences; code adds the
+            # link again after the check (the founder's edit may end with it)
+            evidence.draft.text = strip_product_link(evidence.draft.text, input.product_url)[0]
         steer = None
         if input.steer_slot:
             steer = review_docs.load_doc(workflow_id, input.post_id, input.steer_slot, str, what)
@@ -405,7 +422,10 @@ class ReplyActivities:
             product_name=input.product_name,
             product_aliases=input.product_aliases,
             key_features=input.key_features,
+            product_url=input.product_url,
         ))
+        # issue #41: the card names the watch's product URL
+        drafted.product_url = input.product_url
         review_docs.save_doc(workflow_id, input.post_id, input.out_slot, drafted)
         # The claim gate reads this copy, not out_slot (which it rewrites), so a
         # retried gate activity gates the same draft

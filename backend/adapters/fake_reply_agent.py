@@ -149,6 +149,7 @@ class FakeReplyAgent(ReplyAgentPort):
         steer: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         plan: Optional[ReplyPlan] = None,
+        max_chars: int = 280,
     ) -> Evidence:
         """
         Generate fake draft deterministically with segments.

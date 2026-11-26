@@ -24,6 +24,33 @@ export function parseCommaList(value: string): string[] {
   return entries;
 }
 
+// The server's limit (backend/gate/product_link.py MAX_PRODUCT_URL_CHARS)
+const MAX_PRODUCT_URL_CHARS = 2048;
+
+/**
+ * Why a value cannot be the product URL, or null (issue #41). The server
+ * checks the same rules: an https link to a site, without spaces.
+ */
+export function productUrlError(value: string): string | null {
+  const url = value.trim();
+  if (!url) return 'Enter the product URL.';
+  if (url.length > MAX_PRODUCT_URL_CHARS) {
+    return `Enter a product URL of at most ${MAX_PRODUCT_URL_CHARS} characters.`;
+  }
+  if (/\s/.test(url) || !/^https:\/\//i.test(url)) {
+    return 'Enter the product URL as one https:// link, for example https://example.com.';
+  }
+  try {
+    const host = new URL(url).hostname;
+    if (!host.replace(/^\.+|\.+$/g, '').includes('.')) {
+      return 'Enter the product URL as one https:// link, for example https://example.com.';
+    }
+  } catch {
+    return 'Enter the product URL as one https:// link, for example https://example.com.';
+  }
+  return null;
+}
+
 export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
   const [account, setAccount] = useState('');
   const [topic, setTopic] = useState('');
@@ -32,6 +59,7 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
   const [productName, setProductName] = useState('');
   const [alsoCalled, setAlsoCalled] = useState('');
   const [keyFeatures, setKeyFeatures] = useState('');
+  const [productUrl, setProductUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -43,6 +71,11 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
     // "required" accepts a name made of spaces; the server does not
     if (!productName.trim()) {
       setError('Enter the product name.');
+      return;
+    }
+    const urlError = productUrlError(productUrl);
+    if (urlError) {
+      setError(urlError);
       return;
     }
     
@@ -58,6 +91,7 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
         product_name: productName.trim(),
         product_aliases: parseCommaList(alsoCalled),
         key_features: parseCommaList(keyFeatures),
+        product_url: productUrl.trim(),
       });
       
       setSuccess(result.message);
@@ -136,6 +170,26 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
             style={{ width: '100%', padding: '8px' }}
             placeholder="e.g., Acme Relay"
           />
+        </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label htmlFor="watch-product-url" style={{ display: 'block', marginBottom: '4px' }}>
+            Product URL:
+          </label>
+          <input
+            id="watch-product-url"
+            type="url"
+            value={productUrl}
+            onChange={(e) => setProductUrl(e.target.value)}
+            required
+            style={{ width: '100%', padding: '8px' }}
+            placeholder="e.g., https://example.com/acme-relay"
+          />
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            An https:// link. A draft that names the product ends with this link, added by code after
+            the draft passed its check. X counts a link as 23 characters, so such a draft has at most
+            256 characters before it.
+          </div>
         </div>
 
         <div style={{ marginBottom: '12px' }}>

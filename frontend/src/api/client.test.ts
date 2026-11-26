@@ -173,6 +173,7 @@ describe('startWatch (issue #12: product name, aliases and key features)', () =>
     product_name: 'Acme Relay',
     product_aliases: ['Relay'],
     key_features: ['Signed deliveries'],
+    product_url: 'https://example.com/acme-relay',
   };
 
   it('posts the product name, the aliases and the key features with the watch', async () => {

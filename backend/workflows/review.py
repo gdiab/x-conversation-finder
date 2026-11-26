@@ -72,6 +72,14 @@ def _rejection(message: str, error_type: str, *details) -> ApplicationError:
     return ApplicationError(message, *details, type=error_type, non_retryable=True)
 
 
+def _stored_draft_digest(summary) -> str:
+    """The digest of a draft a gate or a recorded check accepted, as it is
+    stored: with the product link when code appended it (issue #41). A
+    result recorded before the field existed has none, and its text_sha256
+    is that draft's digest, so replay takes the recorded value either way."""
+    return summary.draft_sha256 or summary.text_sha256
+
+
 def _is_post_removed(error: ActivityError) -> bool:
     """Whether an activity refused because the post's removal is recorded."""
     cause = error.cause
@@ -184,6 +192,11 @@ class ReviewInput:
     key_features: Optional[List[str]] = None
     # issue #23: the target post's id; set from `post` when that is given
     post_id: str = ""
+    # issue #41: the watch's "Product URL". The text-free activities append
+    # it to a passing draft that names the product. None on Reviews started
+    # by a watch without it: their drafts get no link, as before. A Review
+    # whose input carries the post (recorded before issue #23) never has one.
+    product_url: Optional[str] = None
     
     def __post_init__(self):
         """Default config if not provided."""
@@ -878,6 +891,7 @@ class ReviewWorkflow:
             post_id=input.post_id,
             source_slot=source,
             out_slot=out,
+            product_url=input.product_url,
             **steer,
         )
 
@@ -913,7 +927,7 @@ class ReviewWorkflow:
                     )
                     if check.passed:
                         workflow.logger.info(f"Written draft passed its check on attempt {attempts}")
-                        self._accept_draft(check.text_sha256)
+                        self._accept_draft(_stored_draft_digest(check))
                         return slot
                     workflow.logger.warning(f"Written draft failed its check on attempt {attempts}")
                 failed_slot = slot  # draft_reply stored a missing draft as a failure
@@ -923,7 +937,7 @@ class ReviewWorkflow:
                 failed_slot = slot
                 if gate.passed and gate.plan_failure_count == 0:
                     workflow.logger.info(f"Claim gate passed on attempt {attempts}")
-                    self._accept_draft(gate.text_sha256)
+                    self._accept_draft(_stored_draft_digest(gate))
                     return slot
                 workflow.logger.warning(
                     f"Draft failed on attempt {attempts}: {gate.failure_count} failures, "
@@ -955,7 +969,8 @@ class ReviewWorkflow:
         return await workflow.execute_activity(
             claim_gate,
             ClaimGateInput(
-                segments=[], founder_materials=[], idempotency_key=key, post_id=self.input.post_id, slot=slot
+                segments=[], founder_materials=[], idempotency_key=key, post_id=self.input.post_id, slot=slot,
+                product_url=self.input.product_url,
             ),
             start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_short_sec),
             result_type=GateSummary,
@@ -988,6 +1003,7 @@ class ReviewWorkflow:
                 source_is_founder_text=founder_text,
                 kind=kind,
                 record_slot=source_slot if record else "",
+                product_url=input.product_url,
             ),
             start_to_close_timeout=timedelta(seconds=input.config.activity_timeout_long_sec),
             retry_policy=RetryPolicy(maximum_attempts=input.config.activity_max_attempts),
@@ -1830,6 +1846,7 @@ class ReviewWorkflow:
                         text_slot=text_slot,
                         evidence_slot=EVIDENCE_SLOT,
                         results_slot=results_slot,
+                        product_url=self.input.product_url,
                     ),
                     start_to_close_timeout=timedelta(seconds=self.input.config.activity_timeout_medium_sec),
                     retry_policy=RetryPolicy(maximum_attempts=self.input.config.activity_max_attempts),
@@ -2001,11 +2018,13 @@ class ReviewWorkflow:
                         self._mention_product, record=True,
                     )
                     rejected = check.failure_count > 0
+                    # issue #41: the digest of the draft with the product link
+                    digest = check.draft_sha256 or digest
             else:
                 rejected = not draft.has_draft or draft.plan_failure_count > 0
                 if draft.has_draft:
                     gate = await self._gate_text_free(slot, f"{input.post_id}:nudge_gate:{client_request_id}")
-                    digest = gate.text_sha256
+                    digest = _stored_draft_digest(gate)
                     rejected = rejected or (draft.has_segments and not gate.passed)
             if rejected:
                 raise ApplicationError(

@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseCommaList, StartWatchForm } from './StartWatchForm';
+import { parseCommaList, productUrlError, StartWatchForm } from './StartWatchForm';
 import { startWatch } from '../api/client';
 
 vi.mock('../api/client', async (importOriginal) => {
@@ -20,6 +20,7 @@ async function fillRequired(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByPlaceholderText('e.g., reliability'), 'webhooks');
   await user.type(screen.getByPlaceholderText('e.g., distributed systems reliability'), 'webhook retries');
   await user.type(screen.getByPlaceholderText(/Describe your product/), 'Acme Relay delivers webhooks.');
+  await user.type(screen.getByLabelText('Product URL:'), ' https://example.com/acme-relay ');
 }
 
 describe('StartWatchForm: product name, "Also called" and "Key features" (issue #12)', () => {
@@ -37,8 +38,8 @@ describe('StartWatchForm: product name, "Also called" and "Key features" (issue 
     render(<StartWatchForm onSuccess={vi.fn()} />);
 
     const labels = screen.getAllByText(/:$/, { selector: 'label' }).map((label) => label.textContent?.trim());
-    expect(labels.slice(-4)).toEqual([
-      'Product name:', 'Also called (optional):', 'Key features (optional):', 'Product Brief:',
+    expect(labels.slice(-5)).toEqual([
+      'Product name:', 'Product URL:', 'Also called (optional):', 'Key features (optional):', 'Product Brief:',
     ]);
   });
 
@@ -62,6 +63,7 @@ describe('StartWatchForm: product name, "Also called" and "Key features" (issue 
       product_name: 'Acme Relay',
       product_aliases: ['Relay', 'AcmeRelay'],
       key_features: ['Signed deliveries', 'Delivery replay'],
+      product_url: 'https://example.com/acme-relay',
     });
     expect(await screen.findByText("Started watch for topic 'webhooks'")).toBeInTheDocument();
     expect(onSuccess).toHaveBeenCalledTimes(1);
@@ -105,6 +107,45 @@ describe('StartWatchForm: product name, "Also called" and "Key features" (issue 
     await user.click(screen.getByRole('button', { name: 'Start Watch' }));
 
     expect(await screen.findByText(/stop the watch first to change them/)).toBeInTheDocument();
+  });
+});
+
+describe('StartWatchForm: Product URL (issue #41)', () => {
+  it('has a required https Product URL field that explains the link', () => {
+    render(<StartWatchForm onSuccess={vi.fn()} />);
+
+    expect(screen.getByLabelText('Product URL:')).toBeRequired();
+    expect(screen.getByLabelText('Product URL:')).toHaveAttribute('type', 'url');
+    expect(screen.getByText(/A draft that names the product ends with this link/)).toBeInTheDocument();
+  });
+
+  it.each(['http://example.com', 'example.com', 'https://localhost', 'https://exa mple.com'])(
+    'refuses %s without calling the API',
+    async (url) => {
+      const user = userEvent.setup();
+      const { container } = render(<StartWatchForm onSuccess={vi.fn()} />);
+
+      await fillRequired(user);
+      await user.type(screen.getByLabelText('Product name:'), 'Acme Relay');
+      await user.clear(screen.getByLabelText('Product URL:'));
+      await user.type(screen.getByLabelText('Product URL:'), url);
+      // Submit the form itself: the browser's own type="url" check would
+      // stop some of these first, and the form must refuse them either way
+      container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+      expect(await screen.findByText(/Enter the product URL as one https:\/\/ link/)).toBeInTheDocument();
+      expect(startWatchMock).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('productUrlError', () => {
+  it('accepts an https link to a site and nothing else', () => {
+    expect(productUrlError('https://github.com/clickety-clacks/tightbeam')).toBeNull();
+    expect(productUrlError('  https://example.com  ')).toBeNull();
+    expect(productUrlError('')).toBe('Enter the product URL.');
+    expect(productUrlError('ftp://example.com')).not.toBeNull();
+    expect(productUrlError(`https://example.com/${'a'.repeat(2048)}`)).toMatch(/at most 2048 characters/);
   });
 });
 

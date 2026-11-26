@@ -1,7 +1,7 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ReviewCard } from './ReviewCard';
+import { ReviewCard, xLength } from './ReviewCard';
 import { approveReview, editReview, nudgeReview, ReviewApiError, skipReview } from '../api/client';
 import {
   makeCard,
@@ -100,6 +100,20 @@ describe('ReviewCard: skipped card', () => {
   });
 });
 
+describe('xLength (issue #41)', () => {
+  const url = 'https://example.com/acme';
+  it('counts the trailing product URL as 23 plus the whitespace before it', () => {
+    expect(xLength(`Hi. ${url}`, url)).toBe(3 + 1 + 23);
+    expect(xLength(`Hi.\n\n${url}  `, url)).toBe(3 + 2 + 23);
+    expect(xLength(url, url)).toBe(23);
+  });
+  it('counts any other link, or the URL glued to a word, as typed', () => {
+    expect(xLength(`Hi. https://other.example.com/long`, url)).toBe(34);
+    expect(xLength(`Hi.${url}`, url)).toBe(3 + url.length);
+    expect(xLength(`Hi. ${url}`, null)).toBe(4 + url.length);
+  });
+});
+
 describe('ReviewCard: pending card', () => {
   it('shows the draft with a Copy button and the action buttons', () => {
     render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
@@ -122,6 +136,39 @@ describe('ReviewCard: pending card', () => {
 
     await user.click(screen.getByRole('button', { name: 'Copy Draft' }));
     expect(writeText).toHaveBeenCalledWith('Copy me, synthetic.');
+  });
+
+  it('shows and copies a draft that ends with the product link (issue #41)', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    const text = 'Acme Relay retries failed deliveries. https://example.com/acme-relay';
+    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft: makeDraft({ text }) }) })} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText(text)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Copy Draft' }));
+    expect(writeText).toHaveBeenCalledWith(text);
+  });
+
+  it('counts the product link in the edit box as the check does, and keeps it in the text to edit', async () => {
+    const user = userEvent.setup();
+    const url = 'https://example.com/a-rather-long-path/to-the-product-page-for-acme-relay';
+    const body = 'a'.repeat(256);
+    const text = `${body} ${url}`;
+    render(
+      <ReviewCard
+        card={makeCard({ evidence: makeEvidence({ product_url: url, draft: makeDraft({ text }) }) })}
+        onUpdate={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    const box = screen.getByDisplayValue(text);
+    expect(screen.getByText(/^280\/280 characters, as X counts them/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Edit' })).toBeEnabled();
+
+    await user.type(box, ' x'); // after the link: now a link in the text, counted as typed
+    expect(screen.getByText(new RegExp(`^${text.length + 2}/280 characters`))).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Edit' })).toBeDisabled();
   });
 
   it('shows the claim gate result and each failed sentence with its reason', () => {

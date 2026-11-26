@@ -473,7 +473,7 @@ async def test_review_workflow_claim_gate_regenerate_then_skip(make_review_input
             )
             return evidence
         
-        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None) -> Evidence:
+        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280) -> Evidence:
             """Generate draft with invalid segment structure (has text field on non_claim)."""
             from backend.models import Segment
             
@@ -611,7 +611,7 @@ async def test_review_workflow_gate_fail_redraft_fail_skipped_full_evidence(make
             )
             return evidence
         
-        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None) -> Evidence:
+        async def draft(self, evidence, steer=None, idempotency_key=None, plan=None, max_chars=280) -> Evidence:
             """
             Generate draft with valid composition that fails gate at insertion.
             

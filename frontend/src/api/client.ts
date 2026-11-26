@@ -191,6 +191,8 @@ export interface ReviewCard {
     // mode was asked for but not used (the watch has no product name)
     draft_mode?: DraftMode | null;
     draft_mode_note?: string | null;
+    // issue #41: the watch's product URL (absent for a watch started without one)
+    product_url?: string | null;
   };
   status: ReviewStatus;
   created_at: string;
@@ -223,6 +225,9 @@ export interface StartWatchRequest {
   product_name: string;
   product_aliases: string[];
   key_features: string[];
+  // issue #41: the form's required "Product URL" (https). Code appends it to
+  // drafts that name the product.
+  product_url: string;
 }
 
 const API_BASE = '/api';
