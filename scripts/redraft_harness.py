@@ -243,6 +243,7 @@ async def run(args) -> None:
     from backend.adapters.plain_reply_agent import PlainReplyAgent
     from backend.eval.written_harness import (
         X_LOOKUP_CALL,
+        DraftLimit,
         SpendCap,
         WatchSettings,
         apply_removals,
@@ -279,9 +280,11 @@ async def run(args) -> None:
         # removal failed: the harness drops its own copies of it
         return removal_recorded(db, post_id) or (refetch is not None and refetch.reported_gone(post_id))
 
+    if args.limit < 0:
+        sys.exit("--limit must be 0 (no limit) or more")
+    # Applied while the run goes (issue #34): N cards drafted, not the first N
+    limit = DraftLimit(args.limit) if args.limit else None
     reviews, excluded = load_stored_reviews(db, raw["review_topics"])
-    if args.limit:
-        reviews = reviews[: args.limit]
     plans = json.loads(plans_path.read_text()) if plans_path.exists() else {}
 
     try:
@@ -300,13 +303,14 @@ async def run(args) -> None:
     refetch = None if args.no_refetch else await _refetcher(args, settings, cap, db)
 
     print(f"{len(reviews)} stored reviews, model {settings.openai_model}, cap ${args.max_cost:.2f}, "
-          f"X re-fetch {'off' if refetch is None else 'on'}")
+          f"X re-fetch {'off' if refetch is None else 'on'}, "
+          f"{f'stop after {limit.limit} drafted' if limit else 'no limit'}")
     try:
         records, excluded, stopped = await run_harness(
             reviews, by_key, agent, checker,
             plans=plans, max_attempts=settings.claim_gate_max_attempts,
             samples=args.samples, cap=cap, excluded=excluded,
-            is_removed=is_removed, refetch=refetch,
+            is_removed=is_removed, refetch=refetch, limit=limit,
         )
     finally:
         if refetch is not None:
@@ -323,7 +327,7 @@ async def run(args) -> None:
     # this run's records too, right before they are written
     apply_removals(records, plans, is_removed, excluded)
     safe_write(plans_path, json.dumps(plans, indent=2, ensure_ascii=False))  # pruned again
-    summary = summarize(records, excluded, cap, stopped_by_cap=stopped, refetch=refetch or False)
+    summary = summarize(records, excluded, cap, stopped_by_cap=stopped, refetch=refetch or False, limit=limit)
     models = sorted({c.model for c in cap.calls if c.call != X_LOOKUP_CALL})
     safe_write(out_dir / "report.json", report_json(args.label, records, summary, models))
     safe_write(out_dir / "summary.md", summary_markdown(summary))
@@ -364,7 +368,10 @@ def main() -> None:
     r.add_argument("--out-root", required=True, help="output directory; plans.json is shared between labels")
     r.add_argument("--label", required=True, help="run name, e.g. before or after")
     r.add_argument("--samples", type=int, default=1, help="written-path runs per post (default 1)")
-    r.add_argument("--limit", type=int, default=0, help="only the first N stored reviews")
+    r.add_argument(
+        "--limit", type=int, default=0,
+        help="stop once N stored reviews are drafted (cards skipped on the way do not count; default 0: all)",
+    )
     r.add_argument(
         "--max-cost", type=float, default=0.25,
         help="spend cap in USD for this run (default 0.25): model calls priced with INFERENCE_*_TOKEN_COST_USD, "
