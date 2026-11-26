@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # The written-draft claim checker's answer (issue #12): one small object
     # per reply sentence, at most three sentences.
     check_max_output_tokens: int = 600
+    # The brief-suggestion call (issue #42): at most 8 suggestions and the
+    # flags, each a few short fields.
+    suggest_max_output_tokens: int = 1500
+    # The page text sent to that call, in UTF-8 bytes; a longer page is cut
+    # and the form says so. 60 kB holds a long README.
+    suggest_max_page_bytes: int = 60000
     
     # Draft mode (ADR-0006 amendment 2026-11-24, item 7; issue #12).
     # "assembled": fixed phrases plus one verbatim brief sentence (2026-11-21

@@ -460,3 +460,85 @@ export async function getBudget(): Promise<any> {
   
   return response.json();
 }
+
+// --- Brief suggestions from the product page (issue #42) ---
+
+/** One suggested brief sentence, its quote from the page (checked word for word by code) and why it helps. */
+export interface BriefSuggestion {
+  sentence: string;
+  quote: string;
+  why: string;
+}
+
+/** A brief sentence the page contradicts or does not mention: information, not an error. */
+export interface BriefFlag {
+  brief_sentence_id: string;
+  brief_sentence: string;
+  kind: 'contradicted' | 'not_mentioned';
+  quote: string;
+  note: string;
+}
+
+export interface BriefSuggestionsResult {
+  source: 'github_readme' | 'web_page';
+  page_truncated: boolean;
+  suggestions: BriefSuggestion[];
+  flags: BriefFlag[];
+  dropped_quote_not_on_page: number;
+  dropped_other: number;
+  cost_usd: number;
+  model: string;
+}
+
+/** The worst-case cost of one suggestion call, shown before the click. */
+export interface BriefSuggestionCost {
+  max_cost_usd: number;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  model: string;
+  max_page_bytes: number;
+  max_suggestions: number;
+}
+
+/** A failed suggestion request, with the API's code (url_invalid, url_refused, fetch_failed, ...) and message. */
+export class BriefSuggestionError extends Error {
+  readonly code: string | null;
+  constructor(message: string, code: string | null) {
+    super(message);
+    this.name = 'BriefSuggestionError';
+    this.code = code;
+  }
+}
+
+export async function getBriefSuggestionCost(): Promise<BriefSuggestionCost> {
+  const response = await fetch(`${API_BASE}/brief/suggestions/cost`);
+  if (!response.ok) {
+    throw new Error(`Failed to get the suggestion cost: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function suggestBriefAdditions(request: {
+  product_url: string;
+  product_brief: string;
+  product_name: string;
+}): Promise<BriefSuggestionsResult> {
+  const response = await fetch(`${API_BASE}/brief/suggestions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    let code: string | null = null;
+    let detail = response.statusText || `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      if (typeof body?.code === 'string') code = body.code;
+      if (typeof body?.detail === 'string' && body.detail) detail = body.detail;
+    } catch {
+      // Not JSON (a proxy error page): keep the status text
+    }
+    throw new BriefSuggestionError(detail, code);
+  }
+  return response.json();
+}

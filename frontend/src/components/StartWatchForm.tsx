@@ -4,6 +4,7 @@
 
 import { useState } from 'react';
 import { startWatch } from '../api/client';
+import { BriefSuggestions } from './BriefSuggestions';
 
 interface StartWatchFormProps {
   onSuccess: () => void;
@@ -231,10 +232,11 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
         </div>
 
         <div style={{ marginBottom: '12px' }}>
-          <label style={{ display: 'block', marginBottom: '4px' }}>
+          <label htmlFor="watch-product-brief" style={{ display: 'block', marginBottom: '4px' }}>
             Product Brief:
           </label>
           <textarea
+            id="watch-product-brief"
             value={productBrief}
             onChange={(e) => setProductBrief(e.target.value)}
             required
@@ -242,6 +244,14 @@ export function StartWatchForm({ onSuccess }: StartWatchFormProps) {
             placeholder="Describe your product, key features, and positioning..."
           />
         </div>
+
+        <BriefSuggestions
+          productUrl={productUrl}
+          productName={productName}
+          productBrief={productBrief}
+          urlValid={productUrlError(productUrl) === null}
+          onBriefChange={setProductBrief}
+        />
 
         {error && (
           <div style={{
