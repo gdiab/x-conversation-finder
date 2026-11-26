@@ -119,6 +119,25 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `test_removal_all_accounts.py`: issue #22. Two accounts' Reviews of the same post: a removal found by one stops the other at its next activity with no model call (researching or planning; text-free and with the post in the input), a Review started after the removal makes no model call, and the other's approve ends it as "post removed" without an X read
 - `test_redraft_harness.py`: The offline redraft harness (issue #29) with fake adapters: no X calls, the database left unchanged, the workflow's redraft steps, the spend cap, a summary without text, and `--limit` counted after the skips (issue #34)
 
+### E2E Scripts
+
+Three scripts run the app end to end with fake adapters, so they call neither X nor OpenAI:
+
+- `scripts/e2e-test.sh`: a TopicWatch finds a post, and its Review card is approved, confirmed and followed up
+- `scripts/e2e-full.sh`: the same, but the draft is edited first. Approving the draft shown before the edit is refused (409 `draft_changed`), and then the edited draft is approved
+- `scripts/e2e-review-direct.sh`: a Review is started directly, without a watch. The post is stored first and the Review gets only its id, as a watch starts it (issue #23)
+
+Each script approves as the review app does. It reads the card (`GET /api/reviews/{id}`) and sends the card's `draft.text` and `edited_text_gate_state` (null if the draft was never edited). Each script then checks that the card reaches `followup_due`, with the confirmed reply's id and the fixture replies to it (`backend/tests/fixtures/e2e_x.json`) stored.
+
+Run a script from the repo root, for example `bash scripts/e2e-full.sh`. It needs the Temporal CLI, `curl`, `lsof` and the backend dependencies. It uses `.venv/bin/python` if that exists, and otherwise `python3` (set `PYTHON` to choose another interpreter). Each script starts its own stack and stops it on exit:
+
+- an in-memory Temporal dev server on port 7243, with its web UI on port 8243;
+- a worker connected to that Temporal server;
+- an API on port 8010 (`e2e-test.sh`), 8011 (`e2e-review-direct.sh`) or 8012 (`e2e-full.sh`);
+- a SQLite file and logs in `data/e2e/`. The script deletes the SQLite file and creates it again at each run.
+
+The scripts set `DATABASE_URL`, `TEMPORAL_HOST`, the adapters, the credentials and the confidence threshold themselves, so values in the environment do not apply to these settings. The worker, the API and the script's own Python steps run in a new empty temporary directory, so no `.env` is read. A script never uses a running app or its database. If one of its ports is already in use, the script stops before it starts anything. After each server is ready, the script also checks with `lsof` that the process that listens on the port is the one that it started. To choose other ports, set `E2E_TEMPORAL_PORT`, `E2E_TEMPORAL_UI_PORT` or `E2E_API_PORT`. The scripts run one at a time, because they share the Temporal ports. The last recorded runs are in `docs/pr/issue-27-*.txt`.
+
 ## Using the System
 
 1. **Start a Topic Watch:**
