@@ -125,10 +125,10 @@ e2e_cleanup() {
     echo ""
     echo "=== Cleanup ==="
     local pid
-    for pid in "${E2E_PIDS[@]}"; do
+    for pid in ${E2E_PIDS[@]+"${E2E_PIDS[@]}"}; do
         kill "$pid" 2>/dev/null || true
     done
-    for pid in "${E2E_PIDS[@]}"; do
+    for pid in ${E2E_PIDS[@]+"${E2E_PIDS[@]}"}; do
         wait "$pid" 2>/dev/null || true
     done
     cd / && rmdir "$E2E_RUN_DIR" 2>/dev/null || true
