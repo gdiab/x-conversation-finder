@@ -1,6 +1,9 @@
 #!/bin/bash
 # Shared setup for the e2e scripts (issue #27). Source it; do not run it.
 #
+# The worker and the API run in E2E_DIR, which holds no .env, so the app's
+# .env settings do not apply; the settings that matter are exported below.
+#
 # Each script starts its own stack: a Temporal dev server (in memory), a
 # worker and an API, on ports nothing else is using, with fake adapters and a
 # SQLite file under data/e2e/. It never talks to a stack it did not start: if
@@ -43,6 +46,8 @@ e2e_configure() {
     E2E_DIR="${E2E_DIR:-$WORKSPACE_ROOT/data/e2e}"
     mkdir -p "$E2E_DIR"
     E2E_DIR="$(cd "$E2E_DIR" && pwd)"
+    # Every Python process of the script runs here, where no .env is read
+    cd "$E2E_DIR"
     E2E_DB="$E2E_DIR/$E2E_NAME.db"
     E2E_API="http://127.0.0.1:$E2E_API_PORT/api"
 
@@ -63,6 +68,11 @@ e2e_configure() {
     export X_API_SECRET=""
     export OPENAI_API_KEY=""
     export DRAFT_MODE=assembled
+    # The default threshold, whatever the environment says, so the test posts
+    # get a card (a higher CONFIDENCE_THRESHOLD would skip them)
+    CONFIDENCE_THRESHOLD=$("$PYTHON" -c "from backend.config.confidence import CONFIDENCE_THRESHOLD as t; print(t)") \
+        || e2e_fail "Could not read the default confidence threshold"
+    export CONFIDENCE_THRESHOLD
 
     # Short delays and generous budgets for the test
     export FOLLOWUP_DELAY_SECONDS=8  # a real durable timer, 8 seconds
@@ -85,6 +95,17 @@ e2e_configure() {
     echo "  Database: ${E2E_DB#"$WORKSPACE_ROOT"/}"
     echo "  Follow-up delay: ${FOLLOWUP_DELAY_SECONDS}s (real durable timer)"
     echo ""
+}
+
+# e2e_assert_listener PORT PID NAME: fail unless PID is the process listening
+# on PORT, so a readiness check never accepts a server another process
+# started on the port after the free-port check. Needs lsof.
+e2e_assert_listener() {
+    local listeners
+    listeners=$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null || true)
+    if ! printf '%s\n' "$listeners" | grep -qx "$2"; then
+        e2e_fail "$3 on port $1 is not the process this script started (listening: ${listeners:-none})"
+    fi
 }
 
 e2e_port_in_use() {
@@ -129,6 +150,7 @@ e2e_start_stack() {
     local i
     for i in {1..30}; do
         if temporal workflow list --address "$TEMPORAL_ADDRESS" --limit 1 > /dev/null 2>&1; then
+            e2e_assert_listener "$E2E_TEMPORAL_PORT" "$E2E_TEMPORAL_PID" Temporal
             echo "✓ Temporal ready"
             break
         fi
@@ -138,7 +160,7 @@ e2e_start_stack() {
     done
 
     echo "Starting worker..."
-    (cd "$WORKSPACE_ROOT/backend" && exec "$PYTHON" -m backend.worker) > "$log_prefix-worker.log" 2>&1 &
+    (exec "$PYTHON" -m backend.worker) > "$log_prefix-worker.log" 2>&1 &
     E2E_WORKER_PID=$!
     E2E_PIDS+=("$E2E_WORKER_PID")
     for i in {1..30}; do
@@ -152,12 +174,13 @@ e2e_start_stack() {
     done
 
     echo "Starting API..."
-    (cd "$WORKSPACE_ROOT/backend" && exec "$PYTHON" -m uvicorn backend.api:app \
+    (exec "$PYTHON" -m uvicorn backend.api:app \
         --host 127.0.0.1 --port "$E2E_API_PORT") > "$log_prefix-api.log" 2>&1 &
     E2E_API_PID=$!
     E2E_PIDS+=("$E2E_API_PID")
     for i in {1..30}; do
         if curl -sf "$E2E_API/budget" > /dev/null 2>&1; then
+            e2e_assert_listener "$E2E_API_PORT" "$E2E_API_PID" API
             echo "✓ API ready"
             break
         fi
@@ -256,25 +279,31 @@ print(json.dumps({"reply_url": os.environ["REPLY_URL"], "client_request_id": os.
     e2e_request POST "/reviews/$1/confirm_posted" "$body"
 }
 
-# e2e_check_followup WORKFLOW_ID: print the final card and check that the
-# follow-up ran: status followup_due and the reply's follow-up replies fetched.
+# e2e_check_followup WORKFLOW_ID REPLY_ID EXPECTED_IDS: print the final card
+# and check that the follow-up ran for the confirmed reply: status
+# followup_due, reply post id REPLY_ID, and follow-up replies with exactly the
+# post ids EXPECTED_IDS (comma-separated; the replies in e2e_x.json).
 e2e_check_followup() {
     local card
     card=$(e2e_request GET "/reviews/$1")
-    printf '%s' "$card" | "$PYTHON" -c '
-import json, sys
+    printf '%s' "$card" | REPLY_ID="$2" EXPECTED_IDS="$3" "$PYTHON" -c '
+import json, os, sys
 card = json.load(sys.stdin)
 draft = (card.get("evidence") or {}).get("draft") or {}
 replies = card.get("followup_replies") or []
+reply_ids = sorted(r.get("id") for r in replies)
+expected = sorted(os.environ["EXPECTED_IDS"].split(","))
 status = card.get("status")
 print("  Status:", status)
 print("  Draft:", (draft.get("text") or "")[:80])
 print("  Posted URL:", card.get("posted_url"))
 print("  Reply post id:", card.get("reply_post_id"))
-print("  Follow-up replies:", len(replies))
+print("  Follow-up replies:", ", ".join(reply_ids) or "none")
 if status != "followup_due":
     sys.exit("status is %r, expected followup_due" % status)
-if not replies:
-    sys.exit("check_followup stored no follow-up replies")
+if card.get("reply_post_id") != os.environ["REPLY_ID"]:
+    sys.exit("reply post id is %r, expected %r" % (card.get("reply_post_id"), os.environ["REPLY_ID"]))
+if reply_ids != expected:
+    sys.exit("follow-up replies are %s, expected %s" % (reply_ids, expected))
 ' || e2e_fail "Follow-up check failed for $1"
 }

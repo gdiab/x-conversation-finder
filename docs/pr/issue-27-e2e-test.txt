@@ -1,5 +1,5 @@
 === X Conversation Finder E2E Test ===
-Wed Nov 25 16:12:37 PST 2026
+Wed Nov 25 16:15:33 PST 2026
 
 Configuration:
   Adapters: X=fake, Reply=fake (no credentials)
@@ -51,7 +51,7 @@ Starting API...
   Draft: Thanks! Acme Tools helps teams handle eventual consistency in distributed system
   Posted URL: https://x.com/founder/status/12345
   Reply post id: 9999
-  Follow-up replies: 2
+  Follow-up replies: 9999001, 9999002
 
 === E2E Test Complete ===
 
@@ -63,7 +63,7 @@ Starting API...
 
 All operations used fake adapters (no X or OpenAI calls)
 
-Wed Nov 25 16:12:51 PST 2026
+Wed Nov 25 16:15:47 PST 2026
 
 === Cleanup ===
 ✓ Services stopped

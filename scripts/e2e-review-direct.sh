@@ -113,7 +113,7 @@ e2e_wait_for_status "$WORKFLOW_ID" followup_due $((FOLLOWUP_DELAY_SECONDS + 20))
 echo ""
 
 echo "[6] Checking final card..."
-e2e_check_followup "$WORKFLOW_ID"
+e2e_check_followup "$WORKFLOW_ID" 99999 9999003
 echo ""
 
 echo "=== E2E Test Complete ==="

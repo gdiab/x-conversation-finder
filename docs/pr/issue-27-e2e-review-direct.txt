@@ -1,5 +1,5 @@
 === X Conversation Finder E2E Test (Direct Review) ===
-Wed Nov 25 16:13:10 PST 2026
+Wed Nov 25 16:16:03 PST 2026
 
 Configuration:
   Adapters: X=fake, Reply=fake (no credentials)
@@ -48,7 +48,7 @@ Starting API...
   Draft: Thanks! Our product helps developers build reliable distributed systems. Happy t
   Posted URL: https://x.com/founder/status/12345
   Reply post id: 99999
-  Follow-up replies: 1
+  Follow-up replies: 9999003
 
 === E2E Test Complete ===
 
@@ -60,7 +60,7 @@ Starting API...
 
 All operations used fake adapters (no X or OpenAI calls)
 
-Wed Nov 25 16:13:23 PST 2026
+Wed Nov 25 16:16:16 PST 2026
 
 === Cleanup ===
 ✓ Services stopped

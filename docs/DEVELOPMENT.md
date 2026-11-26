@@ -126,7 +126,7 @@ Three scripts run the app end to end with fake adapters, so they call neither X 
 - `scripts/e2e-full.sh`: the same, but the draft is edited first. Approving the draft shown before the edit is refused (409 `draft_changed`), and then the edited draft is approved
 - `scripts/e2e-review-direct.sh`: a Review is started directly, without a watch. The post is stored first and the Review gets only its id, as a watch starts it (issue #23)
 
-Each script approves as the review app does. It reads the card (`GET /api/reviews/{id}`) and sends the card's `draft.text` and `edited_text_gate_state` (null if the draft was never edited). Each script then checks that the card reaches `followup_due` with its follow-up replies stored.
+Each script approves as the review app does. It reads the card (`GET /api/reviews/{id}`) and sends the card's `draft.text` and `edited_text_gate_state` (null if the draft was never edited). Each script then checks that the card reaches `followup_due`, with the confirmed reply's id and the fixture replies to it (`backend/tests/fixtures/e2e_x.json`) stored.
 
 Run a script from the repo root, for example `bash scripts/e2e-full.sh`. It needs the Temporal CLI and the backend dependencies. It uses `.venv/bin/python` if that exists, and otherwise `python3` (set `PYTHON` to choose another interpreter). Each script starts its own stack and stops it on exit:
 
@@ -135,7 +135,7 @@ Run a script from the repo root, for example `bash scripts/e2e-full.sh`. It need
 - an API on port 8010 (`e2e-test.sh`), 8011 (`e2e-review-direct.sh`) or 8012 (`e2e-full.sh`);
 - a SQLite file and logs in `data/e2e/`. The script deletes the SQLite file and creates it again at each run.
 
-The scripts set `DATABASE_URL`, `TEMPORAL_HOST`, the adapters and the credentials themselves, so values in the environment or in `.env` do not apply. A script never uses a running app or its database. If one of its ports is already in use, the script stops before it starts anything. To choose other ports, set `E2E_TEMPORAL_PORT`, `E2E_TEMPORAL_UI_PORT` or `E2E_API_PORT`. To move the SQLite file and logs, set `E2E_DIR`. The scripts run one at a time, because they share the Temporal ports. The last recorded runs are in `docs/pr/issue-27-*.txt`.
+The scripts set `DATABASE_URL`, `TEMPORAL_HOST`, the adapters, the credentials and the confidence threshold themselves, so values in the environment do not apply to these settings. The worker and the API run in `data/e2e/`, so `.env` is not read. A script never uses a running app or its database. If one of its ports is already in use, the script stops before it starts anything. After each server is ready, the script also checks with `lsof` that the process that listens on the port is the one that it started. To choose other ports, set `E2E_TEMPORAL_PORT`, `E2E_TEMPORAL_UI_PORT` or `E2E_API_PORT`. To move the SQLite file and logs, set `E2E_DIR`. The scripts run one at a time, because they share the Temporal ports. The last recorded runs are in `docs/pr/issue-27-*.txt`.
 
 ## Using the System
 

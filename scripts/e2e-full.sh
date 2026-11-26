@@ -98,7 +98,7 @@ e2e_wait_for_status "$WORKFLOW_ID" followup_due $((FOLLOWUP_DELAY_SECONDS + 20))
 echo ""
 
 echo "[8] Checking final card..."
-e2e_check_followup "$WORKFLOW_ID"
+e2e_check_followup "$WORKFLOW_ID" 9999 9999001,9999002
 FINAL_DRAFT=$(e2e_request GET "/reviews/$WORKFLOW_ID" | e2e_json "d['evidence']['draft']['text']")
 [ "$FINAL_DRAFT" = "$EDITED_DRAFT" ] || e2e_fail "Final draft is '$FINAL_DRAFT', expected the edited draft"
 echo "✓ The approved draft is the edited one"
