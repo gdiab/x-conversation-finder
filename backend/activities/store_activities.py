@@ -1168,9 +1168,17 @@ def redact_recorded_removals() -> RecordedRemovals:
     # checkpoint_wal already waits out SQLite's busy timeout (5 s) for a
     # reader; the API retries a pending one in the background
     # (api.retry_wal_checkpoint)
-    pending = bool(cards or stored_posts) and not checkpoint_wal()
+    pending = False
+    if cards or stored_posts:
+        try:
+            pending = not checkpoint_wal()
+        except Exception:
+            # The rows are redacted (committed); a checkpoint error leaves the
+            # checkpoint to the API's retries instead of failing the start
+            logger.exception("WAL checkpoint after the removal backfill failed")
+            pending = True
     if pending:
-        logger.warning("Recorded removals redacted; the WAL checkpoint is pending (a reader holds an old snapshot)")
+        logger.warning("Recorded removals redacted; the WAL checkpoint is pending")
     return RecordedRemovals(changed=changed, checkpoint_pending=pending)
 
 

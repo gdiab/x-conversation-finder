@@ -351,6 +351,33 @@ def test_a_start_retries_a_checkpoint_an_earlier_start_could_not_complete(test_d
     assert HANDLE.encode() not in _sqlite_bytes(Path(test_db_isolation))
 
 
+def test_a_checkpoint_error_at_start_leaves_the_checkpoint_pending(test_db_isolation, monkeypatch):
+    """The start goes on with the rows redacted; init_db reports the
+    checkpoint pending, so the API retries it."""
+    import backend.database
+    from backend.database import ReviewCardDB, get_db, init_db
+
+    card = _card()
+    db = get_db()
+    try:
+        db.add(ReviewCardDB(
+            workflow_id=card["workflow_id"],
+            post_data={**card["post"], "text": POST_TEXT_REMOVED, "text_removed": True},
+            evidence_data=card["evidence"], status="skipped",
+            created_at=card["created_at"], updated_at=card["updated_at"],
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    def fail():
+        raise OSError("disk I/O error")
+
+    monkeypatch.setattr(backend.database, "checkpoint_wal", fail)
+    assert init_db() is True
+    _assert_removed(get_stored_card(card["workflow_id"]), "a card redacted at a start whose checkpoint failed")
+
+
 @pytest.mark.asyncio
 async def test_the_api_retries_a_pending_backfill_checkpoint_until_it_completes(monkeypatch):
     """A start whose checkpoint is blocked does not wait for the next start:
