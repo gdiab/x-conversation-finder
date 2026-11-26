@@ -93,6 +93,35 @@ def _in_at_word_boundaries(fragment: str, text: str) -> bool:
     return re.search(pattern, text) is not None
 
 
+# Markup that a page and a quote of it may differ in: Markdown emphasis and
+# code marks (issue #42). Dropped from both sides before the comparison.
+_QUOTE_MARKUP_RE = re.compile(r"[*`]+")
+
+
+def _quote_form(text: str) -> str:
+    text = html.unescape(unicodedata.normalize("NFKC", text)).translate(_QUOTE_MAP)
+    return _collapse_spaces(_QUOTE_MARKUP_RE.sub("", text))
+
+
+def quote_in_text(quote: Optional[str], text: str) -> bool:
+    """Whether a quote appears word for word in a text (issue #42: a brief
+    suggestion's quote of the product page).
+
+    Case and words must match exactly, at word boundaries. Only differences
+    that are not words are ignored, on both sides alike: whitespace and line
+    breaks, Unicode compatibility forms (NFKC), HTML entities, curly versus
+    straight quotes and dashes (as normalize_text), and Markdown's * and `
+    marks. One pair of wrapping quotes around the quote is dropped, as
+    match_span does.
+    """
+    if not isinstance(quote, str):
+        return False
+    candidate = _quote_form(quote).strip()
+    if len(candidate) > 2 and _WRAPPING_QUOTES.get(candidate[0]) == candidate[-1]:
+        candidate = candidate[1:-1].strip()
+    return bool(candidate) and _in_at_word_boundaries(candidate, _quote_form(text))
+
+
 def check_span(span: Optional[str], post_text: str) -> str:
     """The check result of match_span alone."""
     return match_span(span, post_text)[0]

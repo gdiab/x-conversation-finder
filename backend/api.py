@@ -52,6 +52,25 @@ from backend.database import init_db
 from backend.gate.product_link import product_url_error
 from backend.gate.written_check import MAX_FEATURE_TERM_WORDS, clean_feature_terms, feature_term_words
 from backend.budget import get_today_budget
+from backend.adapters.fake_brief_suggester import FakeBriefSuggester
+from backend.adapters.http_page_fetcher import HttpPageFetcher
+from backend.adapters.plain_brief_suggester import PlainBriefSuggester
+from backend.brief_suggestions import (
+    BRIEF_TOO_LONG,
+    MODEL_ANSWER_UNUSABLE,
+    BriefSuggestionError,
+    cost_estimate as brief_suggestion_cost_estimate,
+    suggest_brief_additions,
+)
+from backend.ports.page_fetcher import (
+    FETCH_FAILED,
+    PAGE_NOT_FOUND,
+    RATE_LIMITED,
+    UNSUPPORTED_CONTENT,
+    URL_INVALID,
+    URL_REFUSED,
+    PageFetchError,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -664,6 +683,73 @@ async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest)
 async def get_budget():
     """Get today's budget usage for the spend meter."""
     return get_today_budget()
+
+
+# --- Brief suggestions from the product page (issue #42) ---
+# The Start Watch form reads the page at the Product URL and asks the model
+# once for brief sentences the page supports. It runs here, in the API, not
+# in a workflow: the page text stays out of Temporal history, and nothing is
+# stored (backend/brief_suggestions.py).
+
+class BriefSuggestionsRequest(BaseModel):
+    product_url: str
+    product_brief: str = ""
+    product_name: Optional[str] = None
+
+
+# code -> HTTP status. The UI shows "detail" and keeps the form usable.
+BRIEF_SUGGESTION_ERRORS = {
+    URL_INVALID: 400,
+    URL_REFUSED: 400,
+    BRIEF_TOO_LONG: 400,
+    PAGE_NOT_FOUND: 422,
+    UNSUPPORTED_CONTENT: 422,
+    FETCH_FAILED: 502,
+    RATE_LIMITED: 503,
+    MODEL_ANSWER_UNUSABLE: 502,
+}
+
+
+def brief_suggestion_adapters() -> tuple:
+    """(page fetcher, suggester) for this API process. The suggester follows
+    REPLY_AGENT_ADAPTER, as the drafter and the checker do; tests replace
+    this function with fakes."""
+    settings = get_settings()
+    fetcher = HttpPageFetcher(max_text_bytes=settings.suggest_max_page_bytes)
+    if settings.reply_agent_adapter == "plain":
+        return fetcher, PlainBriefSuggester()
+    return fetcher, FakeBriefSuggester()
+
+
+@app.get("/api/brief/suggestions/cost")
+async def get_brief_suggestion_cost():
+    """The worst-case cost of one "Suggest brief additions" click."""
+    return brief_suggestion_cost_estimate()
+
+
+@app.post("/api/brief/suggestions")
+async def post_brief_suggestions(request: BriefSuggestionsRequest):
+    """Read the product page and return checked suggestions; store nothing."""
+    try:
+        fetcher, suggester = brief_suggestion_adapters()
+        return await suggest_brief_additions(
+            request.product_url, request.product_brief, request.product_name, fetcher, suggester,
+        )
+    except (PageFetchError, BriefSuggestionError) as e:
+        return error_response(BRIEF_SUGGESTION_ERRORS.get(e.code, 422), e.code, e.message)
+    except ApplicationError as e:
+        # The budget's own refusals (daily cap, kill switch) say why; any
+        # other ApplicationError of the call (a truncated answer, an
+        # unmetered call) is reported by type only
+        if e.type == "BudgetExceeded":
+            return error_response(429, "budget_exceeded", f"No suggestion call was made: {e.message}")
+        logger.error("Brief suggestion call failed: %s", e.type)
+        return error_response(502, "model_failed", f"The suggestion call failed ({e.type}). Try again.")
+    except Exception as e:
+        # A provider error can echo the request, which holds the page text:
+        # log and return the error's type only
+        logger.error("Brief suggestion call failed: %s", type(e).__name__)
+        return error_response(502, "model_failed", f"The suggestion call failed ({type(e).__name__}). Try again.")
 
 
 if __name__ == "__main__":

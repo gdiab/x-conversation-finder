@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import uuid
 import httpx
 from sqlalchemy import text
 from temporalio import activity
@@ -900,6 +901,27 @@ def meter_inference() -> Iterator[InferenceMeter]:
         workflow_run_id=info.workflow_run_id,
         activity_id=info.activity_id,
         attempt=info.attempt,
+    )
+    token = _current_meter.set(meter)
+    try:
+        yield meter
+    finally:
+        _current_meter.reset(token)
+
+
+@contextmanager
+def meter_api_inference(call: str) -> Iterator[InferenceMeter]:
+    """Meter a paid inference call the API makes itself, outside any Temporal
+    activity (issue #42: the Start Watch form's brief suggestions). Each use
+    is its own reservation key (a fresh run id), counted in the same daily
+    ledger, cap and kill switch as the workflows' calls. Does not nest."""
+    if _current_meter.get() is not None:
+        raise RuntimeError("meter_api_inference() does not nest")
+    meter = InferenceMeter(
+        workflow_id=f"api:{call}",
+        workflow_run_id=uuid.uuid4().hex,
+        activity_id=call,
+        attempt=1,
     )
     token = _current_meter.set(meter)
     try:

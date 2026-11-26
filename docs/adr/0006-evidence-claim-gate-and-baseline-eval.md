@@ -234,3 +234,18 @@ The 2026-11-21 amendment deferred two options to allow more than verbatim quotes
 **Temporal.** The new input fields (`TopicWatchInput.product_url`, `ReviewInput.product_url`, and the activity inputs) are optional with a `None` default, and `GateSummary.draft_sha256` defaults to empty, so running workflows and recorded histories decode and replay. No workflow command is added, removed or reordered: the link is appended inside activities, and the workflow only reads which digest to keep (`draft_sha256`, or `text_sha256` for a result recorded before the field, which is the same draft). So no `workflow.patched()` marker is needed. Text-free histories recorded on main d296ec3 (a TopicWatch in flight, a written Review edited, nudged and approved, an assembled Review through its follow-up) replay in tests. A Review whose input carries the post (recorded before issue #23) never gets a URL.
 
 **Not changed.** The claim gate's and the written check's rules, the steer and skip reasons (a length failure is one more failure row), and the removal rules: a written draft's text, the link with it, is redacted on removal; an unedited assembled draft keeps its text and link.
+
+## Amendment 2026-11-26: Brief suggestions from the product page (issue #42)
+
+**Context.** The brief is the only source of facts a draft may state about the product. A founder can leave out facts that would make good replies; a manual comparison of one product's README with its brief (2026-11-26) found several.
+
+**Decision (George, 2026-11-26: a checklist).**
+
+1. The Start Watch form reads the page at the Product URL (for a GitHub repository, its README through the GitHub API) and asks the model once for at most 8 sentences the brief lacks, each with the exact page quote that supports it and why it helps replies, plus flags for brief sentences the page contradicts or does not mention (information, not errors: the founder may have other sources).
+2. Code keeps a suggestion only if its quote appears on the page word for word.
+3. **Scraped text never becomes a claim source without the founder's choice.** Each suggestion is a checkbox, off by default, with an editable sentence. A ticked suggestion is appended to the brief when the founder clicks "Add checked to brief", and can be edited first; an unticked one is dropped. Added sentences go under a level-1 "From the product page" heading, so no earlier heading or lead-in (such as "Not supported yet") changes their meaning. Nothing is added without a tick. The claim gate and the written check are unchanged: they read only the brief the watch is started with.
+4. The page text is untrusted data in the prompt (delimited, marked as data), is not stored, and does not enter Temporal history: the call runs in the API, not in a workflow (the issue #23 rules).
+5. Cost: one model call per click, metered in the daily inference ledger; its worst case is shown before the click.
+6. The fetch refuses anything but https on port 443 and any host that resolves to a non-public address, also after a redirect (SSRF guard).
+
+**Not changed.** Watches, Reviews and their histories: no workflow or activity changes. Details: `docs/DEVELOPMENT.md`, "Brief suggestions from the product page".

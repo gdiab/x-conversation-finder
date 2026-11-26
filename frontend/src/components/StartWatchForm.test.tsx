@@ -2,17 +2,26 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseCommaList, productUrlError, StartWatchForm } from './StartWatchForm';
-import { startWatch } from '../api/client';
+import { getBriefSuggestionCost, startWatch } from '../api/client';
 
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>();
-  return { ...actual, startWatch: vi.fn() };
+  return {
+    ...actual,
+    startWatch: vi.fn(),
+    // issue #42: the brief-suggestion box loads its cost on mount
+    getBriefSuggestionCost: vi.fn(),
+    suggestBriefAdditions: vi.fn(),
+  };
 });
 
 const startWatchMock = vi.mocked(startWatch);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getBriefSuggestionCost).mockResolvedValue({
+    max_cost_usd: 0.0134, max_input_tokens: 83472, max_output_tokens: 1500, model: 'fake', max_page_bytes: 60000, max_suggestions: 8,
+  });
 });
 
 async function fillRequired(user: ReturnType<typeof userEvent.setup>) {
