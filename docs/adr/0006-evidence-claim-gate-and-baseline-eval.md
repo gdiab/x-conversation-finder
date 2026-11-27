@@ -249,3 +249,17 @@ The 2026-11-21 amendment deferred two options to allow more than verbatim quotes
 6. The fetch refuses anything but https on port 443 and any host that resolves to a non-public address, also after a redirect (SSRF guard).
 
 **Not changed.** Watches, Reviews and their histories: no workflow or activity changes. Details: `docs/DEVELOPMENT.md`, "Brief suggestions from the product page".
+
+## Amendment 2026-11-27: Reach score, separate from confidence (issue #49)
+
+**Context.** Posts with activity, or from authors with many followers, give the most return per reply. Only `author_reach` (log10 followers / 6, weight 0.05) affected confidence; likes, replies, reposts and quotes, which X returns with each searched post, were unused.
+
+**Decision (George, 2026-11-27: a separate score).**
+
+1. Code computes a reach score in [0, 1] from the stored post metrics (engagement and author followers), as the rule in `backend/config/reach.py` with a `REACH_RULE_VERSION` date sets it. The model proposes nothing for it. The inputs and the version are stored with each card.
+2. Reach does not change confidence, the threshold or which posts get a card. Confidence answers "is a reply welcome and on-topic?"; reach answers "how many people will see it?".
+3. The pending queue sorts by confidence + 0.2 × reach; cards at or above reach 0.6 are highlighted and show the raw counts.
+
+This does not reverse the rejected "engagement-only ranking" alternative above: no post is surfaced, kept or skipped for its engagement, and confidence still leads the order. The counts are from the moment of search; re-fetching them would cost X reads and is out of scope.
+
+**Not changed.** Workflows and their histories: reach is computed by the `store_card` activity and a backfill at worker start. Details: `docs/DEVELOPMENT.md`, "Reach score".

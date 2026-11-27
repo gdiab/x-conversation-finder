@@ -86,8 +86,33 @@ export type EditGateResult = {
   sentence_index?: number | null;
 } & Partial<Pick<SentenceCheck, "triggers" | "checker_flagged" | "verdict" | "supporting">>;
 
+/**
+ * issue #49: the reach record stored with a card (backend/reach.py;
+ * rule and weights in backend/config/reach.py). Separate from confidence.
+ */
+export interface Reach {
+  score: number;
+  inputs: {
+    like_count: number;
+    reply_count: number;
+    repost_count: number;
+    quote_count: number;
+    followers_count: number;
+  };
+  engagement: number;
+  engagement_score: number;
+  audience_score: number;
+  rule_version: string;
+}
+
 export interface ReviewCard {
   workflow_id: string;
+  // issue #49: absent on a card read from a Review's query; null when the
+  // card has no stored metrics or records a removal
+  reach?: Reach | null;
+  reach_highlighted?: boolean;
+  // The pending queue's sort key: confidence + 0.2 * reach (confidence alone without reach)
+  queue_priority?: number;
   post: {
     id: string;
     text: string;
@@ -101,6 +126,8 @@ export interface ReviewCard {
     created_at: string;
     like_count: number;
     reply_count: number;
+    repost_count?: number;
+    quote_count?: number;
     // issue #9: set when the post was deleted or is no longer visible on X and its text was removed
     text_removed?: boolean;
   };
