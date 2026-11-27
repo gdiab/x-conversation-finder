@@ -9,6 +9,7 @@
  */
 
 import type { EditGateResult, SentenceCheck, TriggerHit } from '../api/client';
+import { Tag } from '@outpost/ds';
 
 const TRIGGER_LABELS: Record<string, string> = {
   product_name: 'names the product',
@@ -34,23 +35,23 @@ function describeTriggers(triggers: TriggerHit[]): string {
     .join(', ');
 }
 
-function verdictLabel(check: SentenceCheck | EditGateResult): { text: string; color: string } {
+function verdictLabel(check: SentenceCheck | EditGateResult): { text: string; accent: 'neutral' | 'oxide' | 'moss' } {
   if (check.kind !== 'claim') {
     return check.passed
-      ? { text: 'Not a product claim', color: '#757575' }
-      : { text: 'Not checked', color: '#f44336' };
+      ? { text: 'Not a product claim', accent: 'neutral' }
+      : { text: 'Not checked', accent: 'oxide' };
   }
   if (check.verdict === 'supported' && check.passed) {
-    return { text: 'Supported by the brief', color: '#4caf50' };
+    return { text: 'Supported by the brief', accent: 'moss' };
   }
   if (check.verdict === 'not_checked') {
-    return { text: 'Not checked', color: '#f44336' };
+    return { text: 'Not checked', accent: 'oxide' };
   }
   if (check.verdict === 'supported') {
     // Supported by the brief, but the reply breaks another rule (see the reason)
-    return { text: 'Rejected', color: '#f44336' };
+    return { text: 'Rejected', accent: 'oxide' };
   }
-  return { text: 'Not supported', color: '#f44336' };
+  return { text: 'Not supported', accent: 'oxide' };
 }
 
 interface SentenceCheckListProps {
@@ -69,43 +70,20 @@ export function SentenceCheckList({ checks }: SentenceCheckListProps) {
           <div
             key={idx}
             data-testid="sentence-check"
-            style={{
-              backgroundColor: !check.passed ? '#ffebee' : isClaim ? '#e3f2fd' : '#f5f5f5',
-              padding: '12px',
-              borderRadius: '4px',
-              marginBottom: '8px',
-              border: `1px solid ${!check.passed ? '#f44336' : isClaim ? '#90caf9' : '#e0e0e0'}`,
-            }}
+            className={!check.passed ? 'ev-item ev-item--fail' : isClaim ? 'ev-item ev-item--pass' : 'ev-item'}
           >
-            <div style={{ marginBottom: '8px' }}>
-              <span style={{
-                display: 'inline-block',
-                padding: '2px 8px',
-                borderRadius: '4px',
-                fontSize: '12px',
-                fontWeight: 'bold',
-                backgroundColor: isClaim ? '#1976d2' : '#757575',
-                color: '#fff',
-                marginRight: '8px',
-              }}>
+            <div className="ev-item__tags">
+              <Tag accent={isClaim ? 'oxide' : 'neutral'}>
                 {/* A row the checker was never asked about has no classification, only code's triggers */}
                 {isClaim ? 'Product claim' : check.verdict === 'not_checked' ? 'Not classified' : 'Not about the product'}
-              </span>
-              <span style={{
-                display: 'inline-block',
-                padding: '2px 8px',
-                borderRadius: '4px',
-                fontSize: '12px',
-                fontWeight: 'bold',
-                backgroundColor: verdict.color,
-                color: '#fff',
-              }}>
+              </Tag>
+              <Tag accent={verdict.accent}>
                 {verdict.text}
-              </span>
+              </Tag>
             </div>
-            <div style={{ marginBottom: '8px' }}>"{check.sentence}"</div>
+            <div className="ev-item__text">"{check.sentence}"</div>
             {isClaim && (
-              <div style={{ fontSize: '12px', color: '#666' }}>
+              <div className="ev-item__sub">
                 <strong>Checked because:</strong>{' '}
                 {triggers.length > 0
                   ? `it ${describeTriggers(triggers)}`
@@ -116,40 +94,26 @@ export function SentenceCheckList({ checks }: SentenceCheckListProps) {
               </div>
             )}
             {!isClaim && check.passed && (
-              <div style={{ fontSize: '12px', color: '#666' }}>
+              <div className="ev-item__sub">
                 No trigger fired and the checker saw no product statement. Not checked against the brief; your review is the check.
               </div>
             )}
             {supporting.length > 0 && (
-              <div style={{
-                backgroundColor: '#fff',
-                padding: '8px',
-                borderRadius: '4px',
-                marginTop: '8px',
-                fontSize: '12px',
-                borderLeft: '3px solid #1976d2',
-              }}>
-                <div style={{ fontWeight: 'bold', color: '#1976d2', marginBottom: '4px' }}>
+              <div className="ev-item__source">
+                <div className="app-label" style={{ marginBottom: 'var(--op-space-1)' }}>
                   Supporting brief {supporting.length === 1 ? 'sentence' : 'sentences'}:
                 </div>
                 {supporting.map((sentence) => (
                   <div key={sentence.id}>
-                    <span style={{ color: '#666' }}>{sentence.id}</span>{' '}
-                    {sentence.context && <span style={{ color: '#666' }}>({sentence.context}) </span>}
+                    <span className="app-muted">{sentence.id}</span>{' '}
+                    {sentence.context && <span className="app-muted">({sentence.context}) </span>}
                     {sentence.text}
                   </div>
                 ))}
               </div>
             )}
             {!check.passed && check.reason && (
-              <div style={{
-                fontSize: '12px',
-                color: '#c62828',
-                padding: '8px',
-                backgroundColor: '#fff',
-                borderRadius: '4px',
-                marginTop: '8px',
-              }}>
+              <div className="ev-item__sub ev-error">
                 <strong>Reason:</strong> {check.reason}
               </div>
             )}

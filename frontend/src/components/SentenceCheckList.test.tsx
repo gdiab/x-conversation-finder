@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ReviewCard } from './ReviewCard';
@@ -15,6 +15,13 @@ import {
 // Written drafts (issue #12; ADR-0006 amendment 2026-11-24, item 6): for each
 // sentence the card shows product claim or not, why it was checked, the
 // verdict, and the supporting brief sentences. Synthetic data only.
+
+// issue #50: a review card opens its detail view, where these sections are, on click
+function renderOpen(ui: Parameters<typeof render>[0]) {
+  const result = render(ui);
+  fireEvent.click(screen.getByRole('button', { name: /^Review/ }));
+  return result;
+}
 
 describe('SentenceCheckList', () => {
   it('shows a supported claim with why it was checked and the brief sentence that supports it', () => {
@@ -145,7 +152,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
     });
 
   it('shows the per-sentence check instead of the segment display', () => {
-    render(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
 
     expect(screen.getByRole('heading', { name: 'Product Claim Check' })).toBeInTheDocument();
     expect(screen.getAllByTestId('sentence-check')).toHaveLength(3);
@@ -156,7 +163,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
   });
 
   it('names the product, its aliases and the key features the check used', () => {
-    render(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
 
     const section = screen.getByRole('heading', { name: 'Product Claim Check' }).parentElement as HTMLElement;
     expect(section).toHaveTextContent('names the product ("Acme Relay", "Relay")');
@@ -167,7 +174,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
   it('says when the watch has no key features', () => {
     const draft = makeWrittenDraft();
     draft.written = { product_name: 'Acme Relay', product_aliases: [], feature_terms: [] };
-    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
 
     expect(
       screen.getByText(/Key features from your watch settings: none \(the watch was started without key features, so no sentence is checked for using one\)/),
@@ -185,7 +192,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
         { sentence: 'We would love to hear how it goes.', brief_sentence_ids: [] },
       ],
     };
-    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
 
     const citations = screen.getByTestId('drafter-citations');
     expect(citations).toHaveTextContent("The drafter's own citations. The model that wrote the draft");
@@ -208,7 +215,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
       edited_text_gate_state: 'passed',
       edited_text_gate_results: [makeSentenceCheck({ sentence: 'That is a hard thing to get right.' })],
     });
-    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
     const citations = screen.getByTestId('drafter-citations');
     expect(citations).toHaveTextContent("The drafter's own citations, for the model's draft (before your edit).");
@@ -217,7 +224,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
   });
 
   it("shows no drafter's citations block when the draft has none", () => {
-    render(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={writtenCard()} onUpdate={vi.fn()} />);
 
     expect(screen.queryByTestId('drafter-citations')).not.toBeInTheDocument();
   });
@@ -231,7 +238,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
       reason: 'Checked as a product claim. The brief does not support it.',
     });
     const card = writtenCard({ edited_text_gate_state: 'failed', edited_text_gate_results: [edit] });
-    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
     expect(screen.getByRole('heading', { name: 'Check of the Edited Text' })).toBeInTheDocument();
     expect(screen.getByText(/The draft was edited after this check/)).toBeInTheDocument();
@@ -248,7 +255,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
 
   it('says so when the check of an edit could not run', () => {
     const card = writtenCard({ edited_text_gate_state: 'not_checked', edited_text_gate_results: null });
-    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
     expect(screen.getByText(/the check of the edited text could not run/)).toBeInTheDocument();
     expect(screen.queryByTestId('sentence-check')).not.toBeInTheDocument();
@@ -258,7 +265,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
   it('empties and closes the edit box when the post is removed while it is open', async () => {
     const user = userEvent.setup();
     const card = writtenCard();
-    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    const { rerender } = renderOpen(<ReviewCard card={card} onUpdate={vi.fn()} />);
     await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
     expect(screen.getByDisplayValue(card.evidence.draft?.text ?? '')).toBeInTheDocument();
 
@@ -279,7 +286,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
   it('empties and closes the nudge field when the post is removed while it is open', async () => {
     const user = userEvent.setup();
     const card = writtenCard();
-    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    const { rerender } = renderOpen(<ReviewCard card={card} onUpdate={vi.fn()} />);
     await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
     await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Drop the part about retries');
 
@@ -299,7 +306,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
   it('opens the edit box on the current draft after the card changed', async () => {
     const user = userEvent.setup();
     const card = writtenCard();
-    const { rerender } = render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    const { rerender } = renderOpen(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
     const changed = { ...card, evidence: makeEvidence({ draft_mode: 'written', draft: makeWrittenDraft({ text: 'A newer synthetic draft.' }) }) };
     rerender(<ReviewCard card={changed} onUpdate={vi.fn()} />);
@@ -323,14 +330,14 @@ describe('ReviewCard: written draft (issue #12)', () => {
         failed_claims: [],
       },
     });
-    render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft }) })} onUpdate={vi.fn()} />);
 
     expect(screen.getByText(reason)).toBeInTheDocument();
     expect(screen.queryByText(/ends with an abbreviation and is not selectable/)).not.toBeInTheDocument();
   });
 
   it('keeps the segment display for an assembled draft', () => {
-    render(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
 
     expect(screen.queryByRole('heading', { name: 'Product Claim Check' })).not.toBeInTheDocument();
     expect(screen.getByText('Claim Gate:')).toBeInTheDocument();
@@ -340,7 +347,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
   it('explains why a review was assembled although written drafts are on', () => {
     const note = 'Written drafts are switched on (DRAFT_MODE=written), but this watch was started without a product name, so this reply was assembled from fixed phrases. Stop the watch and start it again with a product name to get written drafts.';
     const card = makeCard({ evidence: makeEvidence({ draft_mode: 'assembled', draft_mode_note: note }) });
-    render(<ReviewCard card={card} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
     expect(screen.getByRole('note')).toHaveTextContent(note);
   });
@@ -355,7 +362,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
       draft,
       reply_plan: makeReplyPlan({ mention_product: false }),
     });
-    render(<ReviewCard card={makeCard({ status: 'skipped', skip_reason: 'Not enough evidence', evidence })} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={makeCard({ status: 'skipped', skip_reason: 'Not enough evidence', evidence })} onUpdate={vi.fn()} />);
 
     expect(screen.queryByText(/does not mention the product/)).not.toBeInTheDocument();
     expect(screen.getByText(/Draft does not follow this plan/)).toBeInTheDocument();
@@ -372,7 +379,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
       draft: makeWrittenDraft({ sentence_checks: [unchecked, unchecked, unchecked, unchecked] }),
       reply_plan: makeReplyPlan({ mention_product: false }),
     });
-    render(<ReviewCard card={makeCard({ status: 'skipped', skip_reason: 'Not enough evidence', evidence })} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={makeCard({ status: 'skipped', skip_reason: 'Not enough evidence', evidence })} onUpdate={vi.fn()} />);
 
     expect(screen.queryByText(/does not mention the product/)).not.toBeInTheDocument();
   });
@@ -383,7 +390,7 @@ describe('ReviewCard: written draft (issue #12)', () => {
       draft,
       reply_plan: makeReplyPlan({ reply_type: 'answer_question', mention_product: false }),
     });
-    render(<ReviewCard card={makeCard({ evidence })} onUpdate={vi.fn()} />);
+    renderOpen(<ReviewCard card={makeCard({ evidence })} onUpdate={vi.fn()} />);
 
     expect(screen.getByText(/the written reply below does not mention the product/)).toBeInTheDocument();
     expect(screen.queryByText(/uses fixed phrases only/)).not.toBeInTheDocument();

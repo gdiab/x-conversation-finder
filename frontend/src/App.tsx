@@ -3,6 +3,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { Banner, Button, Section } from '@outpost/ds';
 import { ReviewCard } from './components/ReviewCard';
 import { StartWatchForm } from './components/StartWatchForm';
 import { listReviews } from './api/client';
@@ -49,50 +50,41 @@ function App() {
   }, []);
 
   return (
-    <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '20px' }}>
-      <header style={{ marginBottom: '30px', borderBottom: '2px solid #333', paddingBottom: '20px' }}>
-        <h1>X Conversation Finder</h1>
-        <p style={{ color: '#666' }}>
-          Review posts, check evidence, approve or skip drafts
-        </p>
+    <Section intensity="deck" className="app" aria-labelledby="app-title">
+      <header className="app-head">
+        <div>
+          <h1 id="app-title" className="app-head__title">X Conversation Finder</h1>
+          <p className="app-head__sub">
+            Review posts, check evidence, approve or skip drafts
+          </p>
+        </div>
       </header>
 
       <StartWatchForm onSuccess={loadReviews} />
 
-      <div style={{ marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>Review Queue ({activeCards.length})</h2>
-        <button onClick={loadReviews} disabled={loading}>
+      <div className="rq-bar">
+        <h2 className="app-section-title">Review Queue ({activeCards.length})</h2>
+        <Button variant="ghost" size="sm" onClick={loadReviews} disabled={loading}>
           Refresh
-        </button>
+        </Button>
       </div>
 
       {error && (
-        <div style={{
-          backgroundColor: '#ffebee',
-          color: '#c62828',
-          padding: '12px',
-          borderRadius: '4px',
-          marginBottom: '20px',
-        }}>
+        <Banner tone="critical" style={{ marginBottom: 'var(--op-space-4)' }}>
           {error}
-        </div>
+        </Banner>
       )}
 
       {loading && cards.length === 0 ? (
-        <div>Loading reviews...</div>
+        <div className="rq-empty">Loading reviews...</div>
       ) : activeCards.length === 0 ? (
-        <div style={{
-          textAlign: 'center',
-          padding: '40px',
-          backgroundColor: '#f5f5f5',
-          borderRadius: '8px',
-        }}>
+        <div className="rq-empty">
           {skippedCards.length > 0
             ? 'No drafts to review. Every post found so far was skipped (see below).'
             : 'No reviews yet. Start a topic watch above to begin finding conversations.'}
         </div>
       ) : (
-        <div>
+        <div className="rq-list">
           {activeCards.map((card) => (
             <ReviewCard
               key={card.workflow_id}
@@ -104,25 +96,29 @@ function App() {
       )}
 
       {skippedCards.length > 0 && (
-        <div style={{ marginTop: '30px' }}>
-          <button onClick={() => setShowSkipped(!showSkipped)}>
+        <div className="rq-skipped">
+          <Button variant="ghost" size="sm" onClick={() => setShowSkipped(!showSkipped)} aria-expanded={showSkipped}>
             {showSkipped ? 'Hide' : 'Show'} skipped ({skippedCards.length})
-          </button>
-          <p style={{ color: '#666', fontSize: '14px' }}>
+          </Button>
+          <p className="rq-skipped__note">
             Posts with no draft to post: the post was not a reply opportunity (for example a promo,
             a roundup or a vendor post), its confidence was below the threshold, or no reply could be
             backed by your product brief. Each card says which.
           </p>
-          {showSkipped && skippedCards.map((card) => (
-            <ReviewCard
-              key={card.workflow_id}
-              card={card}
-              onUpdate={loadReviews}
-            />
-          ))}
+          {showSkipped && (
+            <div className="rq-list">
+              {skippedCards.map((card) => (
+                <ReviewCard
+                  key={card.workflow_id}
+                  card={card}
+                  onUpdate={loadReviews}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
-    </div>
+    </Section>
   );
 }
 

@@ -33,21 +33,15 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
   const draftFailures = evidence.draft?.plan_conformance_failures ?? [];
 
   return (
-    <div style={{ marginBottom: '20px' }}>
-      <h4>Reply Plan</h4>
-      <div style={{
-        backgroundColor: rejected ? '#ffebee' : '#f3f8ff',
-        border: `1px solid ${rejected ? '#ef9a9a' : '#bbdefb'}`,
-        padding: '12px',
-        borderRadius: '4px',
-        fontSize: '14px',
-      }}>
-        <div style={{ marginBottom: '6px' }}>
+    <section className="rq-sec">
+      <h4 className="rq-sec__title">Reply Plan</h4>
+      <div className={rejected ? 'ev-box ev-item--fail' : 'ev-box'}>
+        <div style={{ marginBottom: 'var(--op-space-1)' }}>
           <strong>Reply type:</strong>{' '}
           {REPLY_TYPE_LABELS[plan.reply_type] ?? (plan.reply_type || '(none)')}
-          <span style={{ color: '#666', fontSize: '12px' }}> ({plan.reply_type || 'missing'})</span>
+          <span className="app-muted" style={{ fontSize: '12px' }}> ({plan.reply_type || 'missing'})</span>
         </div>
-        <div style={{ marginBottom: '6px' }}>
+        <div style={{ marginBottom: 'var(--op-space-1)' }}>
           <strong>Responds to:</strong>{' '}
           {plan.target_point ? <q>{plan.target_point}</q> : <em>(no target point)</em>}
         </div>
@@ -55,11 +49,11 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
           <strong>Mention the product:</strong>{' '}
           {plan.mention_product === true ? 'Yes' : plan.mention_product === false ? 'No' : '(not decided)'}
           {plan.mention_product_reason && (
-            <span style={{ color: '#666' }}> — {plan.mention_product_reason}</span>
+            <span className="app-muted"> — {plan.mention_product_reason}</span>
           )}
         </div>
         {plan.mention_product === false && !rejected && edited && evidence.draft && (
-          <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
+          <div className="ev-note">
             The drafted reply had no product claim; the text below has since been edited (see the edit gate results).
           </div>
         )}
@@ -69,12 +63,12 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
           && draftFailures.length === 0
           && (evidence.draft.sentence_checks ?? []).length > 0
           && (evidence.draft.sentence_checks ?? []).every((check) => check.verdict === 'not_a_product_claim') && (
-          <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
+          <div className="ev-note">
             No product claim: the written reply below does not mention the product.
           </div>
         )}
         {plan.mention_product === false && !rejected && !edited && evidence.draft && evidence.draft.mode !== 'written' && !evidence.reply_plan_skip_rule && (
-          <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
+          <div className="ev-note">
             No product claim: the draft below uses fixed phrases only.
             {(plan.reply_type === 'answer_question' || plan.reply_type === 'share_experience') && (
               <> Fixed phrases cannot {plan.reply_type === 'answer_question' ? 'answer the question' : 'share our experience'};
@@ -83,26 +77,26 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
           </div>
         )}
         {attempts > 1 && (
-          <div style={{ fontSize: '12px', color: '#666', marginTop: '6px' }}>
+          <div className="ev-note">
             Plan requested {attempts} times; earlier plans failed validation.
           </div>
         )}
         {evidence.reply_plan_skip_rule === 'needs_written_drafts' && (
-          <div style={{ marginTop: '8px', fontSize: '12px', color: '#c62828' }}>
+          <div className="ev-note ev-error">
             <strong>Skipped:</strong> this reply needs written drafts. Assembled drafts can only use
             fixed phrases here, and fixed phrases cannot{' '}
             {plan.reply_type === 'answer_question' ? 'answer the question' : 'share our experience'}.
           </div>
         )}
         {draftFailures.length > 0 && (
-          <div style={{ marginTop: '8px', fontSize: '12px', color: '#c62828' }}>
+          <div className="ev-note ev-error">
             <strong>Draft does not follow this plan:</strong> {draftFailures.join('; ')}
           </div>
         )}
         {rejected && (
-          <div style={{ marginTop: '8px' }}>
-            <div style={{ fontWeight: 'bold', color: '#c62828' }}>Plan rejected:</div>
-            <ul style={{ margin: '4px 0 0 0', paddingLeft: '20px', color: '#c62828', fontSize: '12px' }}>
+          <div style={{ marginTop: 'var(--op-space-2)' }}>
+            <div className="ev-fail">Plan rejected:</div>
+            <ul className="ev-list ev-error" style={{ fontSize: '12px' }}>
               {errors.map((error, idx) => (
                 <li key={idx}>{error}</li>
               ))}
@@ -110,6 +104,6 @@ export function ReplyPlanPanel({ evidence, edited }: ReplyPlanPanelProps) {
           </div>
         )}
       </div>
-    </div>
+    </section>
   );
 }

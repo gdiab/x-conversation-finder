@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { Banner, Button, Checkbox, Textarea } from '@outpost/ds';
 import {
   getBriefSuggestionCost,
   suggestBriefAdditions,
@@ -71,8 +72,6 @@ function formatUsd(value: number, ceil = false): string {
   const shown = ceil ? Math.ceil(value * factor - 1e-9) / factor : value;
   return `$${shown.toFixed(digits)}`;
 }
-
-const box = { border: '1px solid #ddd', borderRadius: '4px', padding: '10px', marginBottom: '8px' } as const;
 
 export function BriefSuggestions({ productUrl, productName, productBrief, urlValid, onBriefChange }: BriefSuggestionsProps) {
   const [cost, setCost] = useState<BriefSuggestionCost | null>(null);
@@ -161,16 +160,18 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
     setItems((current) => current.map((item) => (item.key === key ? { ...item, ...change } : item)));
 
   return (
-    <div style={{ marginBottom: '12px' }}>
-      <button
-        type="button"
-        onClick={handleSuggest}
-        disabled={!urlValid || !cost || loading}
-        style={{ padding: '8px 14px', borderRadius: '4px', border: '1px solid #2196f3', backgroundColor: '#fff', color: '#1565c0', cursor: 'pointer' }}
-      >
-        {loading ? 'Reading the page...' : 'Suggest brief additions'}
-      </button>
-      <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+    <div className="bs">
+      <div className="bs__head">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleSuggest}
+          disabled={!urlValid || !cost || loading}
+        >
+          {loading ? 'Reading the page...' : 'Suggest brief additions'}
+        </Button>
+      </div>
+      <p className="bs__note">
         {cost && (
           <>
             Reads the Product URL (for a GitHub repository, its README) and makes one model call, at most{' '}
@@ -181,79 +182,67 @@ export function BriefSuggestions({ productUrl, productName, productBrief, urlVal
         {!cost && costError && 'The cost of a suggestion call could not be loaded, so the button is off. Reload the page to try again.'}
         {!cost && !costError && 'Loading the cost of a suggestion call...'}
         {cost && !urlValid && ' Enter a valid Product URL first.'}
-      </div>
+      </p>
 
       {error && (
-        <div role="alert" style={{ backgroundColor: '#ffebee', color: '#c62828', padding: '10px', borderRadius: '4px', marginTop: '8px' }}>
-          No suggestions: {error}
-        </div>
+        <Banner tone="critical">No suggestions: {error}</Banner>
       )}
 
       {notice && (
-        <div role="status" style={{ backgroundColor: '#e8f5e9', color: '#2e7d32', padding: '10px', borderRadius: '4px', marginTop: '8px' }}>
-          {notice}
-        </div>
+        <Banner tone="info">{notice}</Banner>
       )}
 
       {result && (
-        <div style={{ marginTop: '10px' }}>
-          <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
+        <div>
+          <p className="bs__note">
             From {result.source === 'github_readme' ? 'the repository README' : 'the page'}; this call cost {formatUsd(result.cost_usd)}.
             {result.page_truncated && ' The page was longer than the limit, so only its first part was read.'}
             {result.dropped_quote_not_on_page > 0 &&
               ` ${result.dropped_quote_not_on_page} suggestion${result.dropped_quote_not_on_page === 1 ? ' was' : 's were'} dropped because the quote is not on the page.`}
-          </div>
+          </p>
 
           {items.length === 0 && result.suggestions.length === 0 && (
-            <div style={{ fontSize: '14px', marginBottom: '8px' }}>No suggestions passed the checks{result.dropped_other > 0 ? ` (${result.dropped_other} more dropped: a repeat, already in the brief, longer than one sentence, or over the limit)` : ''}.</div>
+            <p className="bs__note">No suggestions passed the checks{result.dropped_other > 0 ? ` (${result.dropped_other} more dropped: a repeat, already in the brief, longer than one sentence, or over the limit)` : ''}.</p>
           )}
 
           {items.length > 0 && (
-            <ul aria-label="Suggested brief additions" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+            <ul aria-label="Suggested brief additions" className="bs__list">
               {items.map((item, i) => (
-                <li key={item.key} style={box}>
-                  <label style={{ display: 'flex', gap: '6px', alignItems: 'center', fontWeight: 'bold' }}>
-                    <input
-                      type="checkbox"
-                      checked={item.checked}
-                      onChange={(e) => update(item.key, { checked: e.target.checked })}
-                    />
-                    Add suggestion {i + 1}
-                  </label>
-                  <textarea
+                <li key={item.key} className={item.checked ? 'bs__item bs__item--on' : 'bs__item'}>
+                  <Checkbox
+                    label={`Add suggestion ${i + 1}`}
+                    checked={item.checked}
+                    onChange={(e) => update(item.key, { checked: e.target.checked })}
+                  />
+                  <Textarea
                     aria-label={`Suggested sentence ${i + 1}`}
                     value={item.sentence}
                     onChange={(e) => update(item.key, { sentence: e.target.value })}
-                    style={{ width: '100%', minHeight: '40px', padding: '6px', marginTop: '6px' }}
+                    rows={2}
                   />
-                  <blockquote style={{ margin: '6px 0', paddingLeft: '8px', borderLeft: '3px solid #ccc', color: '#444', fontSize: '13px' }}>
+                  <blockquote className="bs__quote">
                     From the page: “{item.quote}”
                   </blockquote>
-                  {item.why && <div style={{ fontSize: '13px', color: '#555' }}>Why: {item.why}</div>}
+                  {item.why && <div className="bs__why">Why: {item.why}</div>}
                 </li>
               ))}
             </ul>
           )}
 
           {items.length > 0 && (
-            <button
-              type="button"
-              onClick={handleAdd}
-              disabled={checked.length === 0}
-              style={{ padding: '8px 14px', borderRadius: '4px', border: 'none', backgroundColor: '#2196f3', color: '#fff', cursor: 'pointer' }}
-            >
+            <Button size="sm" onClick={handleAdd} disabled={checked.length === 0}>
               Add checked to brief
-            </button>
+            </Button>
           )}
 
           {flags.length > 0 && (
-            <div style={{ ...box, marginTop: '10px', backgroundColor: '#fffde7' }}>
-              <div style={{ fontWeight: 'bold', marginBottom: '6px' }}>
+            <div className="bs__flags">
+              <div className="rq-callout__title">
                 Brief sentences the page does not support (for information: you may have other sources)
               </div>
-              <ul aria-label="Brief sentences the page does not support" style={{ margin: 0, paddingLeft: '18px' }}>
+              <ul aria-label="Brief sentences the page does not support">
                 {flags.map((flag) => (
-                  <li key={flag.brief_sentence_id} style={{ marginBottom: '4px', fontSize: '13px' }}>
+                  <li key={flag.brief_sentence_id}>
                     {flag.brief_sentence_context && `(${flag.brief_sentence_context}) `}“{flag.brief_sentence}”: {flag.kind === 'contradicted' ? 'the page contradicts it' : 'the page does not mention it'}
                     {flag.note && `. ${flag.note}`}
                     {flag.quote && <> Page: “{flag.quote}”</>}
