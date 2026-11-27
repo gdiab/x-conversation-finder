@@ -861,6 +861,37 @@ describe('ReviewCard: collapsed card and detail view (issue #50)', () => {
     expect(nudgeMock).not.toHaveBeenCalled();
   });
 
+  it('turns off "Post Anyway" while an edit is unsaved', async () => {
+    const user = userEvent.setup();
+    approveMock.mockRejectedValueOnce(postAnywayError());
+    rtlRender(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.type(screen.getByLabelText('Edited draft'), ' unsaved');
+
+    const override = screen.getByRole('button', { name: 'Post Anyway (Override)' });
+    expect(override).toBeDisabled();
+    expect(override).toHaveAccessibleDescription('Approve records the saved draft. Save or cancel your edit first.');
+    expect(approveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the URL and skip reason fields read-only while a request runs', async () => {
+    const user = userEvent.setup();
+    let resolve: () => void = () => {};
+    skipMock.mockReturnValueOnce(new Promise((r) => { resolve = () => r(); }));
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(screen.getByPlaceholderText('Skip reason (optional)')).toHaveAttribute('readonly');
+    expect(screen.getByPlaceholderText('Paste URL of your posted reply')).toHaveAttribute('readonly');
+
+    await act(async () => resolve());
+  });
+
   it('does not take typing in the nudge field while the nudge is on its way', async () => {
     const user = userEvent.setup();
     let resolve: (v: string) => void = () => {};

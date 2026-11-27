@@ -332,7 +332,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   // closing the view keeps an unsaved edit, a typed URL or a nudge. The
   // collapsed card says so, and says when a result is waiting to be read.
   const unsavedEdit = isEditing && editText !== (draftText ?? '');
-  const unsavedNudge = isNudging && nudgeInstruction.trim() !== '';
+  // The nudge field is shown only on a pending card
+  const unsavedNudge = card.status === 'pending' && isNudging && nudgeInstruction.trim() !== '';
   const nudgeBlockedId = `${card.workflow_id}-nudge-blocked`;
   const skipDiscardsId = `${card.workflow_id}-skip-discards`;
   const approveBlockedId = `${card.workflow_id}-approve-blocked`;
@@ -487,6 +488,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                   placeholder="Paste URL of your posted reply"
                   value={replyUrl}
                   onChange={(e) => setReplyUrl(e.target.value)}
+                  readOnly={loading}
                 />
                 <Button onClick={handleConfirmPosted} disabled={loading}>
                   Confirm Posted
@@ -508,6 +510,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                       placeholder="Paste URL of your posted reply"
                       value={postedUrl}
                       onChange={(e) => setPostedUrl(e.target.value)}
+                      // Every field is read-only while a request runs: the
+                      // request has the value it was sent with
+                      readOnly={loading}
                     />
                     <Button
                       onClick={() => handleApprove(false)}
@@ -547,7 +552,13 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                         </ul>
                       )}
                       <div className="rq-row">
-                        <Button size="sm" variant="danger" onClick={() => handleApprove(true)} disabled={loading}>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => handleApprove(true)}
+                          disabled={loading || unsavedEdit}
+                          aria-describedby={unsavedEdit ? approveBlockedId : undefined}
+                        >
                           Post Anyway (Override)
                         </Button>
                         <Button size="sm" variant="ghost" onClick={closePostAnyway} disabled={loading}>
@@ -636,6 +647,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                     placeholder="Skip reason (optional)"
                     value={skipReason}
                     onChange={(e) => setSkipReason(e.target.value)}
+                    readOnly={loading}
                   />
                   <Button
                     variant="ghost"
