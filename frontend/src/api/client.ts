@@ -553,7 +553,8 @@ export async function suggestBriefAdditions(request: {
 
 // --- Skipped accounts (issue #48) ---
 // One list for every watch: X handles whose posts no watch reviews. Each
-// watch reads it at its next search.
+// watch reads it at its next search. A request adds or removes handles,
+// never replaces the list, so a delayed request cannot undo another change.
 
 export async function getSkippedAccounts(): Promise<string[]> {
   const response = await fetch(`${API_BASE}/settings/skipped-accounts`);
@@ -563,15 +564,26 @@ export async function getSkippedAccounts(): Promise<string[]> {
   return (await response.json()).handles;
 }
 
-/** Replace the list; returns it as stored (lowercase, without "@"). */
-export async function saveSkippedAccounts(handles: string[]): Promise<string[]> {
+/** Add handles; returns the list as stored (lowercase, without "@"). */
+export async function addSkippedAccounts(handles: string[]): Promise<string[]> {
   const response = await fetch(`${API_BASE}/settings/skipped-accounts`, {
-    method: 'PUT',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ handles }),
   });
   if (!response.ok) {
-    throw new Error(`Failed to save skipped accounts: ${await refusalDetail(response)}`);
+    throw new Error(`Failed to add skipped accounts: ${await refusalDetail(response)}`);
+  }
+  return (await response.json()).handles;
+}
+
+/** Remove one handle; returns the list as stored. */
+export async function removeSkippedAccount(handle: string): Promise<string[]> {
+  const response = await fetch(`${API_BASE}/settings/skipped-accounts/${encodeURIComponent(handle)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to remove a skipped account: ${await refusalDetail(response)}`);
   }
   return (await response.json()).handles;
 }

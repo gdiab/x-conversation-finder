@@ -266,28 +266,62 @@ def http():
 
 
 @pytest.mark.asyncio
-async def test_api_reads_and_replaces_the_list(http):
+async def test_api_adds_and_removes_handles(http):
     async with http:
         assert (await http.get("/api/settings/skipped-accounts")).json() == {"handles": []}
 
-        saved = await http.put("/api/settings/skipped-accounts", json={"handles": ["@Grok", " openai "]})
-        assert saved.status_code == 200
-        assert saved.json() == {"handles": ["grok", "openai"]}
-        assert (await http.get("/api/settings/skipped-accounts")).json() == {"handles": ["grok", "openai"]}
+        added = await http.post("/api/settings/skipped-accounts", json={"handles": ["@Grok", " openai "]})
+        assert added.status_code == 200
+        assert added.json() == {"handles": ["grok", "openai"]}
+        again = await http.post("/api/settings/skipped-accounts", json={"handles": ["OPENAI", "spam_bot"]})
+        assert again.json() == {"handles": ["grok", "openai", "spam_bot"]}
 
-    assert json.loads(_stored_value()) == ["grok", "openai"]
+        removed = await http.delete("/api/settings/skipped-accounts/@OpenAI")
+        assert removed.status_code == 200
+        assert removed.json() == {"handles": ["grok", "spam_bot"]}
+        # removing a handle not on the list changes nothing (a retried request)
+        assert (await http.delete("/api/settings/skipped-accounts/openai")).json() == {"handles": ["grok", "spam_bot"]}
+        assert (await http.get("/api/settings/skipped-accounts")).json() == {"handles": ["grok", "spam_bot"]}
+
+    assert json.loads(_stored_value()) == ["grok", "spam_bot"]
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_add_cannot_undo_a_later_removal_of_another_handle(http):
+    """Requests carry changes, not the list: an add answered late (or
+    retried) leaves the other handles as they are."""
+    set_skipped_accounts(["grok", "spam_bot"])
+    async with http:
+        await http.delete("/api/settings/skipped-accounts/spam_bot")
+        late = await http.post("/api/settings/skipped-accounts", json={"handles": ["grok"]})
+
+    assert late.json() == {"handles": ["grok"]}
 
 
 @pytest.mark.asyncio
 async def test_api_refuses_a_value_that_is_not_a_handle_and_keeps_the_list(http):
     set_skipped_accounts(["grok"])
     async with http:
-        refused = await http.put("/api/settings/skipped-accounts", json={"handles": ["grok", "not a handle"]})
+        refused = await http.post("/api/settings/skipped-accounts", json={"handles": ["openai", "not a handle"]})
+        refused_removal = await http.delete("/api/settings/skipped-accounts/not%20a%20handle")
 
     assert refused.status_code == 422
     assert refused.json()["code"] == "invalid_request"
     assert "is not an X handle" in refused.json()["errors"][0]["msg"]
+    assert refused_removal.status_code == 422
+    assert "is not an X handle" in refused_removal.json()["detail"]
     assert get_skipped_accounts() == ["grok"]
+
+
+@pytest.mark.asyncio
+async def test_api_refuses_an_add_past_the_maximum(http):
+    set_skipped_accounts([f"user{i}" for i in range(MAX_SKIPPED_ACCOUNTS)])
+    async with http:
+        refused = await http.post("/api/settings/skipped-accounts", json={"handles": ["grok"]})
+
+    assert refused.status_code == 422
+    assert f"At most {MAX_SKIPPED_ACCOUNTS}" in refused.json()["detail"]
+    assert len(get_skipped_accounts()) == MAX_SKIPPED_ACCOUNTS
 
 
 def _stored_value() -> str:

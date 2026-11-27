@@ -1,14 +1,15 @@
 /**
  * Skipped accounts (issue #48): X handles whose posts no watch reviews.
  *
- * One list for every watch. Each add or remove saves the whole list at once,
- * and each watch reads it at its next search, so no watch restart is needed.
+ * One list for every watch. Each add or remove is sent as that change, never
+ * as the whole list, so a request answered late cannot undo another change.
+ * Each watch reads the list at its next search, so no restart is needed.
  * Posts that mention a listed account are still reviewed; existing cards do
  * not change.
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { getSkippedAccounts, saveSkippedAccounts } from '../api/client';
+import { addSkippedAccounts, getSkippedAccounts, removeSkippedAccount } from '../api/client';
 
 /** The handles typed in the field: split at commas and spaces, "@" kept for the API to remove. */
 export function parseHandles(value: string): string[] {
@@ -16,16 +17,14 @@ export function parseHandles(value: string): string[] {
 }
 
 export function SkippedAccounts() {
-  // null until the stored list loads: a save replaces the whole list, so
-  // nothing can be saved before the stored one is known
+  // null until the stored list loads
   const [handles, setHandles] = useState<string[] | null>(null);
   const [entry, setEntry] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Each load and save takes a number; only the latest request's answer may
-  // set the list. A load answered after a save (Strict Mode mounts twice)
-  // would otherwise put back the list from before the save, and the next
-  // save would store that older list.
+  // set the list shown. A load answered after a save (Strict Mode mounts
+  // twice) would otherwise show the list from before the save.
   const latest = useRef(0);
 
   const load = async () => {
@@ -45,21 +44,20 @@ export function SkippedAccounts() {
     load();
   }, []);
 
-  const save = async (next: string[]): Promise<boolean> => {
+  const save = async (change: () => Promise<string[]>): Promise<boolean> => {
     const request = ++latest.current;
     setSaving(true);
     setError(null);
     try {
-      const stored = await saveSkippedAccounts(next);
+      const stored = await change();
       if (request === latest.current) setHandles(stored);
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save skipped accounts');
-      // The save may have been stored even though its answer was lost, so
-      // the list shown may be out of date and the next save would replace
-      // the stored one with it: read the stored list again before any
-      // other edit (the controls stay disabled until then). If that read
-      // fails too, editing waits for Retry.
+      // The change may have been stored even though its answer was lost:
+      // read the stored list again, so the list shown is the stored one
+      // (the controls stay disabled until then). If that read fails too,
+      // editing waits for Retry.
       try {
         const stored = await getSkippedAccounts();
         if (request === latest.current) setHandles(stored);
@@ -76,7 +74,7 @@ export function SkippedAccounts() {
     e.preventDefault();
     const typed = parseHandles(entry);
     if (handles === null || typed.length === 0) return;
-    if (await save([...handles, ...typed])) setEntry('');
+    if (await save(() => addSkippedAccounts(typed))) setEntry('');
   };
 
   return (
@@ -118,7 +116,7 @@ export function SkippedAccounts() {
                   @{handle}{' '}
                   <button
                     type="button"
-                    onClick={() => save(handles.filter((h) => h !== handle))}
+                    onClick={() => save(() => removeSkippedAccount(handle))}
                     disabled={saving}
                     aria-label={`Remove @${handle}`}
                   >

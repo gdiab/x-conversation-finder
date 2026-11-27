@@ -1,7 +1,9 @@
 """Skipped accounts (issue #48): X handles whose posts no watch reviews.
 
-One list for the app, edited in the review UI (GET/PUT
-/api/settings/skipped-accounts), stored in the global_settings table. Every
+One list for the app, edited in the review UI (GET, POST to add, DELETE
+/<handle> to remove under /api/settings/skipped-accounts), stored in the
+global_settings table. The UI sends one change at a time, never the whole
+list, so a delayed or retried request cannot undo another edit. Every
 watch reads it in its search_recent activity at each search, so an edit
 applies at each watch's next search without a restart; the activity's result
 is recorded in history, so replay does not read the list again.
@@ -20,6 +22,7 @@ Only posts written by a listed account are skipped. A post that mentions one
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timezone
 from typing import Iterable, List, Sequence, Tuple
 
@@ -82,6 +85,26 @@ def get_skipped_accounts() -> List[str]:
             return []
     finally:
         db.close()
+
+
+# The API's request threads change the list read-modify-write; the worker
+# only reads it
+_edit_lock = threading.Lock()
+
+
+def add_skipped_accounts(raw: Iterable[str]) -> List[str]:
+    """Add handles to the end of the stored list (one already on it stays
+    where it is); returns the list. Raises ValueError as normalize_handles."""
+    with _edit_lock:
+        return set_skipped_accounts([*get_skipped_accounts(), *normalize_handles(raw)])
+
+
+def remove_skipped_accounts(raw: Iterable[str]) -> List[str]:
+    """Remove handles from the stored list (one not on it is ignored);
+    returns the list. Raises ValueError as normalize_handles."""
+    removed = set(normalize_handles(raw))
+    with _edit_lock:
+        return set_skipped_accounts([h for h in get_skipped_accounts() if h not in removed])
 
 
 def set_skipped_accounts(raw: Iterable[str]) -> List[str]:

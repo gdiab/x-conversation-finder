@@ -2,14 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   approveReview,
   confirmPostedReview,
+  addSkippedAccounts,
   editReview,
   generateRequestId,
   getSkippedAccounts,
   listReviews,
   nudgeReview,
   PostRemovedError,
+  removeSkippedAccount,
   ReviewApiError,
-  saveSkippedAccounts,
   skipReview,
   startWatch,
 } from './client';
@@ -250,14 +251,23 @@ describe('skipped accounts (issue #48)', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/settings/skipped-accounts');
   });
 
-  it('replaces the whole list with a PUT and returns it as stored', async () => {
+  it('adds handles with a POST and returns the list as stored', async () => {
     fetchMock.mockResolvedValue(new Response('{"handles":["grok","openai"]}', { status: 200 }));
 
-    expect(await saveSkippedAccounts(['@Grok', 'openai'])).toEqual(['grok', 'openai']);
+    expect(await addSkippedAccounts(['@Grok', 'openai'])).toEqual(['grok', 'openai']);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('/api/settings/skipped-accounts');
-    expect(init?.method).toBe('PUT');
+    expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual({ handles: ['@Grok', 'openai'] });
+  });
+
+  it('removes one handle with a DELETE', async () => {
+    fetchMock.mockResolvedValue(new Response('{"handles":["openai"]}', { status: 200 }));
+
+    expect(await removeSkippedAccount('grok')).toEqual(['openai']);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/settings/skipped-accounts/grok');
+    expect(init?.method).toBe('DELETE');
   });
 
   it('reports why a handle was refused', async () => {
@@ -270,8 +280,8 @@ describe('skipped accounts (issue #48)', () => {
       { status: 422, statusText: 'Unprocessable Entity' },
     ));
 
-    await expect(saveSkippedAccounts(['a b'])).rejects.toThrow(
-      'Failed to save skipped accounts: handles: "a b" is not an X handle (1-15 letters, digits or underscores)',
+    await expect(addSkippedAccounts(['a b'])).rejects.toThrow(
+      'Failed to add skipped accounts: handles: "a b" is not an X handle (1-15 letters, digits or underscores)',
     );
   });
 });
