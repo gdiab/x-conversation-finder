@@ -124,4 +124,39 @@ describe('SkippedAccounts (issue #48)', () => {
     expect(screen.getByLabelText('Add account:')).toBeEnabled();
     expect(screen.getByLabelText('Add account:')).toHaveValue('');
   });
+
+  it('reads the stored list again after a failed save, so a save stored despite the error is shown', async () => {
+    const user = userEvent.setup();
+    getMock.mockResolvedValueOnce([]);
+    // The save was stored, but its answer was lost
+    getMock.mockResolvedValueOnce(['grok']);
+    saveMock.mockRejectedValueOnce(new Error('Failed to save skipped accounts: Failed to fetch'));
+    render(<SkippedAccounts />);
+
+    await user.type(await screen.findByLabelText('Add account:'), 'grok');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to fetch');
+    expect(await screen.findByRole('button', { name: 'Remove @grok' })).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText('Add account:'));
+    await user.type(screen.getByLabelText('Add account:'), 'openai');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    expect(saveMock).toHaveBeenLastCalledWith(['grok', 'openai']);
+  });
+
+  it('offers no editing after a failed save when the list cannot be read again', async () => {
+    const user = userEvent.setup();
+    getMock.mockResolvedValueOnce(['spam_bot']);
+    getMock.mockRejectedValueOnce(new Error('Failed to load skipped accounts: Failed to fetch'));
+    saveMock.mockRejectedValueOnce(new Error('Failed to save skipped accounts: Failed to fetch'));
+    render(<SkippedAccounts />);
+
+    await user.type(await screen.findByLabelText('Add account:'), 'grok');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Add account:')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to save skipped accounts');
+  });
 });

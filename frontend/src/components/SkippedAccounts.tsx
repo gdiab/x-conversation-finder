@@ -55,6 +55,17 @@ export function SkippedAccounts() {
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save skipped accounts');
+      // The save may have been stored even though its answer was lost, so
+      // the list shown may be out of date and the next save would replace
+      // the stored one with it: read the stored list again before any
+      // other edit (the controls stay disabled until then). If that read
+      // fails too, editing waits for Retry.
+      try {
+        const stored = await getSkippedAccounts();
+        if (request === latest.current) setHandles(stored);
+      } catch {
+        if (request === latest.current) setHandles(null);
+      }
       return false;
     } finally {
       setSaving(false);
