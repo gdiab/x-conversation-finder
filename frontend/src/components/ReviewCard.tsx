@@ -8,6 +8,7 @@ import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview
 import { ReplyFitPanel } from './ReplyFitPanel';
 import { ReplyPlanPanel } from './ReplyPlanPanel';
 import { SentenceCheckList } from './SentenceCheckList';
+import { HighReachBadge, HIGH_REACH_BORDER, ReachCounts } from './ReachSummary';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -306,8 +307,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   };
 
   return (
-    <div style={{
-      border: '1px solid #ccc',
+    <div data-high-reach={card.reach_highlighted ? 'true' : undefined} style={{
+      // issue #49: highlight a card at or above the reach level
+      border: card.reach_highlighted ? `2px solid ${HIGH_REACH_BORDER}` : '1px solid #ccc',
       borderRadius: '8px',
       padding: '20px',
       marginBottom: '20px',
@@ -317,6 +319,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
       <div style={{ marginBottom: '20px', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h3 style={{ margin: 0 }}>{author ? `Review: ${author.username}` : 'Review'}</h3>
+          <span>
+          <HighReachBadge card={card} />
           <span style={{
             padding: '4px 12px',
             borderRadius: '4px',
@@ -325,6 +329,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
             color: '#fff',
           }}>
             {card.status}
+          </span>
           </span>
         </div>
         <div style={{ fontSize: '14px', color: '#666', marginTop: '4px' }}>
@@ -354,10 +359,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
           ) : (
             <div>{card.post.text}</div>
           )}
-          <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-            {card.post.like_count} likes · {card.post.reply_count} replies
-            {author && <> · {author.followers_count.toLocaleString()} followers</>}
-          </div>
+          <ReachCounts card={card} showFollowers={!!author} />
         </div>
         {postUrl && (
           <a href={postUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: '14px' }}>

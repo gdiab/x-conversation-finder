@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { listReviews } from './api/client';
-import { makeCard, makeCardBy, makeEvidence } from './test/fixtures';
+import { makeCard, makeCardBy, makeEvidence, makeReach } from './test/fixtures';
 
 vi.mock('./api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api/client')>();
@@ -21,6 +21,20 @@ beforeEach(() => {
 });
 
 describe('App review queue', () => {
+  it('orders the queue by confidence plus reach (issue #49), confidence alone without reach', async () => {
+    serve([
+      makeCardBy('confident', { evidence: makeEvidence({ confidence_score: 0.9 }), queue_priority: 0.9, reach: makeReach({ score: 0 }) }),
+      makeCardBy('unscored', { evidence: makeEvidence({ confidence_score: 0.85 }), reach: null }),
+      makeCardBy('farreaching', { evidence: makeEvidence({ confidence_score: 0.74 }), queue_priority: 0.92, reach: makeReach(), reach_highlighted: true }),
+    ]);
+
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Review Queue (3)' });
+    const order = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent).filter((t) => t?.startsWith('Review:'));
+    expect(order).toEqual(['Review: farreaching', 'Review: confident', 'Review: unscored']);
+  });
+
   it('counts only active cards and hides skipped ones', async () => {
     serve([
       makeCardBy('pendinguser'),
