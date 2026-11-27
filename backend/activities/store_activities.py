@@ -10,6 +10,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm.attributes import flag_modified
 
 from backend.models import ReviewCard, Evidence
+from backend.reach import compute_reach, queue_priority, reach_highlighted
 from backend.models.reply_plan import reply_plan_card_fields
 from backend.models.written import (
     DRAFT_MODE_WRITTEN,
@@ -475,28 +476,31 @@ def _card_to_db(card: ReviewCard) -> ReviewCardDB:
     else:
         status_str = str(card.status)
     
+    post_data = {
+        "id": card.post.id,
+        "text": card.post.text,
+        "author": {
+            "id": card.post.author.id,
+            "username": card.post.author.username,
+            "name": card.post.author.name,
+            "followers_count": card.post.author.followers_count,
+            "verified": card.post.author.verified,
+        },
+        "created_at": card.post.created_at,
+        "like_count": card.post.like_count,
+        "reply_count": card.post.reply_count,
+        "repost_count": card.post.repost_count,
+        "quote_count": card.post.quote_count,
+        "conversation_id": card.post.conversation_id,
+        "in_reply_to_user_id": card.post.in_reply_to_user_id,
+        "reply_settings": card.post.reply_settings,
+        "url": card.post.url,
+    }
     return ReviewCardDB(
         workflow_id=card.workflow_id,
-        post_data={
-            "id": card.post.id,
-            "text": card.post.text,
-            "author": {
-                "id": card.post.author.id,
-                "username": card.post.author.username,
-                "name": card.post.author.name,
-                "followers_count": card.post.author.followers_count,
-                "verified": card.post.author.verified,
-            },
-            "created_at": card.post.created_at,
-            "like_count": card.post.like_count,
-            "reply_count": card.post.reply_count,
-            "repost_count": card.post.repost_count,
-            "quote_count": card.post.quote_count,
-            "conversation_id": card.post.conversation_id,
-            "in_reply_to_user_id": card.post.in_reply_to_user_id,
-            "reply_settings": card.post.reply_settings,
-            "url": card.post.url,
-        },
+        post_data=post_data,
+        # issue #49: from the post's metrics, in the activity (no workflow change)
+        reach=compute_reach(post_data),
         evidence_data={
             "post_id": card.evidence.post_id,
             "matched_topic": card.evidence.matched_topic,
@@ -1117,6 +1121,8 @@ def _redact_removed_card_db(card_db: ReviewCardDB) -> None:
     card_db.evidence_data = redacted["evidence"]
     flag_modified(card_db, "evidence_data")
     card_db.skip_reason = redacted["skip_reason"]
+    # issue #49: the reach inputs hold the author's follower count (issue #35)
+    card_db.reach = None
     for key in ("edited_text_gate_results", "post_anyway_failing_sentences"):
         if redacted[key] != getattr(card_db, key):
             setattr(card_db, key, redacted[key])
@@ -1150,7 +1156,7 @@ def redact_recorded_removals() -> RecordedRemovals:
         ).all()
         for card_db in cards:
             fields = _removed_card_fields(card_db)
-            if redact_removed_card(fields) != fields:
+            if redact_removed_card(fields) != fields or card_db.reach is not None:
                 _redact_removed_card_db(card_db)
                 changed += 1
         for stored in stored_posts:
@@ -1292,6 +1298,9 @@ async def delete_post_text(input: DeletePostTextInput) -> bool:
 
 def _card_dict(card: ReviewCardDB) -> Dict[str, Any]:
     """A stored card as the API returns it."""
+    # issue #49: no reach on a removed post, even if a row still held one
+    reach = None if (card.post_data or {}).get("text_removed") else card.reach
+    confidence = (card.evidence_data or {}).get("confidence_score")
     return {
         "workflow_id": card.workflow_id,
         "post": card.post_data,
@@ -1310,6 +1319,11 @@ def _card_dict(card: ReviewCardDB) -> Dict[str, Any]:
         "edited_text_gate_state": card.edited_text_gate_state,
         "post_anyway": card.post_anyway,
         "post_anyway_failing_sentences": card.post_anyway_failing_sentences if card.post_anyway_failing_sentences else None,
+        # issue #49: the stored reach record (None without one), whether it
+        # is highlighted, and the pending queue's sort key
+        "reach": reach,
+        "reach_highlighted": reach_highlighted(reach),
+        "queue_priority": queue_priority(confidence, reach),
     }
 
 
@@ -1320,6 +1334,29 @@ def get_all_cards() -> List[Dict]:
         return [_card_dict(card) for card in db.query(ReviewCardDB).all()]
     finally:
         db.close()
+
+
+def backfill_reach() -> int:
+    """Store a reach score on every card without one that has the metrics
+    (issue #49: cards stored before reach existed, or by a worker still
+    running older code). Cards that record a removal or lack a metric stay
+    without. Idempotent; runs at startup (database.init_db). Returns how many
+    cards it scored."""
+    scored = 0
+    db = get_db()
+    try:
+        # Under the write lock, so a removal cannot land between reading a
+        # card and writing its score (as in redact_recorded_removals)
+        db.execute(sql_text("BEGIN IMMEDIATE"))
+        for card_db in db.query(ReviewCardDB).filter(ReviewCardDB.reach.is_(None)).all():
+            reach = compute_reach(card_db.post_data)
+            if reach is not None:
+                card_db.reach = reach
+                scored += 1
+        db.commit()
+    finally:
+        db.close()
+    return scored
 
 
 def get_stored_card(workflow_id: str) -> Optional[Dict[str, Any]]:

@@ -42,6 +42,10 @@ class ReviewCardDB(Base):
     post_anyway_failing_sentences = Column(JSON, nullable=True)
     # QA R13: Monotonic edit sequence to prevent stale card writes
     edit_seq = Column(Integer, nullable=True, default=0)
+    # issue #49: reach score, its inputs and REACH_RULE_VERSION
+    # (backend.reach.compute_reach). Written by store_card; None when the
+    # post has no metrics or records a removal.
+    reach = Column(JSON, nullable=True)
 
 
 class StoredPostDB(Base):
@@ -164,6 +168,9 @@ def get_engine():
         if "sqlite" in resolved_url:
             event.listen(_engine, "connect", _sqlite_secure_delete)
         Base.metadata.create_all(_engine)
+        # issue #49: here, not in init_db, because the worker (which writes
+        # cards) never calls init_db and may start first after an upgrade
+        _migrate_add_reach(_engine)
     return _engine
 
 
@@ -239,6 +246,14 @@ def init_db() -> bool:
     result = redact_recorded_removals()
     if result.changed:
         logger.info(f"Applied the removal rules to {result.changed} rows of removed posts")
+    # issue #49: score cards stored before reach existed (or by a worker
+    # still running older code); after the removal rules, so a removed post
+    # gets no score
+    from backend.activities.store_activities import backfill_reach
+
+    scored = backfill_reach()
+    if scored:
+        logger.info(f"Stored a reach score on {scored} cards")
     return result.checkpoint_pending
 
 
@@ -262,3 +277,29 @@ def _migrate_add_edit_seq(engine):
             conn.execute(text("ALTER TABLE review_cards ADD COLUMN edit_seq INTEGER DEFAULT 0"))
             conn.commit()
             logger.info("Migration complete: edit_seq column added")
+
+
+def _migrate_add_reach(engine) -> None:
+    """issue #49: add the reach column to an existing review_cards table.
+
+    Idempotent. The API and the worker can both run it at the same time; the
+    one that loses the race finds the column already added.
+    """
+    if "sqlite" not in str(engine.url):
+        return
+    from sqlalchemy.exc import OperationalError
+
+    def has_column(conn) -> bool:
+        return "reach" in [row[1] for row in conn.execute(text("PRAGMA table_info(review_cards)"))]
+
+    with engine.connect() as conn:
+        if has_column(conn):
+            return
+        try:
+            conn.execute(text("ALTER TABLE review_cards ADD COLUMN reach JSON"))
+            conn.commit()
+            logger.info("Migration complete: reach column added to review_cards")
+        except OperationalError:
+            conn.rollback()
+            if not has_column(conn):
+                raise
