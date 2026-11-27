@@ -333,6 +333,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   // collapsed card says so, and says when a result is waiting to be read.
   const unsavedEdit = isEditing && editText !== (draftText ?? '');
   const unsavedNudge = isNudging && nudgeInstruction.trim() !== '';
+  const nudgeBlockedId = `${card.workflow_id}-nudge-blocked`;
+  const skipDiscardsId = `${card.workflow_id}-skip-discards`;
   const needsAttention = showPostAnywayConfirm || notice != null || (error != null && !textRemoved);
 
   const counts = (
@@ -415,6 +417,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                     label="Edited draft"
                     value={editText}
                     onChange={(e) => setEditText(e.target.value)}
+                    // While a request runs, text typed now would not be in it, and
+                    // a successful save or nudge closes the box: no typing then
+                    readOnly={loading}
                     rows={5}
                   />
                   <div className={editLength > X_MAX_CHARS ? 'rq-count rq-count--over' : 'rq-count'}>
@@ -559,11 +564,23 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                     {isEditing ? 'Cancel Edit' : 'Edit Draft'}
                   </Button>
                   {!isNudging && (
-                    <Button size="sm" variant="ghost" onClick={() => setIsNudging(true)} disabled={loading}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setIsNudging(true)}
+                      disabled={loading || unsavedEdit}
+                      aria-describedby={unsavedEdit ? nudgeBlockedId : undefined}
+                    >
                       Nudge (Redraft)
                     </Button>
                   )}
                 </div>
+                {/* A nudge replaces the draft and the edit box's text */}
+                {unsavedEdit && (
+                  <p id={nudgeBlockedId} className="ev-note ev-warn" style={{ margin: 0 }}>
+                    A nudge replaces the draft. Save or cancel your edit first.
+                  </p>
+                )}
 
                 {isNudging && (
                   <div className="rq-row">
@@ -574,7 +591,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                       value={nudgeInstruction}
                       onChange={(e) => setNudgeInstruction(e.target.value)}
                     />
-                    <Button size="sm" onClick={handleNudge} disabled={loading}>
+                    <Button
+                      size="sm"
+                      onClick={handleNudge}
+                      disabled={loading || unsavedEdit}
+                      aria-describedby={unsavedEdit ? nudgeBlockedId : undefined}
+                    >
                       Apply Nudge
                     </Button>
                     <Button
@@ -602,10 +624,20 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                     value={skipReason}
                     onChange={(e) => setSkipReason(e.target.value)}
                   />
-                  <Button variant="ghost" onClick={handleSkip} disabled={loading}>
+                  <Button
+                    variant="ghost"
+                    onClick={handleSkip}
+                    disabled={loading}
+                    aria-describedby={unsavedEdit ? skipDiscardsId : undefined}
+                  >
                     Skip
                   </Button>
                 </div>
+                {unsavedEdit && (
+                  <p id={skipDiscardsId} className="ev-note" style={{ margin: 0 }}>
+                    Skipping discards your unsaved edit.
+                  </p>
+                )}
               </div>
             </section>
           )}

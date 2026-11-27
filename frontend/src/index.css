@@ -121,8 +121,8 @@ body { min-height: 100vh; }
 }
 
 .rq-card:hover { border-color: var(--op-dust); background-color: var(--op-raised); }
-.rq-card--skipped { opacity: 0.78; }
-.rq-card--skipped:hover { opacity: 1; }
+/* Skipped: a dashed plate, not lower opacity (that took muted text below AA) */
+.rq-card--skipped { border-style: dashed; }
 
 .rq-card__top {
   display: flex;

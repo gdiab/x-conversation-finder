@@ -819,16 +819,61 @@ describe('ReviewCard: collapsed card and detail view (issue #50)', () => {
     expect(screen.getByRole('button', { name: 'Post Anyway (Override)' })).toBeInTheDocument();
   });
 
-  it('shows no author on the collapsed card of a removed post (issue #35)', () => {
+  it('shows no stale post text or author for a removed post, collapsed or open (issues #9, #35)', async () => {
+    const user = userEvent.setup();
     const card = makeCard({ status: 'skipped' });
     const { username, name } = card.post.author!;
-    card.post = { ...card.post, text: '[removed - post deleted]', text_removed: true };
+    // A stale response: the removal is recorded but the old text and author are still there
+    card.post = { ...card.post, text: 'Distinctive stale synthetic post text.', text_removed: true };
     rtlRender(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
+    const assertNothingStale = () => {
+      expect(document.body).not.toHaveTextContent('Distinctive stale synthetic post text.');
+      expect(document.body).not.toHaveTextContent(username);
+      expect(document.body).not.toHaveTextContent(name);
+    };
     expect(screen.getByRole('heading', { name: 'Review' })).toBeInTheDocument();
     expect(screen.getByText('Post removed')).toBeInTheDocument();
-    expect(screen.queryByText('[removed - post deleted]')).not.toBeInTheDocument();
-    expect(screen.queryByText(new RegExp(username))).not.toBeInTheDocument();
-    expect(screen.queryByText(new RegExp(name))).not.toBeInTheDocument();
+    assertNothingStale();
+
+    await user.click(openButton());
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    assertNothingStale();
+  });
+
+  it('does not let a nudge replace an unsaved edit, and says why', async () => {
+    const user = userEvent.setup();
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.type(screen.getByLabelText('Edited draft'), ' plus my words');
+
+    const apply = screen.getByRole('button', { name: 'Apply Nudge' });
+    expect(apply).toBeDisabled();
+    expect(apply).toHaveAccessibleDescription('A nudge replaces the draft. Save or cancel your edit first.');
+    expect(screen.getByRole('button', { name: 'Skip' })).toHaveAccessibleDescription('Skipping discards your unsaved edit.');
+    expect(nudgeMock).not.toHaveBeenCalled();
+  });
+
+  it('does not take typing in the edit box while the save is on its way', async () => {
+    const user = userEvent.setup();
+    let resolve: (v: string) => void = () => {};
+    editMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const card = makeCard();
+    rtlRender(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    const box = screen.getByLabelText('Edited draft');
+    await user.type(box, ' saved part');
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+    expect(box).toHaveAttribute('readonly');
+    await user.type(box, ' lost part');
+    expect(box).toHaveValue(`${card.evidence.draft!.text} saved part`);
+
+    await act(async () => resolve('ok'));
   });
 });
