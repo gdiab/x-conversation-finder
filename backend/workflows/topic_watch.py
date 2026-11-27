@@ -16,6 +16,7 @@ import asyncio
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 with workflow.unsafe.imports_passed_through():
     from backend.activities import SearchRecentInput, SearchRecentOutput
@@ -190,10 +191,11 @@ class TopicWatchWorkflow:
                             parent_close_policy=ParentClosePolicy.ABANDON,
                         )
                         workflow.logger.info(f"Started Review {review_id}")
-                    except workflow.exceptions.WorkflowAlreadyStartedError:
+                    except WorkflowAlreadyStartedError:
+                        # Review ids are per account and post, so another
+                        # watch on this account may have started this
+                        # post's Review already. That Review stands.
                         workflow.logger.info(f"Review {review_id} already exists, skipping")
-                    except workflow.exceptions.ChildWorkflowError as e:
-                        workflow.logger.error(f"Failed to start Review: {e}")
                     
                     if post_id not in seen_post_ids:
                         seen_post_ids.append(post_id)
