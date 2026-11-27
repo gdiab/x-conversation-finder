@@ -855,7 +855,26 @@ describe('ReviewCard: collapsed card and detail view (issue #50)', () => {
     expect(apply).toBeDisabled();
     expect(apply).toHaveAccessibleDescription('A nudge replaces the draft. Save or cancel your edit first.');
     expect(screen.getByRole('button', { name: 'Skip' })).toHaveAccessibleDescription('Skipping discards your unsaved edit.');
+    const approve = screen.getByRole('button', { name: 'Approve' });
+    expect(approve).toBeDisabled();
+    expect(approve).toHaveAccessibleDescription('Approve records the saved draft. Save or cancel your edit first.');
     expect(nudgeMock).not.toHaveBeenCalled();
+  });
+
+  it('does not take typing in the nudge field while the nudge is on its way', async () => {
+    const user = userEvent.setup();
+    let resolve: (v: string) => void = () => {};
+    nudgeMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    const field = screen.getByPlaceholderText(/Make it shorter/);
+    await user.type(field, 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Apply Nudge' }));
+    expect(field).toHaveAttribute('readonly');
+
+    await act(async () => resolve('New synthetic draft.'));
   });
 
   it('does not take typing in the edit box while the save is on its way', async () => {

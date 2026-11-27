@@ -335,6 +335,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const unsavedNudge = isNudging && nudgeInstruction.trim() !== '';
   const nudgeBlockedId = `${card.workflow_id}-nudge-blocked`;
   const skipDiscardsId = `${card.workflow_id}-skip-discards`;
+  const approveBlockedId = `${card.workflow_id}-approve-blocked`;
   const needsAttention = showPostAnywayConfirm || notice != null || (error != null && !textRemoved);
 
   const counts = (
@@ -508,10 +509,20 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                       value={postedUrl}
                       onChange={(e) => setPostedUrl(e.target.value)}
                     />
-                    <Button onClick={() => handleApprove(false)} disabled={loading}>
+                    <Button
+                      onClick={() => handleApprove(false)}
+                      disabled={loading || unsavedEdit}
+                      aria-describedby={unsavedEdit ? approveBlockedId : undefined}
+                    >
                       Approve
                     </Button>
                   </div>
+                  {/* Approve records the saved draft, not the text in the edit box */}
+                  {unsavedEdit && (
+                    <p id={approveBlockedId} className="ev-note ev-warn">
+                      Approve records the saved draft. Save or cancel your edit first.
+                    </p>
+                  )}
 
                   {/* Post Anyway confirmation (ADR-0006 Amendment E + QA R11 B2/C) */}
                   {showPostAnywayConfirm && (
@@ -590,6 +601,8 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
                       placeholder="e.g., 'Make it shorter' or 'More technical'"
                       value={nudgeInstruction}
                       onChange={(e) => setNudgeInstruction(e.target.value)}
+                      // A successful nudge empties this field: no typing while it runs
+                      readOnly={loading}
                     />
                     <Button
                       size="sm"
