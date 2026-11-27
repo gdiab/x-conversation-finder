@@ -68,7 +68,7 @@ def empty_budget_tables():
 
 RESEARCH_JSON = {
     "post_kind": "question",
-    "brief_problem_span": None,
+    "post_problem_quote": None,
     "in_others_thread": False,
     "is_vendor_post": False,
     "matched_topic": "reliability",
