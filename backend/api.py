@@ -52,6 +52,7 @@ from backend.database import init_db
 from backend.gate.product_link import product_url_error
 from backend.gate.written_check import MAX_FEATURE_TERM_WORDS, clean_feature_terms, feature_term_words
 from backend.budget import get_today_budget
+from backend.skipped_accounts import get_skipped_accounts, normalize_handles, set_skipped_accounts
 from backend.adapters.fake_brief_suggester import FakeBriefSuggester
 from backend.adapters.http_page_fetcher import HttpPageFetcher
 from backend.adapters.plain_brief_suggester import PlainBriefSuggester
@@ -683,6 +684,33 @@ async def confirm_posted_review(workflow_id: str, request: ConfirmPostedRequest)
 async def get_budget():
     """Get today's budget usage for the spend meter."""
     return get_today_budget()
+
+
+# --- Skipped accounts (issue #48) ---
+# One list for every watch. Each watch reads it at its next search
+# (backend/skipped_accounts.py), so saving it needs no watch restart.
+
+class SkippedAccountsRequest(BaseModel):
+    """The whole list; it replaces the stored one."""
+    handles: List[str]
+
+    @field_validator("handles")
+    @classmethod
+    def handles_are_x_handles(cls, value: List[str]) -> List[str]:
+        return normalize_handles(value)
+
+
+@app.get("/api/settings/skipped-accounts")
+async def get_skipped_accounts_setting():
+    """The skipped accounts, lowercase and without "@"."""
+    return {"handles": await asyncio.to_thread(get_skipped_accounts)}
+
+
+@app.put("/api/settings/skipped-accounts")
+async def put_skipped_accounts_setting(request: SkippedAccountsRequest):
+    """Replace the list; returns it as stored. A value that is not an X
+    handle is 422 "invalid_request" with the reason in "errors"."""
+    return {"handles": await asyncio.to_thread(set_skipped_accounts, request.handles)}
 
 
 # --- Brief suggestions from the product page (issue #42) ---

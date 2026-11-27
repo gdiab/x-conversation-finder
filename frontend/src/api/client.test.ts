@@ -4,10 +4,12 @@ import {
   confirmPostedReview,
   editReview,
   generateRequestId,
+  getSkippedAccounts,
   listReviews,
   nudgeReview,
   PostRemovedError,
   ReviewApiError,
+  saveSkippedAccounts,
   skipReview,
   startWatch,
 } from './client';
@@ -237,5 +239,39 @@ describe('startWatch (issue #12: product name, aliases and key features)', () =>
     fetchMock.mockResolvedValue(new Response('<html>', { status: 502, statusText: 'Bad Gateway' }));
 
     await expect(startWatch(REQUEST)).rejects.toThrow('Failed to start watch: Bad Gateway');
+  });
+});
+
+describe('skipped accounts (issue #48)', () => {
+  it('loads the list', async () => {
+    fetchMock.mockResolvedValue(new Response('{"handles":["grok"]}', { status: 200 }));
+
+    expect(await getSkippedAccounts()).toEqual(['grok']);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/settings/skipped-accounts');
+  });
+
+  it('replaces the whole list with a PUT and returns it as stored', async () => {
+    fetchMock.mockResolvedValue(new Response('{"handles":["grok","openai"]}', { status: 200 }));
+
+    expect(await saveSkippedAccounts(['@Grok', 'openai'])).toEqual(['grok', 'openai']);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/settings/skipped-accounts');
+    expect(init?.method).toBe('PUT');
+    expect(JSON.parse(init?.body as string)).toEqual({ handles: ['@Grok', 'openai'] });
+  });
+
+  it('reports why a handle was refused', async () => {
+    fetchMock.mockResolvedValue(new Response(
+      JSON.stringify({
+        code: 'invalid_request',
+        detail: 'Invalid request body',
+        errors: [{ loc: ['body', 'handles'], msg: 'Value error, "a b" is not an X handle (1-15 letters, digits or underscores)' }],
+      }),
+      { status: 422, statusText: 'Unprocessable Entity' },
+    ));
+
+    await expect(saveSkippedAccounts(['a b'])).rejects.toThrow(
+      'Failed to save skipped accounts: handles: "a b" is not an X handle (1-15 letters, digits or underscores)',
+    );
   });
 });

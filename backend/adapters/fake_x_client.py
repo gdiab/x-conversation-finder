@@ -97,9 +97,19 @@ class FakeXClient(XClientPort):
                 if p.conversation_id == conversation_id
             ]
         else:
+            # Issue #48: like X, a `-from:<handle>` term leaves out that
+            # author's posts; the parentheses around the founder's query
+            # are not part of its terms
+            terms, excluded = [], set()
+            for term in query.replace("(", " ").replace(")", " ").split():
+                if term.lower().startswith("-from:"):
+                    excluded.add(term[len("-from:"):].lower())
+                else:
+                    terms.append(term.lower())
             matching = [
                 p for p in self.posts_database
-                if any(term.lower() in p.text.lower() for term in query.split())
+                if any(term in p.text.lower() for term in terms)
+                and p.author.username.lower() not in excluded
             ]
         
         if since_id:

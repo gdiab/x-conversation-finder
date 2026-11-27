@@ -5,6 +5,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { ReviewCard } from './components/ReviewCard';
 import { StartWatchForm } from './components/StartWatchForm';
+import { SkippedAccounts } from './components/SkippedAccounts';
 import { listReviews } from './api/client';
 import type { ReviewCard as ReviewCardType } from './api/client';
 
@@ -58,6 +59,8 @@ function App() {
       </header>
 
       <StartWatchForm onSuccess={loadReviews} />
+
+      <SkippedAccounts />
 
       <div style={{ marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2>Review Queue ({activeCards.length})</h2>

@@ -7,7 +7,8 @@ import { makeCard, makeCardBy, makeEvidence } from './test/fixtures';
 
 vi.mock('./api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api/client')>();
-  return { ...actual, listReviews: vi.fn(), startWatch: vi.fn() };
+  // issue #48: the Skipped accounts box loads its list on mount
+  return { ...actual, listReviews: vi.fn(), startWatch: vi.fn(), getSkippedAccounts: vi.fn(async () => []) };
 });
 
 const listReviewsMock = vi.mocked(listReviews);

@@ -240,6 +240,31 @@ export function generateRequestId(): string {
   return `req_${timestamp}_${random}`;
 }
 
+/**
+ * Why the API refused a request: its "detail", or, for fields it refused (a
+ * missing product name, too many aliases), the reasons in "errors".
+ */
+async function refusalDetail(response: Response): Promise<string> {
+  let detail = response.statusText || `HTTP ${response.status}`;
+  try {
+    const body = await response.json();
+    if (typeof body?.detail === 'string' && body.detail) detail = body.detail;
+    // Each entry: {loc: ["body", "product_aliases"], msg: "Value error, At most 10 aliases", ...}
+    const reasons = (Array.isArray(body?.errors) ? body.errors : [])
+      .map((e: { loc?: unknown; msg?: unknown }) => {
+        if (typeof e?.msg !== 'string') return '';
+        const field = Array.isArray(e.loc) ? e.loc.filter((part) => typeof part === 'string' && part !== 'body').pop() : null;
+        const msg = e.msg.replace(/^Value error, /, '');
+        return field ? `${field}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+    if (reasons.length > 0) detail = reasons.join('; ');
+  } catch {
+    // Not JSON: keep the status text
+  }
+  return detail;
+}
+
 export async function startWatch(request: StartWatchRequest): Promise<{ workflow_id: string; message: string }> {
   const response = await fetch(`${API_BASE}/watch/start`, {
     method: 'POST',
@@ -248,26 +273,7 @@ export async function startWatch(request: StartWatchRequest): Promise<{ workflow
   });
   
   if (!response.ok) {
-    // The API explains a refused request in "detail", and for a field it
-    // refused (a missing product name, too many aliases) in "errors"
-    let detail = response.statusText;
-    try {
-      const body = await response.json();
-      if (typeof body?.detail === 'string' && body.detail) detail = body.detail;
-      // Each entry: {loc: ["body", "product_aliases"], msg: "Value error, At most 10 aliases", ...}
-      const reasons = (Array.isArray(body?.errors) ? body.errors : [])
-        .map((e: { loc?: unknown; msg?: unknown }) => {
-          if (typeof e?.msg !== 'string') return '';
-          const field = Array.isArray(e.loc) ? e.loc.filter((part) => typeof part === 'string' && part !== 'body').pop() : null;
-          const msg = e.msg.replace(/^Value error, /, '');
-          return field ? `${field}: ${msg}` : msg;
-        })
-        .filter(Boolean);
-      if (reasons.length > 0) detail = reasons.join('; ');
-    } catch {
-      // Not JSON: keep the status text
-    }
-    throw new Error(`Failed to start watch: ${detail}`);
+    throw new Error(`Failed to start watch: ${await refusalDetail(response)}`);
   }
   
   return response.json();
@@ -543,4 +549,29 @@ export async function suggestBriefAdditions(request: {
     throw new BriefSuggestionError(detail, code);
   }
   return response.json();
+}
+
+// --- Skipped accounts (issue #48) ---
+// One list for every watch: X handles whose posts no watch reviews. Each
+// watch reads it at its next search.
+
+export async function getSkippedAccounts(): Promise<string[]> {
+  const response = await fetch(`${API_BASE}/settings/skipped-accounts`);
+  if (!response.ok) {
+    throw new Error(`Failed to load skipped accounts: ${await refusalDetail(response)}`);
+  }
+  return (await response.json()).handles;
+}
+
+/** Replace the list; returns it as stored (lowercase, without "@"). */
+export async function saveSkippedAccounts(handles: string[]): Promise<string[]> {
+  const response = await fetch(`${API_BASE}/settings/skipped-accounts`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ handles }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to save skipped accounts: ${await refusalDetail(response)}`);
+  }
+  return (await response.json()).handles;
 }
