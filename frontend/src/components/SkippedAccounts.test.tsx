@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseHandles, SkippedAccounts } from './SkippedAccounts';
@@ -87,5 +87,41 @@ describe('SkippedAccounts (issue #48)', () => {
 
     expect(await screen.findByRole('button', { name: 'Remove @grok' })).toBeInTheDocument();
     expect(saveMock).not.toHaveBeenCalled();
+  });
+
+  it('ignores a load answered after a save, so the next save keeps the saved handle', async () => {
+    const user = userEvent.setup();
+    // Strict Mode mounts twice: the second load is answered, the first only after a save
+    let answerLateLoad: (handles: string[]) => void = () => {};
+    getMock.mockImplementationOnce(() => new Promise((resolve) => { answerLateLoad = resolve; }));
+    getMock.mockResolvedValueOnce([]);
+    render(<SkippedAccounts />, { reactStrictMode: true });
+
+    await user.type(await screen.findByLabelText('Add account:'), 'grok');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    expect(await screen.findByRole('button', { name: 'Remove @grok' })).toBeInTheDocument();
+
+    await act(async () => answerLateLoad([]));
+    expect(screen.getByRole('button', { name: 'Remove @grok' })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('Add account:'), 'openai');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    expect(saveMock).toHaveBeenLastCalledWith(['grok', 'openai']);
+  });
+
+  it('accepts no typing while a save is pending', async () => {
+    const user = userEvent.setup();
+    getMock.mockResolvedValue([]);
+    let finishSave: (handles: string[]) => void = () => {};
+    saveMock.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+    render(<SkippedAccounts />);
+
+    await user.type(await screen.findByLabelText('Add account:'), 'grok');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(screen.getByLabelText('Add account:')).toBeDisabled();
+    await act(async () => finishSave(['grok']));
+    expect(screen.getByLabelText('Add account:')).toBeEnabled();
+    expect(screen.getByLabelText('Add account:')).toHaveValue('');
   });
 });

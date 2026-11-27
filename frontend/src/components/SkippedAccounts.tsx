@@ -7,7 +7,7 @@
  * not change.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getSkippedAccounts, saveSkippedAccounts } from '../api/client';
 
 /** The handles typed in the field: split at commas and spaces, "@" kept for the API to remove. */
@@ -22,13 +22,22 @@ export function SkippedAccounts() {
   const [entry, setEntry] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Each load and save takes a number; only the latest request's answer may
+  // set the list. A load answered after a save (Strict Mode mounts twice)
+  // would otherwise put back the list from before the save, and the next
+  // save would store that older list.
+  const latest = useRef(0);
 
   const load = async () => {
+    const request = ++latest.current;
     setError(null);
     try {
-      setHandles(await getSkippedAccounts());
+      const stored = await getSkippedAccounts();
+      if (request === latest.current) setHandles(stored);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load skipped accounts');
+      if (request === latest.current) {
+        setError(err instanceof Error ? err.message : 'Failed to load skipped accounts');
+      }
     }
   };
 
@@ -37,10 +46,12 @@ export function SkippedAccounts() {
   }, []);
 
   const save = async (next: string[]): Promise<boolean> => {
+    const request = ++latest.current;
     setSaving(true);
     setError(null);
     try {
-      setHandles(await saveSkippedAccounts(next));
+      const stored = await saveSkippedAccounts(next);
+      if (request === latest.current) setHandles(stored);
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save skipped accounts');
@@ -116,6 +127,9 @@ export function SkippedAccounts() {
               type="text"
               value={entry}
               onChange={(e) => setEntry(e.target.value)}
+              // a successful save clears the field, so nothing is typed
+              // into it while one is pending
+              disabled={saving}
               placeholder="e.g., @grok"
               style={{ flex: 1, padding: '8px' }}
             />

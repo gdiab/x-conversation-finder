@@ -89,28 +89,29 @@ class FakeXClient(XClientPort):
         """
         self.call_count += 1
         
+        # Issue #48: like X, a `-from:<handle>` term leaves out that
+        # author's posts; the parentheses around the founder's query are
+        # not part of its terms
+        terms, excluded = [], set()
+        for term in query.replace("(", " ").replace(")", " ").split():
+            if term.lower().startswith("-from:"):
+                excluded.add(term[len("-from:"):].lower())
+            else:
+                terms.append(term)
+
         # Handle conversation_id:X query syntax
-        if query.startswith("conversation_id:"):
-            conversation_id = query.split(":", 1)[1].strip()
+        if len(terms) == 1 and terms[0].startswith("conversation_id:"):
+            conversation_id = terms[0].split(":", 1)[1].strip()
             matching = [
                 p for p in self.posts_database
                 if p.conversation_id == conversation_id
             ]
         else:
-            # Issue #48: like X, a `-from:<handle>` term leaves out that
-            # author's posts; the parentheses around the founder's query
-            # are not part of its terms
-            terms, excluded = [], set()
-            for term in query.replace("(", " ").replace(")", " ").split():
-                if term.lower().startswith("-from:"):
-                    excluded.add(term[len("-from:"):].lower())
-                else:
-                    terms.append(term.lower())
             matching = [
                 p for p in self.posts_database
-                if any(term in p.text.lower() for term in terms)
-                and p.author.username.lower() not in excluded
+                if any(term.lower() in p.text.lower() for term in terms)
             ]
+        matching = [p for p in matching if p.author.username.lower() not in excluded]
         
         if since_id:
             matching = [

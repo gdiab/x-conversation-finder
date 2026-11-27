@@ -244,6 +244,20 @@ async def test_the_fake_client_honors_from_operators_as_x_does():
     assert result.post_ids == ["9001"]
 
 
+@pytest.mark.asyncio
+async def test_the_fake_client_still_reads_a_wrapped_conversation_query():
+    client = FakeXClient()
+    client.posts_database = [
+        dataclasses.replace(_post("9002", "grok"), conversation_id="777"),
+        dataclasses.replace(_post("9001", "synthetic_user"), conversation_id="777"),
+        _post("9000", "other_user"),
+    ]
+
+    result = await client.search_recent("(conversation_id:777) -from:grok")
+
+    assert [p.id for p in result.posts] == ["9001"]
+
+
 # --- API ---
 
 @pytest.fixture
