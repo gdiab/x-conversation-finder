@@ -402,3 +402,63 @@ async def test_direct_start_with_zero_poll_without_flag_clamped():
 
             # Terminate to end test
             await handle.terminate()
+
+
+@pytest.mark.asyncio
+async def test_second_watch_skips_post_another_watch_already_reviews(make_topic_watch_input, x_activities, reply_activities):
+    """Two watches on one account find the same post: the second skips its Review.
+
+    Review ids are per account and post, so the second start fails with
+    "already started". That must be caught, not wedge the watch (the
+    multi-agent-orchestration watch was stuck on this for 12h, 2026-11-27).
+    """
+    import asyncio
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="test",
+            workflows=[TopicWatchWorkflow, ReviewWorkflow],
+            activities=[
+                x_activities.search_recent,
+                x_activities.lookup_post,
+                x_activities.check_followup,
+                reply_activities.research_post,
+                reply_activities.plan_reply,
+                reply_activities.draft_reply,
+                claim_gate,
+                store_card,
+                update_card,
+            ],
+        ):
+            first = await env.client.start_workflow(
+                TopicWatchWorkflow.run,
+                make_topic_watch_input(topic="first"),
+                id="watch:test:first",
+                task_queue="test",
+            )
+            await env.sleep(timedelta(minutes=10))
+            second = await env.client.start_workflow(
+                TopicWatchWorkflow.run,
+                make_topic_watch_input(topic="second"),
+                id="watch:test:second",
+                task_queue="test",
+            )
+            await env.sleep(timedelta(minutes=10))
+
+            for handle in (first, second):
+                await handle.signal("stop")
+                assert await asyncio.wait_for(handle.result(), timeout=30) == "stopped"
+
+            history = await second.fetch_history()
+            started = [
+                e.start_child_workflow_execution_failed_event_attributes.workflow_id
+                for e in history.events
+                if e.HasField("start_child_workflow_execution_failed_event_attributes")
+            ]
+            failed_tasks = [
+                e for e in history.events
+                if e.HasField("workflow_task_failed_event_attributes")
+            ]
+            assert started, "the second watch should have hit an existing Review"
+            assert failed_tasks == []
