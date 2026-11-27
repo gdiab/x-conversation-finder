@@ -1,8 +1,8 @@
 """Reach score of a review card (issue #49; rule in backend/config/reach.py).
 
 Pure functions over the stored post dict. Computed by the store_card activity
-and by the startup backfill (database.init_db), never in workflow code, so
-no workflow history changes.
+and by the backfill at worker start (backend.worker.prepare_database), never
+in workflow code, so no workflow history changes.
 """
 
 import math

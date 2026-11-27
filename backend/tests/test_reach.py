@@ -161,7 +161,7 @@ def test_the_highlight_level_is_inclusive():
     [
         # Values worked by hand from the documented formula:
         # engagement_score = log10(1 + e) / log10(101), audience = (log10(f) - 2) / 4
-        (9, 0, 0, 0, 0, 0.4989, 0.0, 0.3243),        # e=10: log10(10)/log10(101)
+        (9, 0, 0, 0, 0, 0.4989, 0.0, 0.3243),        # e=9: log10(10)/log10(101)
         (0, 0, 0, 0, 10_000, 0.0, 0.5, 0.175),       # log10(1e4) = 4
         (0, 0, 0, 0, 1_000, 0.0, 0.25, 0.0875),
         (100, 0, 0, 0, 1_000_000, 1.0, 1.0, 1.0),
@@ -463,6 +463,32 @@ def test_a_row_holding_reach_on_a_removed_post_is_not_returned():
         db.close()
 
 
+def test_the_single_card_response_carries_the_same_reach_fields_as_the_list(sample_post):
+    """GET /api/reviews/{id} for a text-free Review: text_free_card fills the
+    card from the stored row, then apply_stored_removal (backend/api.py)."""
+    from backend.activities.store_activities import apply_stored_removal, text_free_card
+
+    card = _card(sample_post)
+    _store(card)
+    _insert_legacy_row("legacy:no_metrics", {"id": "p9", "text": "Synthetic.", "author": {"followers_count": 10}})
+    listed = {c["workflow_id"]: c for c in get_all_cards()}
+
+    for workflow_id in (card.workflow_id, "legacy:no_metrics"):
+        state = {"text_free": True, "post_id": "x", "workflow_id": workflow_id, "status": "pending"}
+        single = apply_stored_removal(workflow_id, text_free_card(workflow_id, state))
+        for key in ("reach", "reach_highlighted", "queue_priority"):
+            assert single[key] == listed[workflow_id][key], (workflow_id, key)
+    assert listed["legacy:no_metrics"]["reach"] is None
+
+    # A removal recorded between the stored-card read and the response
+    state = {"text_free": True, "post_id": "x", "workflow_id": card.workflow_id, "status": "pending"}
+    read = text_free_card(card.workflow_id, state)
+    _delete_post_text_sync(DeletePostTextInput(workflow_id=card.workflow_id, idempotency_key="r", post_id=card.post.id))
+    single = apply_stored_removal(card.workflow_id, read)
+    assert single["reach"] is None and single["reach_highlighted"] is False
+    assert single["queue_priority"] == 0.7
+
+
 # --- the migration -----------------------------------------------------------
 
 
@@ -551,3 +577,51 @@ def test_the_migration_reraises_an_error_that_is_not_the_race(tmp_path):
         conn.commit()
     with pytest.raises(OperationalError):
         database._migrate_add_reach(engine)
+
+
+@pytest.mark.parametrize("first", ["api", "worker"])
+def test_upgrading_a_populated_database_in_either_start_order(tmp_path, monkeypatch, first):
+    """A database written before issue #49 (no reach column, real cards, one
+    removed): after the API (init_db) and the worker (prepare_database) both
+    start, in either order, the live card is scored and the removed one is not."""
+    import json
+    import backend.database as database
+    from backend.config import get_settings
+    from backend.database import init_db
+    from backend.worker import prepare_database
+
+    path = _old_schema_db(tmp_path)
+    engine = create_engine(f"sqlite:///{path}")
+    live = _post_data(likes=120, replies=23, reposts=3, followers=119_098)
+    removed = {"id": "p3", "text": "[removed]", "text_removed": True,
+               "like_count": 9, "reply_count": 0, "repost_count": 0, "quote_count": 0}
+    with engine.connect() as conn:
+        for workflow_id, post in (("old:live", live), ("old:removed", removed)):
+            conn.execute(
+                text("INSERT INTO review_cards (workflow_id, post_data, evidence_data, status, created_at, updated_at) "
+                     "VALUES (:w, :p, :e, 'pending', 't', 't')"),
+                {"w": workflow_id, "p": json.dumps(post), "e": json.dumps({"confidence_score": 0.74})},
+            )
+        conn.commit()
+    engine.dispose()
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{path}")
+    get_settings.cache_clear()
+
+    def start(process):
+        # Each process has its own engine
+        if database._engine is not None:
+            database._engine.dispose()
+        database._engine = None
+        database._SessionLocal = None
+        init_db() if process == "api" else prepare_database()
+
+    for process in ((first, "worker" if first == "api" else "api")):
+        start(process)
+
+    scored = get_stored_card("old:live")
+    assert scored["reach"] == compute_reach(live)
+    assert scored["reach_highlighted"] is True
+    assert scored["queue_priority"] == pytest.approx(0.74 + REACH_SORT_WEIGHT * scored["reach"]["score"])
+    gone = get_stored_card("old:removed")
+    assert gone["reach"] is None and gone["queue_priority"] == 0.74
