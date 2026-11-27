@@ -98,4 +98,5 @@ def queue_priority(confidence: Any, reach: Any) -> float:
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or math.isnan(confidence):
         confidence = 0.0
     score = stored_reach_score(reach)
-    return round(float(confidence) + (REACH_SORT_WEIGHT * score if score is not None else 0.0), 4)
+    # Not rounded: two cards whose stored scores differ by 0.0001 must not tie
+    return float(confidence) + (REACH_SORT_WEIGHT * score if score is not None else 0.0)

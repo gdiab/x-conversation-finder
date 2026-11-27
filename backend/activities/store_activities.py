@@ -356,7 +356,20 @@ def redact_removed_card(card: Dict[str, Any]) -> Dict[str, Any]:
     ):
         if key in card:
             redacted[key] = redact(card[key])
+    if "reach" in card:
+        # issue #49: the reach inputs hold the author's follower count; a
+        # card read just before the removal still carries them
+        redacted.update(_reach_fields(None, (redacted.get("evidence") or {}).get("confidence_score")))
     return redacted
+
+
+def _reach_fields(reach: Any, confidence: Any) -> Dict[str, Any]:
+    """issue #49: a card's reach fields as the API returns them."""
+    return {
+        "reach": reach,
+        "reach_highlighted": reach_highlighted(reach),
+        "queue_priority": queue_priority(confidence, reach),
+    }
 from backend.database import get_db, ReviewCardDB
 from backend.review_docs import text_free_activity as _text_free_activity
 
@@ -1321,9 +1334,7 @@ def _card_dict(card: ReviewCardDB) -> Dict[str, Any]:
         "post_anyway_failing_sentences": card.post_anyway_failing_sentences if card.post_anyway_failing_sentences else None,
         # issue #49: the stored reach record (None without one), whether it
         # is highlighted, and the pending queue's sort key
-        "reach": reach,
-        "reach_highlighted": reach_highlighted(reach),
-        "queue_priority": queue_priority(confidence, reach),
+        **_reach_fields(reach, confidence),
     }
 
 
@@ -1340,7 +1351,7 @@ def backfill_reach() -> int:
     """Store a reach score on every card without one that has the metrics
     (issue #49: cards stored before reach existed, or by a worker still
     running older code). Cards that record a removal or lack a metric stay
-    without. Idempotent; runs at startup (database.init_db). Returns how many
+    without. Idempotent; runs at worker start (worker.prepare_database). Returns how many
     cards it scored."""
     scored = 0
     db = get_db()

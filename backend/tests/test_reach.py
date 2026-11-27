@@ -156,6 +156,32 @@ def test_the_highlight_level_is_inclusive():
         assert not reach_highlighted(missing)
 
 
+@pytest.mark.parametrize(
+    "likes,replies,reposts,quotes,followers,engagement_score,audience_score,score",
+    [
+        # Values worked by hand from the documented formula:
+        # engagement_score = log10(1 + e) / log10(101), audience = (log10(f) - 2) / 4
+        (9, 0, 0, 0, 0, 0.4989, 0.0, 0.3243),        # e=10: log10(10)/log10(101)
+        (0, 0, 0, 0, 10_000, 0.0, 0.5, 0.175),       # log10(1e4) = 4
+        (0, 0, 0, 0, 1_000, 0.0, 0.25, 0.0875),
+        (100, 0, 0, 0, 1_000_000, 1.0, 1.0, 1.0),
+        (2, 4, 0, 0, 2109, 0.5195, 0.3311, 0.4536),  # a pending card on 2026-11-27
+        (18, 0, 0, 0, 15_000, 0.6380, 0.5440, 0.6051),  # just above the highlight level
+        (17, 0, 0, 0, 15_000, 0.6263, 0.5440, 0.5975),  # just below it
+    ],
+)
+def test_known_values_of_the_formula(likes, replies, reposts, quotes, followers, engagement_score, audience_score, score):
+    reach = compute_reach(_post_data(likes, replies, reposts, quotes, followers))
+    assert reach["engagement_score"] == pytest.approx(engagement_score, abs=1e-4)
+    assert reach["audience_score"] == pytest.approx(audience_score, abs=1e-4)
+    assert reach["score"] == pytest.approx(score, abs=2e-4)
+
+
+def test_the_highlight_boundary_of_the_known_values():
+    assert reach_highlighted(compute_reach(_post_data(likes=18, followers=15_000)))
+    assert not reach_highlighted(compute_reach(_post_data(likes=17, followers=15_000)))
+
+
 # --- the queue order ---------------------------------------------------------
 
 
@@ -167,6 +193,14 @@ def test_a_card_without_reach_sorts_by_confidence_alone():
     assert queue_priority(0.7, None) == 0.7
     assert queue_priority(0.7, {"score": None}) == 0.7
     assert queue_priority(None, None) == 0.0
+
+
+def test_scores_one_step_apart_do_not_tie():
+    # 15,000 and 15,020 followers store 0.1904 and 0.1905
+    low = compute_reach(_post_data(followers=15_000))
+    high = compute_reach(_post_data(followers=15_020))
+    assert low["score"] < high["score"]
+    assert queue_priority(0.7, low) < queue_priority(0.7, high)
 
 
 def test_reach_breaks_near_ties_but_cannot_overturn_a_large_confidence_gap():
@@ -292,6 +326,64 @@ def test_a_removal_drops_the_stored_reach(sample_post):
     assert get_stored_card(card.workflow_id)["reach"] is None
 
 
+def test_a_card_read_before_the_removal_is_returned_without_reach(sample_post):
+    """GET /api/reviews/{id} can read the stored card just before the worker
+    records the removal; apply_stored_removal then redacts that earlier copy."""
+    from backend.activities.store_activities import apply_stored_removal
+
+    card = _card(sample_post)
+    _store(card)
+    read_before = get_stored_card(card.workflow_id)
+    assert read_before["reach"]["inputs"]["followers_count"] == 5000
+
+    _delete_post_text_sync(DeletePostTextInput(workflow_id=card.workflow_id, idempotency_key="r", post_id=card.post.id))
+
+    returned = apply_stored_removal(card.workflow_id, read_before)
+    assert returned["post"]["text_removed"] is True
+    assert returned["reach"] is None and returned["reach_highlighted"] is False
+    assert returned["queue_priority"] == 0.7
+    assert "followers_count" not in str(returned)
+
+
+def test_redact_removed_card_leaves_a_card_without_reach_fields_alone():
+    """The workflow's get_card query has no reach fields; it stays that way."""
+    from backend.activities.store_activities import redact_removed_card
+
+    redacted = redact_removed_card({"post": _post_data(), "evidence": {"confidence_score": 0.7}, "skip_reason": None})
+    assert not {"reach", "reach_highlighted", "queue_priority"} & set(redacted)
+
+
+def test_the_backfill_waits_for_a_removal_holding_the_write_lock(test_db_isolation):
+    """A removal that holds SQLite's write lock commits first; the backfill
+    then sees the removed post and stores no follower count."""
+    import sqlite3
+    import threading
+    from backend.database import ReviewCardDB, get_db
+
+    _insert_legacy_row("legacy:race", _post_data(likes=40, followers=27_000))
+    remover = sqlite3.connect(test_db_isolation, timeout=10)
+    remover.execute("BEGIN IMMEDIATE")
+    remover.execute(
+        "UPDATE review_cards SET post_data = json_set(post_data, '$.text_removed', json('true')) "
+        "WHERE workflow_id = 'legacy:race'"
+    )
+    result = {}
+    worker = threading.Thread(target=lambda: result.setdefault("scored", backfill_reach()))
+    worker.start()
+    worker.join(0.5)
+    assert worker.is_alive(), "the backfill must wait for the removal's lock"
+    remover.commit()
+    remover.close()
+    worker.join(10)
+
+    assert result["scored"] == 0
+    db = get_db()
+    try:
+        assert db.get(ReviewCardDB, "legacy:race").reach is None
+    finally:
+        db.close()
+
+
 def _insert_legacy_row(workflow_id, post_data, confidence=0.6):
     from backend.database import ReviewCardDB, get_db
 
@@ -307,15 +399,21 @@ def _insert_legacy_row(workflow_id, post_data, confidence=0.6):
         db.close()
 
 
-def test_startup_backfills_cards_stored_before_reach_existed():
+def test_worker_start_backfills_cards_stored_before_reach_existed():
     from backend.database import init_db
+    from backend.worker import prepare_database
 
     _insert_legacy_row("legacy:scored", _post_data(likes=40, replies=5, followers=27_000))
     _insert_legacy_row("legacy:no_metrics", {"id": "p2", "text": "Synthetic.", "author": {"followers_count": 10}})
     _insert_legacy_row("legacy:removed", {"id": "p3", "text": "[removed]", "text_removed": True,
                                           "like_count": 9, "reply_count": 0, "repost_count": 0, "quote_count": 0})
 
+    # API start applies the removal rules but scores nothing: an older worker
+    # still running would not clear a score when it removes a post
     init_db()
+    assert get_stored_card("legacy:scored")["reach"] is None
+
+    assert prepare_database() == 1
 
     scored = get_stored_card("legacy:scored")
     assert scored["reach"] == compute_reach(_post_data(likes=40, replies=5, followers=27_000))

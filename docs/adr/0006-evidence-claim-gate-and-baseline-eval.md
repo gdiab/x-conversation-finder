@@ -262,4 +262,4 @@ The 2026-11-21 amendment deferred two options to allow more than verbatim quotes
 
 This does not reverse the rejected "engagement-only ranking" alternative above: no post is surfaced, kept or skipped for its engagement, and confidence still leads the order. The counts are from the moment of search; re-fetching them would cost X reads and is out of scope.
 
-**Not changed.** Workflows and their histories: reach is computed by the `store_card` activity and a startup backfill. Details: `docs/DEVELOPMENT.md`, "Reach score".
+**Not changed.** Workflows and their histories: reach is computed by the `store_card` activity and a backfill at worker start. Details: `docs/DEVELOPMENT.md`, "Reach score".

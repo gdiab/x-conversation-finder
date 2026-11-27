@@ -246,14 +246,9 @@ def init_db() -> bool:
     result = redact_recorded_removals()
     if result.changed:
         logger.info(f"Applied the removal rules to {result.changed} rows of removed posts")
-    # issue #49: score cards stored before reach existed (or by a worker
-    # still running older code); after the removal rules, so a removed post
-    # gets no score
-    from backend.activities.store_activities import backfill_reach
-
-    scored = backfill_reach()
-    if scored:
-        logger.info(f"Stored a reach score on {scored} cards")
+    # issue #49: the reach backfill runs at worker start (worker.prepare_database),
+    # not here: an older worker still running would not clear a backfilled
+    # score when it removes a post
     return result.checkpoint_pending
 
 
