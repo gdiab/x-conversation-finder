@@ -46,29 +46,23 @@ export function ReplyFitPanel({ replyFit, confidenceInputs }: ReplyFitPanelProps
     : 'unknown';
 
   return (
-    <div style={{
-      marginBottom: '12px',
-      padding: '12px',
-      border: '1px solid #ddd',
-      borderRadius: '4px',
-      fontSize: '14px',
-    }}>
+    <div className="ev-box">
       <strong>Should we reply?</strong>{' '}
       {replyFit.skip_rule ? (
-        <span style={{ color: '#c62828' }}>
+        <span className="ev-fail">
           No: {SKIP_RULE_LABELS[replyFit.skip_rule] ?? replyFit.skip_rule}
         </span>
       ) : (
-        <span style={{ color: '#2e7d32' }}>No skip rule fired</span>
+        <span className="ev-pass">No skip rule fired</span>
       )}
-      <ul style={{ margin: '8px 0 0', paddingLeft: '20px' }}>
+      <ul className="ev-list">
         <li>Post kind: {replyFit.post_kind ?? 'unknown'}</li>
         <li>
           Problem the brief solves:{' '}
           {replyFit.brief_problem_span ? <em>“{replyFit.brief_problem_span}”</em> : 'none'}
           {' '}({SPAN_CHECK_LABELS[replyFit.span_check] ?? replyFit.span_check})
           {replyFit.rejected_span && (
-            <div style={{ color: '#666', fontSize: '12px' }}>
+            <div className="ev-item__sub">
               Research proposed a span that was rejected (not post text): {replyFit.rejected_span}
             </div>
           )}
@@ -83,11 +77,11 @@ export function ReplyFitPanel({ replyFit, confidenceInputs }: ReplyFitPanelProps
           </li>
         )}
       </ul>
-      <details style={{ marginTop: '8px' }}>
-        <summary style={{ cursor: 'pointer', color: '#666' }}>
+      <details className="ev-details" style={{ marginTop: 'var(--op-space-2)' }}>
+        <summary>
           Confidence inputs (rule {replyFit.rule_version})
         </summary>
-        <ul style={{ margin: '4px 0 0', paddingLeft: '20px', color: '#666' }}>
+        <ul className="ev-list app-muted">
           {Object.entries(confidenceInputs).map(([key, value]) => (
             <li key={key}>
               {key}: {typeof value === 'number' ? value.toFixed(2) : String(value)}

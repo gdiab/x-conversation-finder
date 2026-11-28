@@ -1,14 +1,18 @@
 /**
- * ReviewCard component - shows a single review with evidence and draft.
+ * ReviewCard component - a collapsed card in the review queue (topic,
+ * confidence, the post and the draft) that opens everything else in a
+ * centered detail view (issue #50).
  */
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { Banner, Button, Dialog, Input, Tag, Textarea } from '@outpost/ds';
 import type { ReviewCard as ReviewCardType } from '../api/client';
 import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview, generateRequestId, PostRemovedError, ReviewApiError } from '../api/client';
 import { ReplyFitPanel } from './ReplyFitPanel';
 import { ReplyPlanPanel } from './ReplyPlanPanel';
 import { SentenceCheckList } from './SentenceCheckList';
-import { HighReachBadge, HIGH_REACH_BORDER, ReachCounts } from './ReachSummary';
+import { HighReachBadge, ReachCounts } from './ReachSummary';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -65,6 +69,19 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [isNudging, setIsNudging] = useState(false);
   const [showPostAnywayConfirm, setShowPostAnywayConfirm] = useState(false);
+  // issue #50: whether the detail view is open. Closing it only hides it:
+  // every field above stays, so nothing typed is lost.
+  const [open, setOpen] = useState(false);
+  const closeDetail = useCallback(() => setOpen(false), []);
+  // Focus goes back to the card that opened the view. Outpost's Dialog tries
+  // this while it is still the open modal, when the rest of the page is inert
+  // and focus() does nothing in a browser; this runs after it is gone.
+  const openButtonRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !open) openButtonRef.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
   
   // Stable request IDs - generated once per user action attempt, reused on retries
   const approveRequestId = useRef<string | null>(null);
@@ -306,822 +323,728 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     navigator.clipboard.writeText(text);
   };
 
-  return (
-    <div data-high-reach={card.reach_highlighted ? 'true' : undefined} style={{
-      // issue #49: highlight a card at or above the reach level
-      border: card.reach_highlighted ? `2px solid ${HIGH_REACH_BORDER}` : '1px solid #ccc',
-      borderRadius: '8px',
-      padding: '20px',
-      marginBottom: '20px',
-      backgroundColor: '#fff',
-    }}>
-      {/* Header */}
-      <div style={{ marginBottom: '20px', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h3 style={{ margin: 0 }}>{author ? `Review: ${author.username}` : 'Review'}</h3>
-          <span>
-          <HighReachBadge card={card} />
-          <span style={{
-            padding: '4px 12px',
-            borderRadius: '4px',
-            fontSize: '14px',
-            backgroundColor: card.status === 'pending' ? '#ffa500' : '#ccc',
-            color: '#fff',
-          }}>
-            {card.status}
-          </span>
-          </span>
-        </div>
-        <div style={{ fontSize: '14px', color: '#666', marginTop: '4px' }}>
-          Confidence: {(card.evidence.confidence_score * 100).toFixed(0)}% | 
-          Topic: {card.evidence.matched_topic}
-        </div>
+  const draft = card.evidence.draft;
+  const confidencePct = (card.evidence.confidence_score * 100).toFixed(0);
+  const title = author ? `Review: ${author.username}` : 'Review';
+  const skipped = card.status === 'skipped';
+  const skipText = card.skip_reason || card.evidence.skip_reason || 'No reason recorded';
+  const editLength = xLength(editText, card.evidence.product_url);
+  // issue #50: the card's state lives here, not in the detail view, so
+  // closing the view keeps an unsaved edit, a typed URL or a nudge. The
+  // collapsed card says so, and says when a result is waiting to be read.
+  const unsavedEdit = isEditing && editText !== (draftText ?? '');
+  // The nudge field is shown only on a pending card
+  const unsavedNudge = card.status === 'pending' && isNudging && nudgeInstruction.trim() !== '';
+  const nudgeBlockedId = `${card.workflow_id}-nudge-blocked`;
+  const skipDiscardsId = `${card.workflow_id}-skip-discards`;
+  const approveBlockedId = `${card.workflow_id}-approve-blocked`;
+  const needsAttention = showPostAnywayConfirm || notice != null || (error != null && !textRemoved);
+
+  const detail = (
+    <Dialog
+      open
+      onClose={closeDetail}
+      title={title}
+      dismissLabel="Close review"
+      className="rq-detail"
+      data-op-intensity="deck"
+    >
+      <div className="rq-detail__meta">
+        <StatusBadge status={card.status} />
+        <HighReachBadge card={card} />
+        <span>Confidence <strong>{confidencePct}%</strong></span>
+        <span>Topic <strong>{card.evidence.matched_topic}</strong></span>
       </div>
 
-      {/* Original Post */}
-      <div style={{ marginBottom: '20px' }}>
-        <h4>Original Post</h4>
-        <div style={{ 
-          backgroundColor: '#f5f5f5', 
-          padding: '12px', 
-          borderRadius: '4px',
-          marginBottom: '8px',
-        }}>
-          {author && (
-            <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-              {author.name} (@{author.username})
+      <div className="rq-detail__grid">
+        <div className="rq-detail__main">
+          {/* Original Post */}
+          <section className="rq-sec">
+            <h4 className="rq-sec__title">Original Post</h4>
+            <div className="rq-post">
+              {author && (
+                <div className="rq-post__author">
+                  {author.name} (@{author.username})
+                </div>
+              )}
+              {card.post.text_removed ? (
+                <div className="rq-post__removed">
+                  Post removed: it was deleted or is no longer visible on X, so its text, its author, and the research and edits quoting it were removed.
+                </div>
+              ) : (
+                <div className="rq-post__text">{card.post.text}</div>
+              )}
+              <ReachCounts card={card} showFollowers={!!author} className="rq-post__counts" />
             </div>
-          )}
-          {card.post.text_removed ? (
-            <div style={{ fontStyle: 'italic', color: '#666' }}>
-              Post removed: it was deleted or is no longer visible on X, so its text, its author, and the research and edits quoting it were removed.
-            </div>
-          ) : (
-            <div>{card.post.text}</div>
-          )}
-          <ReachCounts card={card} showFollowers={!!author} />
-        </div>
-        {postUrl && (
-          <a href={postUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: '14px' }}>
-            View on X →
-          </a>
-        )}
-      </div>
-
-      {/* Evidence Trail */}
-      <div style={{ marginBottom: '20px' }}>
-        <h4>Evidence & Research</h4>
-        <div style={{ marginBottom: '12px' }}>
-          <strong>Why it fits:</strong> {card.evidence.why_it_fits}
-        </div>
-
-        {/* Issue #4: should-we-reply features and checks */}
-        <ReplyFitPanel
-          replyFit={card.evidence.reply_fit}
-          confidenceInputs={card.evidence.confidence_inputs}
-        />
-        
-        {card.evidence.founder_materials.length > 0 && (
-          <div style={{ marginBottom: '12px' }}>
-            <strong>Supporting Material:</strong>
-            {!written && (
-              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px', marginBottom: '8px' }}>
-                Sentences starting with unresolved referents (it/this/that/etc.) cannot be selected as claims.
-              </div>
+            {postUrl && (
+              <a href={postUrl} target="_blank" rel="noopener noreferrer" className="app-link">
+                View on X →
+              </a>
             )}
-            {card.evidence.founder_materials.map((material, idx) => {
-              // Check if any failed sentences mention unresolved referents in this passage
-              // An assembled-gate reason; a written check's free-text reason is not read for it
-              const hasUnresolvedReferents = !written && card.evidence.draft?.claim_gate.failed_sentences.some(
-                (failure) => failure.reason.toLowerCase().includes('unresolved referent')
-              );
-              
-              return (
-                <div key={idx} style={{
-                  backgroundColor: '#f9f9f9',
-                  padding: '8px',
-                  borderRadius: '4px',
-                  marginTop: '8px',
-                  fontSize: '14px',
-                  border: hasUnresolvedReferents ? '1px solid #ff9800' : 'none',
-                }}>
-                  <div style={{ fontStyle: 'italic', color: '#666' }}>{material.source}</div>
-                  <div>{material.passage}</div>
-                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                    {material.relevance}
+          </section>
+
+          {/* Skipped: say why, and show the rejected draft as not for posting */}
+          {skipped && (
+            <section className="rq-sec">
+              <div className="rq-callout">
+                <strong>Skipped:</strong> {skipText}
+                {draft && (
+                  <div className="ev-note">
+                    Rejected draft (not for posting): <em>{draft.text || '(empty)'}</em>
                   </div>
-                  {hasUnresolvedReferents && (
-                    <div style={{
-                      marginTop: '8px',
-                      padding: '6px',
-                      backgroundColor: '#fff3e0',
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                      color: '#e65100',
-                    }}>
-                      ⚠️ Note: Some sentences in this material start with unresolved referents and cannot be used as claims.
-                      See "Failed Sentences" below for details.
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* issue #12: written mode was asked for, but this watch has no product name */}
+          {card.evidence.draft_mode_note && (
+            <div role="note" className="rq-callout rq-callout--caution">
+              {card.evidence.draft_mode_note}
+            </div>
+          )}
+
+          {/* Draft Reply */}
+          {draft && !skipped && (
+            <section className="rq-sec">
+              <h4 className="rq-sec__title">Draft Reply (Combined)</h4>
+              {isEditing ? (
+                <div>
+                  <Textarea
+                    label="Edited draft"
+                    value={editText}
+                    onChange={(e) => setEditText(e.target.value)}
+                    // While a request runs, text typed now would not be in it, and
+                    // a successful save or nudge closes the box: no typing then
+                    readOnly={loading}
+                    rows={5}
+                  />
+                  <div className={editLength > X_MAX_CHARS ? 'rq-count rq-count--over' : 'rq-count'}>
+                    {editLength}/{X_MAX_CHARS} characters, as X counts them (a link counts as {X_LINK_CHARS})
+                  </div>
+                  <div className="rq-row" style={{ marginTop: 'var(--op-space-3)' }}>
+                    <Button
+                      size="sm"
+                      onClick={handleEdit}
+                      disabled={loading || editLength > X_MAX_CHARS}
+                    >
+                      Save Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setIsEditing(false);
+                        setEditText(card.evidence.draft?.text || '');
+                      }}
+                      disabled={loading}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {/* A written draft or an edit can have line breaks; show them as they will be posted */}
+                  <div className="rq-draft">{draft.text}</div>
+                  <Button size="sm" variant="ghost" onClick={() => copyToClipboard(card.evidence.draft?.text || '')}>
+                    Copy Draft
+                  </Button>
+                  {draft.steers_applied.length > 0 && (
+                    <div className="ev-note">
+                      Steers applied: {draft.steers_applied.join(', ')}
                     </div>
                   )}
                 </div>
-              );
-            })}
-          </div>
-        )}
+              )}
+            </section>
+          )}
 
-        {card.evidence.draft && (
-          <div style={{ marginTop: '12px' }}>
-            {/* Once a written draft was edited, this result is the model's draft's, not the current text's */}
-            <strong>
-              {written
-                ? (edited ? "Product claim check of the model's draft (before your edit):" : 'Product claim check:')
-                : 'Claim Gate:'}
-            </strong>{' '}
-            <span style={{ color: card.evidence.draft.claim_gate.passed ? 'green' : 'red' }}>
-              {card.evidence.draft.claim_gate.passed ? 'PASSED' : 'FAILED'}
-            </span>
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-              {card.evidence.draft.claim_gate.reasoning}
-            </div>
-            {card.evidence.draft.claim_gate.failed_sentences.length > 0 && (
-              <div style={{ marginTop: '8px' }}>
-                <div style={{ fontSize: '14px', fontWeight: 'bold', color: 'red' }}>
-                  Failed Sentences:
-                </div>
-                {card.evidence.draft.claim_gate.failed_sentences.map((failure, idx) => {
-                  // S7 (QA R14): Dedicated copy for abbreviation-ending reason
-                  // These two rewrites explain assembled-gate reasons. A written check's
-                  // reason is the checker's own words and is shown as it is (issue #12).
-                  let displayReason = failure.reason;
-                  if (!written && failure.reason.toLowerCase().includes('abbreviation')) {
-                    displayReason = 'Sentence ends with an abbreviation and is not selectable. Abbreviations like Inc., Ltd., Dr., etc. at the end of a sentence cannot be used as claims.';
-                  } else if (!written && failure.reason.toLowerCase().includes('unresolved referent')) {
-                    displayReason = 'Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above) and cannot stand alone as a claim.';
-                  }
-                  
-                  return (
-                    <div key={idx} style={{
-                      backgroundColor: '#ffebee',
-                      padding: '8px',
-                      borderRadius: '4px',
-                      marginTop: '4px',
-                      fontSize: '14px',
-                    }}>
-                      <div style={{ fontWeight: 'bold' }}>"{failure.sentence}"</div>
-                      <div style={{ color: '#c62828', fontSize: '12px', marginTop: '4px' }}>
-                        {displayReason}
+          {/* Retry notice (issue #20): the request can be sent again, nothing failed */}
+          {notice && (
+            <Banner tone="info" className="rq-feedback">{notice}</Banner>
+          )}
+
+          {/* Error Display */}
+          {/* issue #23: an error can quote the draft (a nudge rejection); none is
+              shown on a removed card, also one that arrives after the removal */}
+          {error && !textRemoved && (
+            <Banner tone="critical" className="rq-feedback">{error}</Banner>
+          )}
+
+          {/* Actions */}
+          {card.status === 'approved' && (
+            <section className="rq-sec rq-sec--rule" data-op-intensity="instrument">
+              <h4 className="rq-sec__title">Confirm Posted Reply</h4>
+              <div className="rq-row">
+                <Input
+                  label="Your posted reply's URL"
+                  type="text"
+                  placeholder="Paste URL of your posted reply"
+                  value={replyUrl}
+                  onChange={(e) => setReplyUrl(e.target.value)}
+                  readOnly={loading}
+                />
+                <Button onClick={handleConfirmPosted} disabled={loading}>
+                  Confirm Posted
+                </Button>
+              </div>
+            </section>
+          )}
+
+          {card.status === 'pending' && (
+            <section className="rq-sec rq-sec--rule" data-op-intensity="instrument">
+              <h4 className="rq-sec__title">Actions</h4>
+              <div className="rq-actions">
+                {/* Approve */}
+                <div>
+                  <div className="rq-row">
+                    <Input
+                      label="Your posted reply's URL"
+                      type="text"
+                      placeholder="Paste URL of your posted reply"
+                      value={postedUrl}
+                      onChange={(e) => setPostedUrl(e.target.value)}
+                      // Every field is read-only while a request runs: the
+                      // request has the value it was sent with
+                      readOnly={loading}
+                    />
+                    <Button
+                      onClick={() => handleApprove(false)}
+                      disabled={loading || unsavedEdit}
+                      aria-describedby={unsavedEdit ? approveBlockedId : undefined}
+                    >
+                      Approve
+                    </Button>
+                  </div>
+                  {/* Approve records the saved draft, not the text in the edit box */}
+                  {unsavedEdit && (
+                    <p id={approveBlockedId} className="ev-note ev-warn">
+                      Approve records the saved draft. Save or cancel your edit first.
+                    </p>
+                  )}
+
+                  {/* Post Anyway confirmation (ADR-0006 Amendment E + QA R11 B2/C) */}
+                  {showPostAnywayConfirm && (
+                    <div className="rq-callout rq-callout--caution">
+                      <p className="rq-callout__title">
+                        Edited text requires acknowledgement
+                      </p>
+                      <div>
+                        {card.edited_text_gate_state === 'failed' &&
+                          'The edited text contains claims that failed the claim gate. '
+                        }
+                        {card.edited_text_gate_state === 'not_checked' &&
+                          'The gate check failed (retries exhausted). '
+                        }
+                        You can override this and post anyway by confirming below.
                       </div>
+                      {failingSentences.length > 0 && (
+                        <ul>
+                          {failingSentences.map((sentence, idx) => (
+                            <li key={idx}>Failing: "{sentence}"</li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="rq-row">
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => handleApprove(true)}
+                          disabled={loading || unsavedEdit}
+                          aria-describedby={unsavedEdit ? approveBlockedId : undefined}
+                        >
+                          Post Anyway (Override)
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={closePostAnyway} disabled={loading}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Edit and nudge */}
+                <div className="rq-row">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      if (isEditing) {
+                        // Clear request ID on abandonment
+                        editRequestId.current = null;
+                      }
+                      setIsEditing(!isEditing);
+                    }}
+                    disabled={loading}
+                  >
+                    {isEditing ? 'Cancel Edit' : 'Edit Draft'}
+                  </Button>
+                  {!isNudging && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setIsNudging(true)}
+                      disabled={loading || unsavedEdit}
+                      aria-describedby={unsavedEdit ? nudgeBlockedId : undefined}
+                    >
+                      Nudge (Redraft)
+                    </Button>
+                  )}
+                </div>
+                {/* A nudge replaces the draft and the edit box's text */}
+                {unsavedEdit && (
+                  <p id={nudgeBlockedId} className="ev-note ev-warn" style={{ margin: 0 }}>
+                    A nudge replaces the draft. Save or cancel your edit first.
+                  </p>
+                )}
+
+                {isNudging && (
+                  <div className="rq-row">
+                    <Input
+                      label="Nudge instruction"
+                      type="text"
+                      placeholder="e.g., 'Make it shorter' or 'More technical'"
+                      value={nudgeInstruction}
+                      onChange={(e) => setNudgeInstruction(e.target.value)}
+                      // A successful nudge empties this field: no typing while it runs
+                      readOnly={loading}
+                    />
+                    <Button
+                      size="sm"
+                      onClick={handleNudge}
+                      disabled={loading || unsavedEdit}
+                      aria-describedby={unsavedEdit ? nudgeBlockedId : undefined}
+                    >
+                      Apply Nudge
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        // Clear request ID on abandonment
+                        nudgeRequestId.current = null;
+                        setIsNudging(false);
+                        setNudgeInstruction('');
+                      }}
+                      disabled={loading}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                )}
+
+                {/* Skip */}
+                <div className="rq-row">
+                  <Input
+                    label="Skip reason"
+                    type="text"
+                    placeholder="Skip reason (optional)"
+                    value={skipReason}
+                    onChange={(e) => setSkipReason(e.target.value)}
+                    readOnly={loading}
+                  />
+                  <Button
+                    variant="ghost"
+                    onClick={handleSkip}
+                    disabled={loading}
+                    aria-describedby={unsavedEdit ? skipDiscardsId : undefined}
+                  >
+                    Skip
+                  </Button>
+                </div>
+                {unsavedEdit && (
+                  <p id={skipDiscardsId} className="ev-note" style={{ margin: 0 }}>
+                    Skipping discards your unsaved edit.
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* Follow-up Replies */}
+          {card.status === 'followup_due' && card.followup_replies && card.followup_replies.length > 0 && (
+            <section className="rq-sec rq-sec--rule">
+              <h4 className="rq-sec__title">Follow-up Replies ({card.followup_replies.length})</h4>
+              {card.followup_replies.map((reply: any, idx: number) => (
+                <div key={idx} className="ev-item">
+                  <div className="rq-post__author">@{reply.author}</div>
+                  <div className="ev-item__text">{reply.text}</div>
+                  <a href={reply.url} target="_blank" rel="noopener noreferrer" className="app-link">
+                    View reply →
+                  </a>
+                </div>
+              ))}
+            </section>
+          )}
+        </div>
+
+        <div className="rq-detail__evidence">
+          {/* Evidence Trail */}
+          <section className="rq-sec">
+            <h4 className="rq-sec__title">Evidence & Research</h4>
+            <p style={{ marginTop: 0 }}>
+              <strong>Why it fits:</strong> {card.evidence.why_it_fits}
+            </p>
+
+            {/* Issue #4: should-we-reply features and checks */}
+            <ReplyFitPanel
+              replyFit={card.evidence.reply_fit}
+              confidenceInputs={card.evidence.confidence_inputs}
+            />
+
+            {card.evidence.founder_materials.length > 0 && (
+              <div style={{ marginBottom: 'var(--op-space-4)' }}>
+                <strong>Supporting Material:</strong>
+                {!written && (
+                  <div className="ev-note">
+                    Sentences starting with unresolved referents (it/this/that/etc.) cannot be selected as claims.
+                  </div>
+                )}
+                {card.evidence.founder_materials.map((material, idx) => {
+                  // Check if any failed sentences mention unresolved referents in this passage
+                  // An assembled-gate reason; a written check's free-text reason is not read for it
+                  const hasUnresolvedReferents = !written && card.evidence.draft?.claim_gate.failed_sentences.some(
+                    (failure) => failure.reason.toLowerCase().includes('unresolved referent')
+                  );
+
+                  return (
+                    <div key={idx} className={hasUnresolvedReferents ? 'ev-item ev-item--flag' : 'ev-item'}>
+                      <div className="ev-item__sub">{material.source}</div>
+                      <div className="ev-item__text">{material.passage}</div>
+                      <div className="ev-item__sub">{material.relevance}</div>
+                      {hasUnresolvedReferents && (
+                        <div className="ev-item__sub ev-warn">
+                          Note: Some sentences in this material start with unresolved referents and cannot be used as claims.
+                          See "Failed Sentences" below for details.
+                        </div>
+                      )}
                     </div>
                   );
                 })}
               </div>
             )}
-          </div>
-        )}
-      </div>
 
-      {/* Reply Plan (issue #5): shown above the draft */}
-      <ReplyPlanPanel evidence={card.evidence} edited={edited} />
-
-      {/* issue #12: written mode was asked for, but this watch has no product name */}
-      {card.evidence.draft_mode_note && (
-        <div role="note" style={{
-          backgroundColor: '#fff8e1',
-          border: '1px solid #ffe082',
-          padding: '12px',
-          borderRadius: '4px',
-          marginBottom: '20px',
-          fontSize: '14px',
-        }}>
-          {card.evidence.draft_mode_note}
-        </div>
-      )}
-
-      {/* Written draft (issue #12): the check of each sentence replaces the segment display */}
-      {written && card.evidence.draft && (
-        <div style={{ marginBottom: '20px' }}>
-          <h4>Product Claim Check</h4>
-          <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
-            The reply was written by the model. A sentence is checked as a product claim when it names
-            the product
-            {card.evidence.draft.written?.product_name && <> ("{card.evidence.draft.written.product_name}"
-              {(card.evidence.draft.written.product_aliases ?? []).map((alias) => `, "${alias}"`)})</>}
-            , uses we/our/us/ours, contains a number, makes a comparison or uses one of the watch's
-            key features, or when a separate checker reads it as about the product. A product claim
-            must be supported by sentences of your brief.
-          </div>
-          <div style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
-            Key features from your watch settings:{' '}
-            {(card.evidence.draft.written?.feature_terms ?? []).length > 0
-              ? card.evidence.draft.written?.feature_terms.join(', ')
-              : 'none (the watch was started without key features, so no sentence is checked for using one)'}
-          </div>
-          {edited ? (
-            <div style={{ fontSize: '14px', color: '#666' }}>
-              {card.edited_text_gate_state === 'not_checked'
-                ? 'The draft was edited after this check, and the check of the edited text could not run. Approving it needs "Post anyway".'
-                : 'The draft was edited after this check. The check of the edited text is shown below the draft.'}
-            </div>
-          ) : (
-            <SentenceCheckList checks={card.evidence.draft.sentence_checks ?? []} />
-          )}
-          {/* ADR-0006 amendment 2026-11-24, step 1: the drafter's own list is provenance.
-              It stays on the card after an edit, labelled as the model's draft's. */}
-          {(card.evidence.draft.written?.drafter_hints ?? []).length > 0 && (
-            <div data-testid="drafter-citations" style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-              <div style={{ marginBottom: '4px' }}>
+            {draft && (
+              <div>
+                {/* Once a written draft was edited, this result is the model's draft's, not the current text's */}
                 <strong>
-                  {edited ? "The drafter's own citations, for the model's draft (before your edit)." : "The drafter's own citations."}
+                  {written
+                    ? (edited ? "Product claim check of the model's draft (before your edit):" : 'Product claim check:')
+                    : 'Claim Gate:'}
                 </strong>{' '}
-                The model that wrote the draft named these brief sentences as its support. This is a
-                record only: the checker was not shown it, and it is not a verdict.
-                {edited && ' It says nothing about the edited text.'}
-              </div>
-              {(card.evidence.draft.written?.drafter_hints ?? []).map((hint, idx) => (
-                <div key={idx}>
-                  "{hint.sentence}": {(hint.brief_sentence_ids ?? []).length > 0 ? hint.brief_sentence_ids.join(', ') : 'no brief sentence named'}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Segments with Tags */}
-      {card.evidence.draft && card.evidence.draft.segments.length > 0 && (
-        <div style={{ marginBottom: '20px' }}>
-          <h4>Reply Segments</h4>
-          <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
-            Each segment is tagged as claim or non-claim. Claims show their supporting passage.
-          </div>
-          {card.evidence.draft.segments.map((segment, idx) => {
-            const isClaim = segment.kind === 'claim';
-            const matchedPassage = isClaim && segment.source_passage_id
-              ? card.evidence.founder_materials.find(m => m.passage_id === segment.source_passage_id)
-              : null;
-            
-            return (
-              <div key={idx} style={{
-                backgroundColor: isClaim ? '#e3f2fd' : '#f5f5f5',
-                padding: '12px',
-                borderRadius: '4px',
-                marginBottom: '8px',
-                border: `1px solid ${isClaim ? '#90caf9' : '#e0e0e0'}`,
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                  <div style={{ flex: 1 }}>
-                    <span style={{
-                      display: 'inline-block',
-                      padding: '2px 8px',
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                      fontWeight: 'bold',
-                      backgroundColor: isClaim ? '#1976d2' : '#757575',
-                      color: '#fff',
-                      marginRight: '8px',
-                    }}>
-                      {segment.kind}
-                    </span>
-                    <span>{segment.text}</span>
-                  </div>
-                </div>
-                {/* S7 (QA R14): Consistent !== null checks and render references */}
-                {isClaim && segment.source_passage_id !== null && segment.sentence_index !== null && (
-                  <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-                    <strong>Source:</strong> {segment.source_passage_id} sentence {segment.sentence_index}
-                  </div>
-                )}
-                {!isClaim && segment.phrase_id !== null && (
-                  <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-                    <strong>Phrase:</strong> {segment.phrase_id}
-                  </div>
-                )}
-                {matchedPassage && (
-                  <div style={{
-                    backgroundColor: '#fff',
-                    padding: '8px',
-                    borderRadius: '4px',
-                    marginTop: '8px',
-                    fontSize: '12px',
-                    borderLeft: '3px solid #1976d2',
-                  }}>
-                    <div style={{ fontWeight: 'bold', color: '#1976d2', marginBottom: '4px' }}>
-                      Supporting Passage:
-                    </div>
-                    <div style={{ fontStyle: 'italic', color: '#666', marginBottom: '4px' }}>
-                      {matchedPassage.source}
-                    </div>
-                    <div>{matchedPassage.passage}</div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Segments Detail (ADR-0006 Amendment: claims quoted with source_passage_id + sentence_index) */}
-      {card.evidence.draft && card.evidence.draft.segments && card.evidence.draft.segments.length > 0 && (
-        <div style={{ marginBottom: '20px' }}>
-          <h4>Segments (Evidence Trail)</h4>
-          <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
-            Claims are quoted verbatim from founder materials (sentence_index). Non-claims come from a fixed phrase list (v2.1.0).
-          </div>
-          {card.evidence.draft.segments.map((segment, idx) => (
-            <div key={idx} style={{
-              backgroundColor: segment.kind === 'claim' ? '#e3f2fd' : '#f5f5f5',
-              padding: '12px',
-              borderRadius: '4px',
-              marginBottom: '8px',
-              border: `1px solid ${segment.kind === 'claim' ? '#2196f3' : '#9e9e9e'}`,
-            }}>
-              <div style={{ marginBottom: '8px' }}>
-                <span style={{
-                  display: 'inline-block',
-                  padding: '2px 8px',
-                  borderRadius: '4px',
-                  fontSize: '12px',
-                  fontWeight: 'bold',
-                  backgroundColor: segment.kind === 'claim' ? '#1976d2' : '#757575',
-                  color: '#fff',
-                  marginRight: '8px',
-                }}>
-                  {segment.kind}
+                <span className={draft.claim_gate.passed ? 'ev-pass' : 'ev-fail'}>
+                  {draft.claim_gate.passed ? 'PASSED' : 'FAILED'}
                 </span>
-                {/* S7 (QA R14): Render segment references in small muted text */}
-                {segment.kind === 'claim' && segment.source_passage_id !== null && segment.sentence_index !== null && (
-                  <span style={{ fontSize: '12px', color: '#666' }}>
-                    from {segment.source_passage_id} sentence {segment.sentence_index}
-                  </span>
+                <div className="ev-note">{draft.claim_gate.reasoning}</div>
+                {draft.claim_gate.failed_sentences.length > 0 && (
+                  <div>
+                    <div className="ev-fail">Failed Sentences:</div>
+                    {draft.claim_gate.failed_sentences.map((failure, idx) => {
+                      // S7 (QA R14): Dedicated copy for abbreviation-ending reason
+                      // These two rewrites explain assembled-gate reasons. A written check's
+                      // reason is the checker's own words and is shown as it is (issue #12).
+                      let displayReason = failure.reason;
+                      if (!written && failure.reason.toLowerCase().includes('abbreviation')) {
+                        displayReason = 'Sentence ends with an abbreviation and is not selectable. Abbreviations like Inc., Ltd., Dr., etc. at the end of a sentence cannot be used as claims.';
+                      } else if (!written && failure.reason.toLowerCase().includes('unresolved referent')) {
+                        displayReason = 'Sentence starts with an unresolved referent (it/this/that/these/they/its/such/the above) and cannot stand alone as a claim.';
+                      }
+
+                      return (
+                        <div key={idx} className="ev-item ev-item--fail">
+                          <div className="ev-item__text">"{failure.sentence}"</div>
+                          <div className="ev-item__sub ev-error">{displayReason}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
-                {segment.kind === 'non_claim' && segment.phrase_id !== null && (
-                  <span style={{ fontSize: '12px', color: '#666' }}>
-                    phrase: {segment.phrase_id}
-                  </span>
-                )}
               </div>
-              <div style={{ marginBottom: '8px' }}>"{segment.text}"</div>
-              {segment.kind === 'claim' && segment.source_passage_id !== null && (
-                <div style={{ 
-                  fontSize: '12px', 
-                  color: '#0d47a1',
-                  padding: '8px',
-                  backgroundColor: '#fff',
-                  borderRadius: '4px',
-                  marginTop: '8px',
-                }}>
-                  <strong>Source:</strong> {
-                    card.evidence.founder_materials
-                      .find(m => m.passage_id === segment.source_passage_id)?.passage || 'N/A'
-                  }
+            )}
+          </section>
+
+          {/* Reply Plan (issue #5) */}
+          <ReplyPlanPanel evidence={card.evidence} edited={edited} />
+
+          {/* Written draft (issue #12): the check of each sentence replaces the segment display */}
+          {written && draft && (
+            <section className="rq-sec">
+              <h4 className="rq-sec__title">Product Claim Check</h4>
+              <div className="ev-note">
+                The reply was written by the model. A sentence is checked as a product claim when it names
+                the product
+                {draft.written?.product_name && <> ("{draft.written.product_name}"
+                  {(draft.written.product_aliases ?? []).map((alias) => `, "${alias}"`)})</>}
+                , uses we/our/us/ours, contains a number, makes a comparison or uses one of the watch's
+                key features, or when a separate checker reads it as about the product. A product claim
+                must be supported by sentences of your brief.
+              </div>
+              <div className="ev-note">
+                Key features from your watch settings:{' '}
+                {(draft.written?.feature_terms ?? []).length > 0
+                  ? draft.written?.feature_terms.join(', ')
+                  : 'none (the watch was started without key features, so no sentence is checked for using one)'}
+              </div>
+              {edited ? (
+                <div className="ev-note">
+                  {card.edited_text_gate_state === 'not_checked'
+                    ? 'The draft was edited after this check, and the check of the edited text could not run. Approving it needs "Post anyway".'
+                    : 'The draft was edited after this check. The check of the edited text is shown below the draft.'}
+                </div>
+              ) : (
+                <SentenceCheckList checks={draft.sentence_checks ?? []} />
+              )}
+              {/* ADR-0006 amendment 2026-11-24, step 1: the drafter's own list is provenance.
+                  It stays on the card after an edit, labelled as the model's draft's. */}
+              {(draft.written?.drafter_hints ?? []).length > 0 && (
+                <div data-testid="drafter-citations" className="ev-note">
+                  <div style={{ marginBottom: 'var(--op-space-1)' }}>
+                    <strong>
+                      {edited ? "The drafter's own citations, for the model's draft (before your edit)." : "The drafter's own citations."}
+                    </strong>{' '}
+                    The model that wrote the draft named these brief sentences as its support. This is a
+                    record only: the checker was not shown it, and it is not a verdict.
+                    {edited && ' It says nothing about the edited text.'}
+                  </div>
+                  {(draft.written?.drafter_hints ?? []).map((hint, idx) => (
+                    <div key={idx}>
+                      "{hint.sentence}": {(hint.brief_sentence_ids ?? []).length > 0 ? hint.brief_sentence_ids.join(', ') : 'no brief sentence named'}
+                    </div>
+                  ))}
                 </div>
               )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Skipped: say why, and show the rejected draft as not for posting */}
-      {card.status === 'skipped' && (
-        <div style={{
-          backgroundColor: '#f5f5f5',
-          border: '1px solid #ccc',
-          padding: '12px',
-          borderRadius: '4px',
-          marginBottom: '20px',
-        }}>
-          <strong>Skipped:</strong> {card.skip_reason || card.evidence.skip_reason || 'No reason recorded'}
-          {card.evidence.draft && (
-            <div style={{ marginTop: '8px', fontSize: '14px', color: '#666' }}>
-              Rejected draft (not for posting): <em>{card.evidence.draft.text || '(empty)'}</em>
-            </div>
+            </section>
           )}
-        </div>
-      )}
 
-      {/* Draft Reply */}
-      {card.evidence.draft && card.status !== 'skipped' && (
-        <div style={{ marginBottom: '20px' }}>
-          <h4>Draft Reply (Combined)</h4>
-          {isEditing ? (
-            <div>
-              <textarea
-                value={editText}
-                onChange={(e) => setEditText(e.target.value)}
-                style={{
-                  width: '100%',
-                  minHeight: '100px',
-                  padding: '8px',
-                  borderRadius: '4px',
-                  border: '1px solid #ccc',
-                  fontFamily: 'inherit',
-                }}
-              />
-              <div
-                style={{ fontSize: '12px', color: xLength(editText, card.evidence.product_url) > X_MAX_CHARS ? '#c62828' : '#666', marginTop: '4px' }}
-              >
-                {xLength(editText, card.evidence.product_url)}/{X_MAX_CHARS} characters, as X counts them (a link counts as {X_LINK_CHARS})
+          {/* Segments with Tags */}
+          {draft && draft.segments.length > 0 && (
+            <section className="rq-sec">
+              <h4 className="rq-sec__title">Reply Segments</h4>
+              <div className="ev-note">
+                Each segment is tagged as claim or non-claim. Claims show their supporting passage.
               </div>
-              <button
-                onClick={handleEdit}
-                disabled={loading || xLength(editText, card.evidence.product_url) > X_MAX_CHARS}
-                style={{ marginTop: '8px', marginRight: '8px' }}
-              >
-                Save Edit
-              </button>
-              <button
-                onClick={() => {
-                  setIsEditing(false);
-                  setEditText(card.evidence.draft?.text || '');
-                }}
-                disabled={loading}
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <div>
-              <div style={{
-                backgroundColor: '#e8f5e9',
-                padding: '12px',
-                borderRadius: '4px',
-                marginBottom: '8px',
-                // A written draft or an edit can have line breaks; show them as they will be posted
-                whiteSpace: 'pre-wrap',
-              }}>
-                {card.evidence.draft.text}
-              </div>
-              <button
-                onClick={() => copyToClipboard(card.evidence.draft?.text || '')}
-                style={{ fontSize: '14px' }}
-              >
-                Copy Draft
-              </button>
-              {card.evidence.draft.steers_applied.length > 0 && (
-                <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-                  Steers applied: {card.evidence.draft.steers_applied.join(', ')}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+              {draft.segments.map((segment, idx) => {
+                const isClaim = segment.kind === 'claim';
+                const matchedPassage = isClaim && segment.source_passage_id
+                  ? card.evidence.founder_materials.find(m => m.passage_id === segment.source_passage_id)
+                  : null;
 
-      {/* Edited Text Gate Results (ADR-0006 Amendment E + QA R11 B2/C) */}
-      {card.edited_text_gate_results && card.edited_text_gate_results.length > 0 && (
-        <div style={{ marginBottom: '20px', borderTop: '1px solid #eee', paddingTop: '20px' }}>
-          <h4>{written ? 'Check of the Edited Text' : 'Edited Text Gate Results'}</h4>
-          
-          {/* Gate State Badge */}
-          {card.edited_text_gate_state && (
-            <div style={{ marginBottom: '12px' }}>
-              <span style={{
-                display: 'inline-block',
-                padding: '6px 12px',
-                borderRadius: '4px',
-                fontSize: '14px',
-                fontWeight: 'bold',
-                backgroundColor: 
-                  card.edited_text_gate_state === 'passed' ? '#4caf50' :
-                  card.edited_text_gate_state === 'failed' ? '#f44336' : '#ff9800',
-                color: '#fff',
-              }}>
-                Gate State: {card.edited_text_gate_state.toUpperCase()}
-              </span>
-              {(card.edited_text_gate_state === 'failed' || card.edited_text_gate_state === 'not_checked') && (
-                <div style={{ 
-                  marginTop: '8px',
-                  padding: '8px 12px',
-                  backgroundColor: '#fff3e0',
-                  borderRadius: '4px',
-                  fontSize: '13px',
-                  color: '#e65100',
-                }}>
-                  ⚠️ Approval requires "Post anyway" acknowledgement
-                  {card.edited_text_gate_state === 'not_checked' && ' (gate check failed - retries exhausted)'}
-                </div>
-              )}
-            </div>
+                return (
+                  <div key={idx} className="ev-item">
+                    <div className="ev-item__tags">
+                      <Tag accent={isClaim ? 'oxide' : 'neutral'}>{segment.kind}</Tag>
+                      <span className="ev-item__text">{segment.text}</span>
+                    </div>
+                    {/* S7 (QA R14): Consistent !== null checks and render references */}
+                    {isClaim && segment.source_passage_id !== null && segment.sentence_index !== null && (
+                      <div className="ev-item__sub">
+                        <strong>Source:</strong> {segment.source_passage_id} sentence {segment.sentence_index}
+                      </div>
+                    )}
+                    {!isClaim && segment.phrase_id !== null && (
+                      <div className="ev-item__sub">
+                        <strong>Phrase:</strong> {segment.phrase_id}
+                      </div>
+                    )}
+                    {matchedPassage && (
+                      <div className="ev-item__source">
+                        <div className="app-label">Supporting Passage:</div>
+                        <div className="ev-item__sub">{matchedPassage.source}</div>
+                        <div>{matchedPassage.passage}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </section>
           )}
-          
-          <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
-            {written
-              ? 'Each sentence of the edited text went through the same product-claim check as the draft.'
-              : 'Each sentence from the edited text is re-verified against the strict claim gate.'}
-          </div>
-          {written && <SentenceCheckList checks={card.edited_text_gate_results} />}
-          {!written && card.edited_text_gate_results.map((result, idx) => {
-            const isPassed = result.passed;
-            const isKept = result.kept_segment;
-            
-            return (
-              <div key={idx} style={{
-                backgroundColor: isPassed ? '#e8f5e9' : '#ffebee',
-                padding: '12px',
-                borderRadius: '4px',
-                marginBottom: '8px',
-                border: `1px solid ${isPassed ? '#4caf50' : '#f44336'}`,
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                  <div style={{ flex: 1 }}>
-                    <span style={{
-                      display: 'inline-block',
-                      padding: '2px 8px',
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                      fontWeight: 'bold',
-                      backgroundColor: isPassed ? '#4caf50' : '#f44336',
-                      color: '#fff',
-                      marginRight: '8px',
-                    }}>
-                      {isPassed ? 'PASS' : 'FAIL'}
-                    </span>
-                    <span style={{
-                      display: 'inline-block',
-                      padding: '2px 8px',
-                      borderRadius: '4px',
-                      fontSize: '12px',
-                      backgroundColor: result.kind === 'claim' ? '#1976d2' : '#757575',
-                      color: '#fff',
-                      marginRight: '8px',
-                    }}>
-                      {result.kind}
-                    </span>
-                    {isKept && (
-                      <span style={{
-                        display: 'inline-block',
-                        padding: '2px 8px',
-                        borderRadius: '4px',
-                        fontSize: '12px',
-                        backgroundColor: '#9c27b0',
-                        color: '#fff',
-                        marginRight: '8px',
-                      }}>
-                        verbatim
+
+          {/* Segments Detail (ADR-0006 Amendment: claims quoted with source_passage_id + sentence_index) */}
+          {draft && draft.segments && draft.segments.length > 0 && (
+            <section className="rq-sec">
+              <h4 className="rq-sec__title">Segments (Evidence Trail)</h4>
+              <div className="ev-note">
+                Claims are quoted verbatim from founder materials (sentence_index). Non-claims come from a fixed phrase list (v2.1.0).
+              </div>
+              {draft.segments.map((segment, idx) => (
+                <div key={idx} className="ev-item">
+                  <div className="ev-item__tags">
+                    <Tag accent={segment.kind === 'claim' ? 'oxide' : 'neutral'}>{segment.kind}</Tag>
+                    {/* S7 (QA R14): Render segment references in small muted text */}
+                    {segment.kind === 'claim' && segment.source_passage_id !== null && segment.sentence_index !== null && (
+                      <span className="ev-item__sub" style={{ marginTop: 0 }}>
+                        from {segment.source_passage_id} sentence {segment.sentence_index}
+                      </span>
+                    )}
+                    {segment.kind === 'non_claim' && segment.phrase_id !== null && (
+                      <span className="ev-item__sub" style={{ marginTop: 0 }}>
+                        phrase: {segment.phrase_id}
                       </span>
                     )}
                   </div>
+                  <div className="ev-item__text">"{segment.text}"</div>
+                  {segment.kind === 'claim' && segment.source_passage_id !== null && (
+                    <div className="ev-item__source">
+                      <strong>Source:</strong> {
+                        card.evidence.founder_materials
+                          .find(m => m.passage_id === segment.source_passage_id)?.passage || 'N/A'
+                      }
+                    </div>
+                  )}
                 </div>
-                <div style={{ marginBottom: '8px' }}>"{result.sentence}"</div>
-                {!isPassed && result.reason && (
-                  <div style={{ 
-                    fontSize: '12px', 
-                    color: '#c62828',
-                    padding: '8px',
-                    backgroundColor: '#fff',
-                    borderRadius: '4px',
-                  }}>
-                    <strong>Reason:</strong> {result.reason}
+              ))}
+            </section>
+          )}
+
+          {/* Edited Text Gate Results (ADR-0006 Amendment E + QA R11 B2/C) */}
+          {card.edited_text_gate_results && card.edited_text_gate_results.length > 0 && (
+            <section className="rq-sec">
+              <h4 className="rq-sec__title">{written ? 'Check of the Edited Text' : 'Edited Text Gate Results'}</h4>
+
+              {/* Gate State Badge */}
+              {card.edited_text_gate_state && (
+                <div style={{ marginBottom: 'var(--op-space-3)' }}>
+                  <Tag accent={
+                    card.edited_text_gate_state === 'passed' ? 'moss' :
+                    card.edited_text_gate_state === 'failed' ? 'oxide' : 'caution'
+                  }>
+                    Gate State: {card.edited_text_gate_state.toUpperCase()}
+                  </Tag>
+                  {(card.edited_text_gate_state === 'failed' || card.edited_text_gate_state === 'not_checked') && (
+                    <div className="ev-note ev-warn">
+                      Approval requires "Post anyway" acknowledgement
+                      {card.edited_text_gate_state === 'not_checked' && ' (gate check failed - retries exhausted)'}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="ev-note">
+                {written
+                  ? 'Each sentence of the edited text went through the same product-claim check as the draft.'
+                  : 'Each sentence from the edited text is re-verified against the strict claim gate.'}
+              </div>
+              {written && <SentenceCheckList checks={card.edited_text_gate_results} />}
+              {!written && card.edited_text_gate_results.map((result, idx) => {
+                const isPassed = result.passed;
+                const isKept = result.kept_segment;
+
+                return (
+                  <div key={idx} className={isPassed ? 'ev-item ev-item--pass' : 'ev-item ev-item--fail'}>
+                    <div className="ev-item__tags">
+                      <Tag accent={isPassed ? 'moss' : 'oxide'}>{isPassed ? 'PASS' : 'FAIL'}</Tag>
+                      <Tag accent="neutral">{result.kind}</Tag>
+                      {isKept && <Tag accent="neutral">verbatim</Tag>}
+                    </div>
+                    <div className="ev-item__text">"{result.sentence}"</div>
+                    {!isPassed && result.reason && (
+                      <div className="ev-item__sub ev-error">
+                        <strong>Reason:</strong> {result.reason}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            );
-          })}
-          
-          {card.post_anyway && card.post_anyway_failing_sentences && (
-            <div style={{
-              backgroundColor: '#fff3e0',
-              padding: '12px',
-              borderRadius: '4px',
-              marginTop: '12px',
-              border: '1px solid #ff9800',
-            }}>
-              <div style={{ fontWeight: 'bold', color: '#e65100', marginBottom: '8px' }}>
-                ⚠️ Posted Anyway Override
-              </div>
-              <div style={{ fontSize: '14px', marginBottom: '8px' }}>
-                This draft was approved with failing sentences using the "Post anyway" override.
-              </div>
-              <div style={{ fontSize: '12px', color: '#666' }}>
-                Failing sentences at approval: {card.post_anyway_failing_sentences.length}
-              </div>
-            </div>
+                );
+              })}
+
+              {card.post_anyway && card.post_anyway_failing_sentences && (
+                <div className="rq-callout rq-callout--caution">
+                  <p className="rq-callout__title">Posted Anyway Override</p>
+                  <div>
+                    This draft was approved with failing sentences using the "Post anyway" override.
+                  </div>
+                  <div className="ev-note">
+                    Failing sentences at approval: {card.post_anyway_failing_sentences.length}
+                  </div>
+                </div>
+              )}
+            </section>
           )}
         </div>
-      )}
-
-      {/* Retry notice (issue #20): the request can be sent again, nothing failed */}
-      {notice && (
-        <div role="status" style={{
-          backgroundColor: '#e3f2fd',
-          color: '#0d47a1',
-          padding: '12px',
-          borderRadius: '4px',
-          marginBottom: '12px',
-        }}>
-          {notice}
-        </div>
-      )}
-
-      {/* Error Display */}
-      {/* issue #23: an error can quote the draft (a nudge rejection); none is
-          shown on a removed card, also one that arrives after the removal */}
-      {error && !textRemoved && (
-        <div style={{
-          backgroundColor: '#ffebee',
-          color: '#c62828',
-          padding: '12px',
-          borderRadius: '4px',
-          marginBottom: '12px',
-        }}>
-          {error}
-        </div>
-      )}
-
-      {/* Follow-up Replies */}
-      {card.status === 'followup_due' && card.followup_replies && card.followup_replies.length > 0 && (
-        <div style={{ marginBottom: '20px', borderTop: '1px solid #eee', paddingTop: '20px' }}>
-          <h4>Follow-up Replies ({card.followup_replies.length})</h4>
-          {card.followup_replies.map((reply: any, idx: number) => (
-            <div key={idx} style={{
-              backgroundColor: '#f9f9f9',
-              padding: '12px',
-              borderRadius: '4px',
-              marginBottom: '8px',
-            }}>
-              <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-                @{reply.author}
-              </div>
-              <div>{reply.text}</div>
-              <a href={reply.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: '12px', marginTop: '4px', display: 'block' }}>
-                View reply →
-              </a>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Actions */}
-      {card.status === 'approved' && (
-        <div style={{ borderTop: '1px solid #eee', paddingTop: '20px' }}>
-          <h4>Confirm Posted Reply</h4>
-          <div style={{ marginBottom: '12px' }}>
-            <input
-              type="text"
-              placeholder="Paste URL of your posted reply"
-              value={replyUrl}
-              onChange={(e) => setReplyUrl(e.target.value)}
-              style={{ width: '300px', padding: '8px', marginRight: '8px' }}
-            />
-            <button
-              onClick={handleConfirmPosted}
-              disabled={loading}
-              style={{ backgroundColor: '#4caf50', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '4px' }}
-            >
-              Confirm Posted
-            </button>
-          </div>
-        </div>
-      )}
-      
-      {card.status === 'pending' && (
-        <div style={{ borderTop: '1px solid #eee', paddingTop: '20px' }}>
-          <h4>Actions</h4>
-          
-          {/* Approve */}
-          <div style={{ marginBottom: '12px' }}>
-            <input
-              type="text"
-              placeholder="Paste URL of your posted reply"
-              value={postedUrl}
-              onChange={(e) => setPostedUrl(e.target.value)}
-              style={{ width: '300px', padding: '8px', marginRight: '8px' }}
-            />
-            <button
-              onClick={() => handleApprove(false)}
-              disabled={loading}
-              style={{ backgroundColor: '#4caf50', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '4px' }}
-            >
-              Approve
-            </button>
-            
-            {/* Post Anyway confirmation (ADR-0006 Amendment E + QA R11 B2/C) */}
-            {showPostAnywayConfirm && (
-              <div style={{
-                marginTop: '12px',
-                padding: '12px',
-                backgroundColor: '#fff3e0',
-                borderRadius: '4px',
-                border: '1px solid #ff9800',
-              }}>
-                <div style={{ fontWeight: 'bold', color: '#e65100', marginBottom: '8px' }}>
-                  ⚠️ Edited text requires acknowledgement
-                </div>
-                <div style={{ fontSize: '14px', marginBottom: '12px' }}>
-                  {card.edited_text_gate_state === 'failed' && 
-                    'The edited text contains claims that failed the claim gate. '
-                  }
-                  {card.edited_text_gate_state === 'not_checked' && 
-                    'The gate check failed (retries exhausted). '
-                  }
-                  You can override this and post anyway by confirming below.
-                </div>
-                {failingSentences.length > 0 && (
-                  <ul style={{ fontSize: '13px', marginTop: 0, marginBottom: '12px' }}>
-                    {failingSentences.map((sentence, idx) => (
-                      <li key={idx}>Failing: "{sentence}"</li>
-                    ))}
-                  </ul>
-                )}
-                <button
-                  onClick={() => handleApprove(true)}
-                  disabled={loading}
-                  style={{
-                    backgroundColor: '#ff9800',
-                    color: '#fff',
-                    border: 'none',
-                    padding: '8px 16px',
-                    borderRadius: '4px',
-                    fontWeight: 'bold',
-                  }}
-                >
-                  Post Anyway (Override)
-                </button>
-                <button
-                  onClick={closePostAnyway}
-                  disabled={loading}
-                  style={{ marginLeft: '8px' }}
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Edit */}
-          <div style={{ marginBottom: '12px' }}>
-            <button
-              onClick={() => {
-                if (isEditing) {
-                  // Clear request ID on abandonment
-                  editRequestId.current = null;
-                }
-                setIsEditing(!isEditing);
-              }}
-              disabled={loading}
-              style={{ marginRight: '8px' }}
-            >
-              {isEditing ? 'Cancel Edit' : 'Edit Draft'}
-            </button>
-          </div>
-
-          {/* Nudge */}
-          {!isNudging ? (
-            <div style={{ marginBottom: '12px' }}>
-              <button
-                onClick={() => setIsNudging(true)}
-                disabled={loading}
-                style={{ marginRight: '8px' }}
-              >
-                Nudge (Redraft)
-              </button>
-            </div>
-          ) : (
-            <div style={{ marginBottom: '12px' }}>
-              <input
-                type="text"
-                placeholder="e.g., 'Make it shorter' or 'More technical'"
-                value={nudgeInstruction}
-                onChange={(e) => setNudgeInstruction(e.target.value)}
-                style={{ width: '300px', padding: '8px', marginRight: '8px' }}
-              />
-              <button onClick={handleNudge} disabled={loading}>
-                Apply Nudge
-              </button>
-              <button
-                onClick={() => {
-                  // Clear request ID on abandonment
-                  nudgeRequestId.current = null;
-                  setIsNudging(false);
-                  setNudgeInstruction('');
-                }}
-                disabled={loading}
-                style={{ marginLeft: '8px' }}
-              >
-                Cancel
-              </button>
-            </div>
-          )}
-
-          {/* Skip */}
-          <div style={{ marginBottom: '12px' }}>
-            <input
-              type="text"
-              placeholder="Skip reason (optional)"
-              value={skipReason}
-              onChange={(e) => setSkipReason(e.target.value)}
-              style={{ width: '300px', padding: '8px', marginRight: '8px' }}
-            />
-            <button
-              onClick={handleSkip}
-              disabled={loading}
-              style={{ backgroundColor: '#f44336', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '4px' }}
-            >
-              Skip
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
+      </div>
+    </Dialog>
   );
+
+  return (
+    <article
+      className={['op-panel', 'rq-card', skipped && 'rq-card--skipped', card.reach_highlighted && card.reach && 'rq-card--high-reach']
+        .filter(Boolean)
+        .join(' ')}
+      data-testid="review-card"
+      // issue #49: a card at or above the reach level
+      data-high-reach={card.reach_highlighted && card.reach ? 'true' : undefined}
+    >
+      <div className="rq-card__top">
+        <div className="rq-card__conf" aria-label={`Confidence ${confidencePct}%`}>
+          {confidencePct}<small>%</small>
+        </div>
+        <div className="rq-card__ident">
+          <p className="rq-card__topic">{card.evidence.matched_topic}</p>
+          <h3 className="rq-card__title">
+            <button
+              ref={openButtonRef}
+              type="button"
+              className="rq-card__open"
+              aria-haspopup="dialog"
+              onClick={() => setOpen(true)}
+            >
+              {title}
+            </button>
+          </h3>
+        </div>
+        <div className="rq-card__flags">
+          <StatusBadge status={card.status} />
+          <HighReachBadge card={card} />
+          {unsavedEdit && <Tag accent="caution">Unsaved edit</Tag>}
+          {unsavedNudge && <Tag accent="caution">Unsent nudge</Tag>}
+          {loading && <Tag accent="neutral">Working…</Tag>}
+          {needsAttention && !loading && <Tag accent="oxide">Needs a look</Tag>}
+        </div>
+      </div>
+
+      <div className="rq-card__block">
+        <span className="app-label">Post</span>
+        {card.post.text_removed ? (
+          <p className="rq-card__post rq-card__post--removed">Post removed</p>
+        ) : (
+          <p className="rq-card__post rq-clamp">{card.post.text}</p>
+        )}
+      </div>
+
+      {skipped ? (
+        <div className="rq-card__block">
+          <span className="app-label">Skipped</span>
+          <p className="rq-card__post rq-clamp">{skipText}</p>
+        </div>
+      ) : (
+        draft && (
+          <div className="rq-card__block">
+            <span className="app-label">{unsavedEdit ? 'Draft (your edit is not saved)' : 'Draft'}</span>
+            <p className="rq-card__draft rq-clamp">{draft.text}</p>
+          </div>
+        )
+      )}
+
+      {/* issue #49: the engagement counts and the reach score */}
+      <div className="rq-card__reach" data-slot="reach">
+        <ReachCounts card={card} showFollowers={!!author} />
+      </div>
+
+      {/* In the top layer, outside the card, so the card's styles do not reach it */}
+      {open && createPortal(detail, document.body)}
+    </article>
+  );
+}
+
+const STATUS_ACCENT: Record<string, 'neutral' | 'oxide' | 'caution' | 'moss'> = {
+  pending: 'caution',
+  approved: 'moss',
+  approved_not_confirmed: 'caution',
+  followup_due: 'moss',
+  skipped: 'neutral',
+  expired: 'neutral',
+};
+
+function StatusBadge({ status }: { status: string }) {
+  return <Tag accent={STATUS_ACCENT[status] ?? 'neutral'}>{status}</Tag>;
 }

@@ -8,6 +8,7 @@
  * not change.
  */
 
+import { Button, Input, Section } from '@outpost/ds';
 import { useEffect, useRef, useState } from 'react';
 import { addSkippedAccounts, getSkippedAccounts, removeSkippedAccount } from '../api/client';
 
@@ -78,76 +79,73 @@ export function SkippedAccounts() {
   };
 
   return (
-    <div style={{
-      border: '1px solid #ccc',
-      borderRadius: '8px',
-      padding: '20px',
-      marginBottom: '20px',
-      backgroundColor: '#fff',
-    }}>
-      <h3>Skipped accounts</h3>
-      <p style={{ color: '#666', fontSize: '14px' }}>
-        No watch reviews posts written by these X accounts. Posts that mention them are still
-        reviewed. A change applies at each watch's next search; cards already in the queue do not
-        change.
-      </p>
+    <Section intensity="instrument" className="op-panel sa" aria-labelledby="sa-title">
+      <div className="op-panel-head">
+        <h3 id="sa-title" className="app-section-title" style={{ fontSize: '22px' }}>Skipped accounts</h3>
+      </div>
 
-      {error && (
-        <div role="alert" style={{ color: '#c62828', marginBottom: '12px' }}>
-          {error}
-          {handles === null && (
-            <button type="button" onClick={load} style={{ marginLeft: '8px' }}>
-              Retry
-            </button>
-          )}
-        </div>
-      )}
+      <div className="op-panel__body">
+        <p className="sw-intro">
+          No watch reviews posts written by these X accounts. Posts that mention them are still
+          reviewed. A change applies at each watch's next search; cards already in the queue do not
+          change.
+        </p>
 
-      {handles === null ? (
-        !error && <div>Loading skipped accounts...</div>
-      ) : (
-        <>
-          {handles.length === 0 ? (
-            <p>No accounts are skipped.</p>
-          ) : (
-            <ul aria-label="Skipped accounts" style={{ listStyle: 'none', padding: 0, display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-              {handles.map((handle) => (
-                <li key={handle} style={{ border: '1px solid #ccc', borderRadius: '4px', padding: '4px 8px' }}>
-                  @{handle}{' '}
-                  <button
-                    type="button"
-                    onClick={() => save(() => removeSkippedAccount(handle))}
-                    disabled={saving}
-                    aria-label={`Remove @${handle}`}
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+        {error && (
+          <div role="alert" className="sa__error">
+            {error}
+            {handles === null && (
+              <Button type="button" size="sm" variant="ghost" onClick={load}>
+                Retry
+              </Button>
+            )}
+          </div>
+        )}
 
-          <form onSubmit={add} style={{ display: 'flex', gap: '8px' }}>
-            <label htmlFor="skipped-account-entry" style={{ alignSelf: 'center' }}>
-              Add account:
-            </label>
-            <input
-              id="skipped-account-entry"
-              type="text"
-              value={entry}
-              onChange={(e) => setEntry(e.target.value)}
-              // a successful save clears the field, so nothing is typed
-              // into it while one is pending
-              disabled={saving}
-              placeholder="e.g., @grok"
-              style={{ flex: 1, padding: '8px' }}
-            />
-            <button type="submit" disabled={saving || parseHandles(entry).length === 0}>
-              {saving ? 'Saving...' : 'Add'}
-            </button>
-          </form>
-        </>
-      )}
-    </div>
+        {handles === null ? (
+          !error && <p className="app-muted">Loading skipped accounts...</p>
+        ) : (
+          <>
+            {handles.length === 0 ? (
+              <p className="app-muted">No accounts are skipped.</p>
+            ) : (
+              <ul aria-label="Skipped accounts" className="sa__list">
+                {handles.map((handle) => (
+                  <li key={handle} className="sa__item">
+                    @{handle}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => save(() => removeSkippedAccount(handle))}
+                      disabled={saving}
+                      aria-label={`Remove @${handle}`}
+                    >
+                      Remove
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <form onSubmit={add} className="sa__add">
+              <Input
+                label="Add account:"
+                type="text"
+                value={entry}
+                onChange={(e) => setEntry(e.target.value)}
+                // a successful save clears the field, so nothing is typed
+                // into it while one is pending
+                disabled={saving}
+                placeholder="e.g., @grok"
+              />
+              <Button type="submit" disabled={saving || parseHandles(entry).length === 0}>
+                {saving ? 'Saving...' : 'Add'}
+              </Button>
+            </form>
+          </>
+        )}
+      </div>
+    </Section>
   );
 }

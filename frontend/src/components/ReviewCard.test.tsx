@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render as rtlRender, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReviewCard, xLength } from './ReviewCard';
@@ -43,6 +43,17 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+// issue #50: the queue shows a collapsed card; everything these tests act on
+// is in the detail view it opens. This render opens it, as a click does.
+function render(ui: Parameters<typeof rtlRender>[0]) {
+  const result = rtlRender(ui);
+  fireEvent.click(screen.getByRole('button', { name: /^Review/ }));
+  return result;
+}
+
+/** The open detail view, for text the collapsed card shows too (the post, the draft). */
+const detail = () => within(screen.getByRole('dialog'));
+
 describe('ReviewCard: skipped card', () => {
   const skippedCard = () =>
     makeCard({
@@ -54,20 +65,20 @@ describe('ReviewCard: skipped card', () => {
   it('shows the skip reason and the rejected draft as not for posting', () => {
     render(<ReviewCard card={skippedCard()} onUpdate={vi.fn()} />);
 
-    expect(screen.getByText('Skipped:')).toBeInTheDocument();
-    expect(screen.getByText(/Replies are limited on this post\./)).toBeInTheDocument();
-    expect(screen.getByText(/Rejected draft \(not for posting\)/)).toBeInTheDocument();
-    expect(screen.getByText('Rejected synthetic draft.')).toBeInTheDocument();
+    expect(detail().getByText('Skipped:')).toBeInTheDocument();
+    expect(detail().getByText(/Replies are limited on this post\./)).toBeInTheDocument();
+    expect(detail().getByText(/Rejected draft \(not for posting\)/)).toBeInTheDocument();
+    expect(detail().getByText('Rejected synthetic draft.')).toBeInTheDocument();
   });
 
-  it('has no Copy button and no action buttons', () => {
+  it('has no Copy button and no action buttons, only the button that closes the view', () => {
     render(<ReviewCard card={skippedCard()} onUpdate={vi.fn()} />);
 
     expect(screen.queryByRole('button', { name: 'Copy Draft' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Draft Reply (Combined)' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Skip' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(detail().getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Close review']);
   });
 
   it('falls back to the evidence skip reason, then to "No reason recorded"', () => {
@@ -77,7 +88,7 @@ describe('ReviewCard: skipped card', () => {
       evidence: makeEvidence({ draft: null, skip_reason: 'Evidence-level synthetic reason.' }),
     });
     const { unmount } = render(<ReviewCard card={fromEvidence} onUpdate={vi.fn()} />);
-    expect(screen.getByText(/Evidence-level synthetic reason\./)).toBeInTheDocument();
+    expect(detail().getByText(/Evidence-level synthetic reason\./)).toBeInTheDocument();
     unmount();
 
     const none = makeCard({
@@ -86,7 +97,7 @@ describe('ReviewCard: skipped card', () => {
       evidence: makeEvidence({ draft: null, skip_reason: null }),
     });
     render(<ReviewCard card={none} onUpdate={vi.fn()} />);
-    expect(screen.getByText(/No reason recorded/)).toBeInTheDocument();
+    expect(detail().getByText(/No reason recorded/)).toBeInTheDocument();
   });
 
   it('shows no rejected-draft line when the card has no draft', () => {
@@ -144,7 +155,7 @@ describe('ReviewCard: pending card', () => {
     const text = 'Acme Relay retries failed deliveries. https://example.com/acme-relay';
     render(<ReviewCard card={makeCard({ evidence: makeEvidence({ draft: makeDraft({ text }) }) })} onUpdate={vi.fn()} />);
 
-    expect(screen.getByText(text)).toBeInTheDocument();
+    expect(detail().getByText(text)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Copy Draft' }));
     expect(writeText).toHaveBeenCalledWith(text);
   });
@@ -664,9 +675,11 @@ describe('ReviewCard: post removed (issue #9)', () => {
     card.evidence.draft!.text = '[removed - post deleted]';
     render(<ReviewCard card={card} onUpdate={vi.fn()} />);
 
-    expect(screen.getByRole('heading', { name: 'Review' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Review', level: 3 })).toBeInTheDocument();
+    expect(detail().getByRole('heading', { name: 'Review', level: 2 })).toBeInTheDocument();
     expect(screen.getByText(/Post removed: it was deleted or is no longer visible on X/)).toBeInTheDocument();
-    expect(screen.getByText(/likes · \d+ replies$/)).toBeInTheDocument();
+    // On the collapsed card (its reach slot) and in the detail view
+    expect(screen.getAllByText(/likes · \d+ replies$/)).toHaveLength(2);
     expect(screen.queryByText(/followers/)).not.toBeInTheDocument();
     expect(screen.queryByText(/@/)).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /View on X/ })).not.toBeInTheDocument();
@@ -709,5 +722,208 @@ describe('ReviewCard: post removed (issue #9)', () => {
 
     expect(onUpdate).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: 'Save Edit' })).not.toBeInTheDocument();
+  });
+});
+
+describe('ReviewCard: collapsed card and detail view (issue #50)', () => {
+  const openButton = () => screen.getByRole('button', { name: /^Review/ });
+
+  it('shows the topic, the confidence, the post and the draft, and no actions until opened', () => {
+    const card = makeCard({
+      evidence: makeEvidence({
+        matched_topic: 'synthetic topic',
+        confidence_score: 0.72,
+        draft: makeDraft({ text: 'Collapsed synthetic draft.' }),
+      }),
+    });
+    rtlRender(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    expect(screen.getByText('synthetic topic')).toBeInTheDocument();
+    expect(screen.getByLabelText('Confidence 72%')).toBeInTheDocument();
+    expect(screen.getByText(card.post.text)).toBeInTheDocument();
+    expect(screen.getByText('Collapsed synthetic draft.')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+    expect(openButton()).toHaveAttribute('aria-haspopup', 'dialog');
+  });
+
+  it('opens the detail view on click and closes it with the close button, returning focus to the card', async () => {
+    const user = userEvent.setup();
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(detail().getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+
+    await user.click(detail().getByRole('button', { name: 'Close review' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(openButton()).toHaveFocus();
+  });
+
+  it('keeps an unsaved edit when the view closes, says so on the card, and shows it again on reopen', async () => {
+    const user = userEvent.setup();
+    const card = makeCard();
+    rtlRender(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    const box = screen.getByLabelText('Edited draft');
+    await user.clear(box);
+    await user.type(box, 'My unsaved synthetic edit.');
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByText('Unsaved edit')).toBeInTheDocument();
+    expect(screen.getByText('Draft (your edit is not saved)')).toBeInTheDocument();
+    expect(editMock).not.toHaveBeenCalled();
+
+    await user.click(openButton());
+    expect(screen.getByLabelText('Edited draft')).toHaveValue('My unsaved synthetic edit.');
+    expect(screen.getByRole('button', { name: 'Save Edit' })).toBeInTheDocument();
+  });
+
+  it('keeps a typed posted URL, skip reason and nudge across close and reopen', async () => {
+    const user = userEvent.setup();
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.type(screen.getByPlaceholderText('Skip reason (optional)'), 'synthetic reason');
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(detail().getByRole('button', { name: 'Close review' }));
+    expect(screen.getByText('Unsent nudge')).toBeInTheDocument();
+
+    await user.click(openButton());
+    expect(screen.getByPlaceholderText('Paste URL of your posted reply')).toHaveValue('https://x.example/me/status/9');
+    expect(screen.getByPlaceholderText('Skip reason (optional)')).toHaveValue('synthetic reason');
+    expect(screen.getByPlaceholderText(/Make it shorter/)).toHaveValue('Shorter');
+  });
+
+  it('flags the card when a result arrives after the view was closed', async () => {
+    const user = userEvent.setup();
+    let reject: (err: unknown) => void = () => {};
+    approveMock.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    rtlRender(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await user.click(detail().getByRole('button', { name: 'Close review' }));
+    expect(screen.getByText('Working…')).toBeInTheDocument();
+
+    await act(async () => reject(postAnywayError()));
+    expect(screen.getByText('Needs a look')).toBeInTheDocument();
+
+    await user.click(openButton());
+    expect(screen.getByRole('button', { name: 'Post Anyway (Override)' })).toBeInTheDocument();
+  });
+
+  it('shows no stale post text or author for a removed post, collapsed or open (issues #9, #35)', async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ status: 'skipped' });
+    const { username, name } = card.post.author!;
+    // A stale response: the removal is recorded but the old text and author are still there
+    card.post = { ...card.post, text: 'Distinctive stale synthetic post text.', text_removed: true };
+    rtlRender(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    const assertNothingStale = () => {
+      expect(document.body).not.toHaveTextContent('Distinctive stale synthetic post text.');
+      expect(document.body).not.toHaveTextContent(username);
+      expect(document.body).not.toHaveTextContent(name);
+    };
+    expect(screen.getByRole('heading', { name: 'Review' })).toBeInTheDocument();
+    expect(screen.getByText('Post removed')).toBeInTheDocument();
+    assertNothingStale();
+
+    await user.click(openButton());
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    assertNothingStale();
+  });
+
+  it('does not let a nudge replace an unsaved edit, and says why', async () => {
+    const user = userEvent.setup();
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    await user.type(screen.getByPlaceholderText(/Make it shorter/), 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.type(screen.getByLabelText('Edited draft'), ' plus my words');
+
+    const apply = screen.getByRole('button', { name: 'Apply Nudge' });
+    expect(apply).toBeDisabled();
+    expect(apply).toHaveAccessibleDescription('A nudge replaces the draft. Save or cancel your edit first.');
+    expect(screen.getByRole('button', { name: 'Skip' })).toHaveAccessibleDescription('Skipping discards your unsaved edit.');
+    const approve = screen.getByRole('button', { name: 'Approve' });
+    expect(approve).toBeDisabled();
+    expect(approve).toHaveAccessibleDescription('Approve records the saved draft. Save or cancel your edit first.');
+    expect(nudgeMock).not.toHaveBeenCalled();
+  });
+
+  it('turns off "Post Anyway" while an edit is unsaved', async () => {
+    const user = userEvent.setup();
+    approveMock.mockRejectedValueOnce(postAnywayError());
+    rtlRender(<ReviewCard card={makeCard({ edited_text_gate_state: 'failed' })} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.type(screen.getByPlaceholderText('Paste URL of your posted reply'), 'https://x.example/me/status/9');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.type(screen.getByLabelText('Edited draft'), ' unsaved');
+
+    const override = screen.getByRole('button', { name: 'Post Anyway (Override)' });
+    expect(override).toBeDisabled();
+    expect(override).toHaveAccessibleDescription('Approve records the saved draft. Save or cancel your edit first.');
+    expect(approveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the URL and skip reason fields read-only while a request runs', async () => {
+    const user = userEvent.setup();
+    let resolve: () => void = () => {};
+    skipMock.mockReturnValueOnce(new Promise((r) => { resolve = () => r(); }));
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(screen.getByPlaceholderText('Skip reason (optional)')).toHaveAttribute('readonly');
+    expect(screen.getByPlaceholderText('Paste URL of your posted reply')).toHaveAttribute('readonly');
+
+    await act(async () => resolve());
+  });
+
+  it('does not take typing in the nudge field while the nudge is on its way', async () => {
+    const user = userEvent.setup();
+    let resolve: (v: string) => void = () => {};
+    nudgeMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    rtlRender(<ReviewCard card={makeCard()} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Nudge (Redraft)' }));
+    const field = screen.getByPlaceholderText(/Make it shorter/);
+    await user.type(field, 'Shorter');
+    await user.click(screen.getByRole('button', { name: 'Apply Nudge' }));
+    expect(field).toHaveAttribute('readonly');
+
+    await act(async () => resolve('New synthetic draft.'));
+  });
+
+  it('does not take typing in the edit box while the save is on its way', async () => {
+    const user = userEvent.setup();
+    let resolve: (v: string) => void = () => {};
+    editMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const card = makeCard();
+    rtlRender(<ReviewCard card={card} onUpdate={vi.fn()} />);
+
+    await user.click(openButton());
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    const box = screen.getByLabelText('Edited draft');
+    await user.type(box, ' saved part');
+    await user.click(screen.getByRole('button', { name: 'Save Edit' }));
+    expect(box).toHaveAttribute('readonly');
+    await user.type(box, ' lost part');
+    expect(box).toHaveValue(`${card.evidence.draft!.text} saved part`);
+
+    await act(async () => resolve('ok'));
   });
 });

@@ -167,3 +167,25 @@ describe('App review queue', () => {
     expect(listReviewsMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('App review detail view (issue #50)', () => {
+  it('keeps the open detail view and an unsaved edit through a queue refresh', async () => {
+    const user = userEvent.setup();
+    const card = makeCardBy('refreshuser');
+    serve([card]);
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Review: refreshuser' }));
+    await user.click(screen.getByRole('button', { name: 'Edit Draft' }));
+    await user.type(screen.getByLabelText('Edited draft'), ' more');
+
+    serve([{ ...card }, makeCardBy('otheruser')]);
+    await act(async () => {
+      screen.getByRole('button', { name: 'Refresh', hidden: true }).click();
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Review Queue (2)', hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByLabelText('Edited draft')).toHaveValue(`${card.evidence.draft!.text} more`);
+  });
+});

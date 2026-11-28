@@ -5,10 +5,8 @@
  * (backend/config/reach.py); this file only shows them.
  */
 
+import { Tag } from '@outpost/ds';
 import type { ReviewCard } from '../api/client';
-
-/** Highlight colour for a card at or above the backend's reach level. */
-export const HIGH_REACH_BORDER = '#1565c0';
 
 /** The pending queue's order: the backend's queue_priority, else confidence. */
 export function queueSortKey(card: ReviewCard): number {
@@ -22,24 +20,22 @@ export function compareQueueOrder(a: ReviewCard, b: ReviewCard): number {
 export function HighReachBadge({ card }: { card: ReviewCard }) {
   if (!card.reach_highlighted || !card.reach) return null;
   return (
-    <span
-      title={`Reach ${card.reach.score.toFixed(2)} (rule ${card.reach.rule_version})`}
-      style={{
-        padding: '4px 12px',
-        borderRadius: '4px',
-        fontSize: '14px',
-        backgroundColor: HIGH_REACH_BORDER,
-        color: '#fff',
-        marginRight: '8px',
-      }}
-    >
+    <Tag accent="moss" title={`Reach ${card.reach.score.toFixed(2)} (rule ${card.reach.rule_version})`}>
       High reach
-    </span>
+    </Tag>
   );
 }
 
 /** The raw counts line: from the stored reach inputs, else from the post. */
-export function ReachCounts({ card, showFollowers }: { card: ReviewCard; showFollowers: boolean }) {
+export function ReachCounts({
+  card,
+  showFollowers,
+  className = 'rq-counts',
+}: {
+  card: ReviewCard;
+  showFollowers: boolean;
+  className?: string;
+}) {
   const reach = card.reach;
   const counts = reach
     ? reach.inputs
@@ -60,7 +56,7 @@ export function ReachCounts({ card, showFollowers }: { card: ReviewCard; showFol
   add(counts.quote_count, 'quotes');
   if (showFollowers) add(counts.followers_count, 'followers');
   return (
-    <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }} data-testid="reach-counts">
+    <div className={className} data-testid="reach-counts">
       {parts.join(' · ')}
       {reach && <> · Reach: {(reach.score * 100).toFixed(0)}%</>}
     </div>
