@@ -122,6 +122,7 @@ This runs all replay tests with fake adapters. No API keys needed.
 - `test_brief_suggestions.py`: issue #42. A suggestion whose quote is not on the page word for word is dropped (and short quotes, repeats, sentences the brief has, more than 8); flags name existing brief sentences, a contradiction only with a quote on the page; the API stores neither the page text nor the suggestions; a fetch failure, a non-https URL or a long brief is a clear error with no model call; the SSRF guard (private, loopback, link-local, mapped and embedded IPv4 addresses, redirects, port, user info) with a fake resolver and `httpx.MockTransport`; the page as a delimited data block; the call metered in the ledger, never above the shown estimate, refused by the kill switch
 - `test_redraft_harness.py`: The offline redraft harness (issue #29) with fake adapters: no X calls, the database left unchanged, the workflow's redraft steps, the spend cap, a summary without text, and `--limit` counted after the skips (issue #34)
 - `test_research_post_quote.py`: issue #44. The research prompt asks for `post_problem_quote`, a quote of the post (between its markers, right before the keys) and never of the brief; the parse reads only that key into `ReplyFit.brief_problem_span`; a brief quote and a near quote are still `not_in_post`; histories recorded on main fd3f38e replay
+- `test_reach.py`: issue #49. The reach formula (values worked by hand from the documented formula, zero counts, missing or malformed metrics, huge accounts, caps, the follower floor, each input raising the score), the highlight level, the queue order, confidence unchanged, `store_card` storing the record, a removal dropping it (also on a late store and on a card read just before the removal), the worker-start backfill (also while a removal holds the write lock) and the column migration (also when the API and the worker race)
 - `test_research_harness.py`: The offline research eval (issue #44) with fake adapters: no X calls, the database left unchanged, only posts that still have text, a removal stops the post, the spend cap, brief quotes counted, and a summary without text
 
 ### E2E Scripts
@@ -153,7 +154,7 @@ The scripts set `DATABASE_URL`, `TEMPORAL_HOST`, the adapters, the credentials a
 
 2. **Review Cards Appear:**
    - As new posts are found, Review workflows start
-   - Cards appear in the UI sorted by confidence
+   - Cards appear in the UI sorted by confidence plus reach (see "Reach score"); a card with high reach has a blue border and a "High reach" badge
 
 3. **Interact with Reviews:**
    - **Approve:** Copy the draft, post it manually on X, paste the URL
@@ -244,6 +245,39 @@ On the Start Watch form, **Suggest brief additions** (below the brief) reads the
 - **Nothing is stored.** The call runs in the API process, not in a workflow, so the page text is not in Temporal history. Neither the page text nor the suggestions are written to the database or logged; an error shows the provider error's type only (it can echo the prompt).
 - **Budget.** The call is reserved and settled in the daily inference ledger like the workflows' calls (`backend.budget.meter_api_inference`; reservation key `api:brief-suggestions:<random run id>`), under the same cap and kill switch. A refused call is HTTP 429 `budget_exceeded`.
 - **Errors.** `{"code", "detail"}` as the review endpoints: `url_invalid`, `url_refused` (a private or local address), `brief_too_long` (400); `page_not_found`, `unsupported_content` (422); `fetch_failed`, `model_answer_unusable`, `model_failed` (502); `rate_limited` (503); `budget_exceeded` (429). The form shows the message and stays usable.
+
+### Skipped accounts (issue #48)
+
+A list of X handles whose posts no watch reviews, edited in the **Skipped accounts** box below the Start Watch form. It starts empty. There is one list for the app, and every watch uses it (George's decision, 2026-11-27: one list per account, not per watch; the app has one founder, so the list is stored once, in the `global_settings` table under `skipped_accounts`).
+
+- **API.** `GET /api/settings/skipped-accounts` returns `{"handles": [...]}`. `POST` with `{"handles": [...]}` adds handles to the end of the list (one already on it stays where it is); `DELETE /api/settings/skipped-accounts/<handle>` removes one (removing one not on the list changes nothing). Both return the list as stored. A request carries the change, never the whole list, so a request answered late or retried cannot undo another change. Handles are stored lowercase, without `@`, blanks and repeats removed, in the order added. A value that is not an X handle (1-15 letters, digits or underscores), or an add past 100 handles, is 422 `invalid_request` and the stored list does not change. After a failed add or remove the box reads the stored list again (the change may have been stored although its answer was lost), and waits for Retry if that read fails.
+- **Search query.** At each search, the `search_recent` activity reads the list (`backend/skipped_accounts.py`), puts the watch's query in parentheses (so an `OR` in it cannot bind to the operator) and adds ` -from:<handle>` for each handle while the query stays within X's 512-character recent-search limit. A handle that does not fit is left out (the next, shorter one is still tried) and the activity logs a warning naming the handles left out. X does not return the posts of the handles in the query, so they cost no read.
+- **Fallback filter.** The activity also drops any returned post whose author handle is on the list (case-insensitive), before it stores the posts and starts Reviews. This covers the handles left out of the query. X billed those posts, so they stay in the read count; the watch's `since_id` still moves past them. The watch reads one page per search (`WATCH_MAX_RESULTS`), as before: when posts of handles left out of the query fill part of the page, the page holds fewer reviewable posts, and older posts past the page are not fetched (as for any search that returns a full page). With the handles in the query, X fills the page with other posts.
+- **Only authors.** A post that mentions a listed handle ("@grok is this true?") is still reviewed.
+- **When it applies.** The list is read inside the activity, whose result is recorded in history, so an edit applies at each watch's next search with no restart, and replay does not read the list again. No workflow code or activity input changed. Cards already in the queue do not change. `check_followup` (replies to a posted reply) does not use the list.
+- **Fake adapter.** `FakeXClient` treats a `-from:<handle>` term like X (it leaves out that author's posts) and ignores the parentheses, so e2e runs search as before.
+
+### Reach score (ADR-0006 amendment 2026-11-27, issue #49)
+
+Reach answers "how many people will see a reply here?". It is separate from confidence ("is a reply welcome and on-topic?"): it never changes confidence, the threshold or which posts get a card. It only orders and highlights cards in the review queue.
+
+- **Formula** (`backend/config/reach.py`, `REACH_RULE_VERSION = "2026-11-27"`; code in `backend/reach.py`). Inputs are the post metrics X returned with the searched post: `like_count`, `reply_count`, `repost_count`, `quote_count` and `author.followers_count`. No extra X read.
+  - engagement = likes + 2 × (replies + reposts + quotes)
+  - engagement_score = log10(1 + engagement) / log10(101), capped at 1 (100 or more counts as full)
+  - audience_score = (log10(followers) − 2) / 4, clamped to [0, 1] (100 followers or fewer is 0, 1M or more is 1)
+  - reach = 0.65 × engagement_score + 0.35 × audience_score, in [0, 1]
+
+  Both component scores and reach are stored rounded to 4 decimal places (reach is the weighted sum of the rounded components), so a value within 0.0001 of the highlight level can land on either side of it.
+
+  The scales come from the 203 cards in the local database on 2026-11-27 (median engagement 2, 99th percentile 58; median followers 400, a few accounts with 9.4M). Engagement weighs more because it shows the post is being seen now; followers are only potential audience, so a huge account with no engagement scores at most 0.35.
+- **Highlight.** A card with reach ≥ 0.6 (`REACH_HIGHLIGHT_LEVEL`) gets a blue border and a "High reach" badge: 8 of the 203 cards (4%). A card with a reach score shows the raw counts (likes, replies, reposts, quotes, followers) and its reach. A card without one shows the post's own counts and no reach; a removed post shows no follower count.
+- **Queue order.** `queue_priority = confidence + 0.2 × reach` (`REACH_SORT_WEIGHT`), highest first, not rounded. Full reach moves a card above one that is up to 0.2 more confident; cards that pass the confidence threshold spread from about 0.55 to 0.98, so confidence still leads. A card without a reach score sorts by confidence alone.
+- **Storage.** `store_card` computes the record from the card's post and stores it in `review_cards.reach` (score, inputs, engagement, both component scores and `rule_version`). Reach is computed in the activity, not in workflow code, so no workflow history changes. A new rule gets a new date; stored cards keep the version that scored them until they are stored again.
+- **API.** `GET /api/reviews` and a stored card from `GET /api/reviews/{id}` carry `reach` (the record or `null`), `reach_highlighted` and `queue_priority`. The highlight and the sort key are derived from the stored score with the current settings. A Review whose card is read from its own query (recorded before issue #23) has no `reach` field; the card then shows the post's counts.
+- **Cards without metrics.** A card whose post lacks a metric, or holds one that is not a non-negative integer, gets `reach: null`, no highlight, and sorts by confidence alone.
+- **Removal.** A removed post has no reach: the inputs include the author's follower count, which issue #35 removes. The removal clears `review_cards.reach`, and a later store of the card does not put it back.
+- **Existing databases.** The first database use in any process adds the `reach` column (`database._migrate_add_reach`; the worker never calls `init_db`). At worker start, `worker.prepare_database` stores a reach record on every card without one that has the metrics (`backfill_reach`). It runs in the worker, not the API, because removals run in the worker: an older worker still running after an API restart would not clear a score when it removes a post. Restart the worker with the API after upgrading; until then, cards stored by the older worker have no reach. At API start, the removal rules (`redact_recorded_removals`) also clear any reach left on a removed post.
+- **Known limit.** The counts are from the moment of search. A post found minutes after it was written has low counts and low reach, however far it spreads later. Re-fetching the counts would cost X reads and is out of scope.
 
 ### Redraft harness (issue #29)
 

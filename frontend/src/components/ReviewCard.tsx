@@ -12,6 +12,7 @@ import { approveReview, skipReview, editReview, nudgeReview, confirmPostedReview
 import { ReplyFitPanel } from './ReplyFitPanel';
 import { ReplyPlanPanel } from './ReplyPlanPanel';
 import { SentenceCheckList } from './SentenceCheckList';
+import { HighReachBadge, ReachCounts } from './ReachSummary';
 
 interface ReviewCardProps {
   card: ReviewCardType;
@@ -339,13 +340,6 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
   const approveBlockedId = `${card.workflow_id}-approve-blocked`;
   const needsAttention = showPostAnywayConfirm || notice != null || (error != null && !textRemoved);
 
-  const counts = (
-    <>
-      {card.post.like_count} likes · {card.post.reply_count} replies
-      {author && <> · {author.followers_count.toLocaleString()} followers</>}
-    </>
-  );
-
   const detail = (
     <Dialog
       open
@@ -357,6 +351,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
     >
       <div className="rq-detail__meta">
         <StatusBadge status={card.status} />
+        <HighReachBadge card={card} />
         <span>Confidence <strong>{confidencePct}%</strong></span>
         <span>Topic <strong>{card.evidence.matched_topic}</strong></span>
       </div>
@@ -379,7 +374,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
               ) : (
                 <div className="rq-post__text">{card.post.text}</div>
               )}
-              <div className="rq-post__counts">{counts}</div>
+              <ReachCounts card={card} showFollowers={!!author} className="rq-post__counts" />
             </div>
             {postUrl && (
               <a href={postUrl} target="_blank" rel="noopener noreferrer" className="app-link">
@@ -972,8 +967,12 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
 
   return (
     <article
-      className={skipped ? 'op-panel rq-card rq-card--skipped' : 'op-panel rq-card'}
+      className={['op-panel', 'rq-card', skipped && 'rq-card--skipped', card.reach_highlighted && card.reach && 'rq-card--high-reach']
+        .filter(Boolean)
+        .join(' ')}
       data-testid="review-card"
+      // issue #49: a card at or above the reach level
+      data-high-reach={card.reach_highlighted && card.reach ? 'true' : undefined}
     >
       <div className="rq-card__top">
         <div className="rq-card__conf" aria-label={`Confidence ${confidencePct}%`}>
@@ -995,6 +994,7 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         </div>
         <div className="rq-card__flags">
           <StatusBadge status={card.status} />
+          <HighReachBadge card={card} />
           {unsavedEdit && <Tag accent="caution">Unsaved edit</Tag>}
           {unsavedNudge && <Tag accent="caution">Unsent nudge</Tag>}
           {loading && <Tag accent="neutral">Working…</Tag>}
@@ -1025,10 +1025,9 @@ export function ReviewCard({ card, onUpdate }: ReviewCardProps) {
         )
       )}
 
-      {/* issue #49 fills this slot with the reach score, its highlight and the
-          engagement counts; until then it shows the counts the card has */}
+      {/* issue #49: the engagement counts and the reach score */}
       <div className="rq-card__reach" data-slot="reach">
-        <span>{counts}</span>
+        <ReachCounts card={card} showFollowers={!!author} />
       </div>
 
       {/* In the top layer, outside the card, so the card's styles do not reach it */}

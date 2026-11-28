@@ -86,8 +86,33 @@ export type EditGateResult = {
   sentence_index?: number | null;
 } & Partial<Pick<SentenceCheck, "triggers" | "checker_flagged" | "verdict" | "supporting">>;
 
+/**
+ * issue #49: the reach record stored with a card (backend/reach.py;
+ * rule and weights in backend/config/reach.py). Separate from confidence.
+ */
+export interface Reach {
+  score: number;
+  inputs: {
+    like_count: number;
+    reply_count: number;
+    repost_count: number;
+    quote_count: number;
+    followers_count: number;
+  };
+  engagement: number;
+  engagement_score: number;
+  audience_score: number;
+  rule_version: string;
+}
+
 export interface ReviewCard {
   workflow_id: string;
+  // issue #49: absent on a card read from a Review's query; null when the
+  // card has no stored metrics or records a removal
+  reach?: Reach | null;
+  reach_highlighted?: boolean;
+  // The pending queue's sort key: confidence + 0.2 * reach (confidence alone without reach)
+  queue_priority?: number;
   post: {
     id: string;
     text: string;
@@ -101,6 +126,8 @@ export interface ReviewCard {
     created_at: string;
     like_count: number;
     reply_count: number;
+    repost_count?: number;
+    quote_count?: number;
     // issue #9: set when the post was deleted or is no longer visible on X and its text was removed
     text_removed?: boolean;
   };
@@ -240,6 +267,31 @@ export function generateRequestId(): string {
   return `req_${timestamp}_${random}`;
 }
 
+/**
+ * Why the API refused a request: its "detail", or, for fields it refused (a
+ * missing product name, too many aliases), the reasons in "errors".
+ */
+async function refusalDetail(response: Response): Promise<string> {
+  let detail = response.statusText || `HTTP ${response.status}`;
+  try {
+    const body = await response.json();
+    if (typeof body?.detail === 'string' && body.detail) detail = body.detail;
+    // Each entry: {loc: ["body", "product_aliases"], msg: "Value error, At most 10 aliases", ...}
+    const reasons = (Array.isArray(body?.errors) ? body.errors : [])
+      .map((e: { loc?: unknown; msg?: unknown }) => {
+        if (typeof e?.msg !== 'string') return '';
+        const field = Array.isArray(e.loc) ? e.loc.filter((part) => typeof part === 'string' && part !== 'body').pop() : null;
+        const msg = e.msg.replace(/^Value error, /, '');
+        return field ? `${field}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+    if (reasons.length > 0) detail = reasons.join('; ');
+  } catch {
+    // Not JSON: keep the status text
+  }
+  return detail;
+}
+
 export async function startWatch(request: StartWatchRequest): Promise<{ workflow_id: string; message: string }> {
   const response = await fetch(`${API_BASE}/watch/start`, {
     method: 'POST',
@@ -248,26 +300,7 @@ export async function startWatch(request: StartWatchRequest): Promise<{ workflow
   });
   
   if (!response.ok) {
-    // The API explains a refused request in "detail", and for a field it
-    // refused (a missing product name, too many aliases) in "errors"
-    let detail = response.statusText;
-    try {
-      const body = await response.json();
-      if (typeof body?.detail === 'string' && body.detail) detail = body.detail;
-      // Each entry: {loc: ["body", "product_aliases"], msg: "Value error, At most 10 aliases", ...}
-      const reasons = (Array.isArray(body?.errors) ? body.errors : [])
-        .map((e: { loc?: unknown; msg?: unknown }) => {
-          if (typeof e?.msg !== 'string') return '';
-          const field = Array.isArray(e.loc) ? e.loc.filter((part) => typeof part === 'string' && part !== 'body').pop() : null;
-          const msg = e.msg.replace(/^Value error, /, '');
-          return field ? `${field}: ${msg}` : msg;
-        })
-        .filter(Boolean);
-      if (reasons.length > 0) detail = reasons.join('; ');
-    } catch {
-      // Not JSON: keep the status text
-    }
-    throw new Error(`Failed to start watch: ${detail}`);
+    throw new Error(`Failed to start watch: ${await refusalDetail(response)}`);
   }
   
   return response.json();
@@ -543,4 +576,41 @@ export async function suggestBriefAdditions(request: {
     throw new BriefSuggestionError(detail, code);
   }
   return response.json();
+}
+
+// --- Skipped accounts (issue #48) ---
+// One list for every watch: X handles whose posts no watch reviews. Each
+// watch reads it at its next search. A request adds or removes handles,
+// never replaces the list, so a delayed request cannot undo another change.
+
+export async function getSkippedAccounts(): Promise<string[]> {
+  const response = await fetch(`${API_BASE}/settings/skipped-accounts`);
+  if (!response.ok) {
+    throw new Error(`Failed to load skipped accounts: ${await refusalDetail(response)}`);
+  }
+  return (await response.json()).handles;
+}
+
+/** Add handles; returns the list as stored (lowercase, without "@"). */
+export async function addSkippedAccounts(handles: string[]): Promise<string[]> {
+  const response = await fetch(`${API_BASE}/settings/skipped-accounts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ handles }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to add skipped accounts: ${await refusalDetail(response)}`);
+  }
+  return (await response.json()).handles;
+}
+
+/** Remove one handle; returns the list as stored. */
+export async function removeSkippedAccount(handle: string): Promise<string[]> {
+  const response = await fetch(`${API_BASE}/settings/skipped-accounts/${encodeURIComponent(handle)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to remove a skipped account: ${await refusalDetail(response)}`);
+  }
+  return (await response.json()).handles;
 }

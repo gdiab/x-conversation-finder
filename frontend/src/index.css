@@ -123,6 +123,9 @@ body { min-height: 100vh; }
 .rq-card:hover { border-color: var(--op-dust); background-color: var(--op-raised); }
 /* Skipped: a dashed plate, not lower opacity (that took muted text below AA) */
 .rq-card--skipped { border-style: dashed; }
+/* issue #49: a card at or above the reach level. Moss, like its "High reach" tag */
+.rq-card--high-reach,
+.rq-card--high-reach:hover { border-color: var(--op-moss); box-shadow: inset 0 0 0 1px var(--op-moss); }
 
 .rq-card__top {
   display: flex;
@@ -291,6 +294,7 @@ body { min-height: 100vh; }
 .rq-post__author { color: var(--op-bone); font-weight: 700; margin-bottom: var(--op-space-1); overflow-wrap: anywhere; }
 .rq-post__text { color: var(--op-ash); white-space: pre-wrap; overflow-wrap: anywhere; }
 .rq-post__removed { font-style: italic; color: var(--op-dust); }
+.rq-counts { margin: 0; }
 .rq-post__counts { font: 400 11px / 1.4 var(--op-family-mono); color: var(--op-dust); margin-top: var(--op-space-2); }
 
 .rq-draft {
@@ -418,3 +422,22 @@ body { min-height: 100vh; }
   .app { padding: var(--op-space-4) var(--op-space-4) var(--op-space-12); }
   .op-btn { padding: var(--op-space-3) var(--op-space-4); }
 }
+
+/* ---------- Skipped accounts (issue #48) ------------------------------ */
+
+.sa { margin-top: var(--op-space-6); }
+.sa .op-panel__body { display: grid; gap: var(--op-space-4); }
+.sa__list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--op-space-2); }
+.sa__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--op-space-2);
+  padding: var(--op-space-1) var(--op-space-1) var(--op-space-1) var(--op-space-3);
+  border: var(--op-hair) solid var(--op-line);
+  background-color: var(--op-void);
+  font: 400 13px / 1.4 var(--op-family-mono);
+  color: var(--op-bone);
+}
+.sa__add { display: flex; flex-wrap: wrap; gap: var(--op-space-3); align-items: flex-end; }
+.sa__add .op-field { flex: 1 1 220px; min-width: 0; }
+.sa__error { display: flex; flex-wrap: wrap; gap: var(--op-space-3); align-items: center; color: var(--op-oxide); font: var(--op-font-mono); }

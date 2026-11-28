@@ -6,6 +6,8 @@ import { useState, useEffect, useRef } from 'react';
 import { Banner, Button, Section } from '@outpost/ds';
 import { ReviewCard } from './components/ReviewCard';
 import { StartWatchForm } from './components/StartWatchForm';
+import { SkippedAccounts } from './components/SkippedAccounts';
+import { compareQueueOrder } from './components/ReachSummary';
 import { listReviews } from './api/client';
 import type { ReviewCard as ReviewCardType } from './api/client';
 
@@ -32,9 +34,8 @@ function App() {
     try {
       const result = await listReviews();
       if (load !== latestLoad.current) return;
-      setCards(result.cards.sort((a, b) => 
-        b.evidence.confidence_score - a.evidence.confidence_score
-      ));
+      // issue #49: confidence plus reach (queue_priority, set by the backend)
+      setCards(result.cards.sort(compareQueueOrder));
     } catch (err) {
       if (load !== latestLoad.current) return;
       setError(err instanceof Error ? err.message : 'Failed to load reviews');
@@ -61,6 +62,8 @@ function App() {
       </header>
 
       <StartWatchForm onSuccess={loadReviews} />
+
+      <SkippedAccounts />
 
       <div className="rq-bar">
         <h2 className="app-section-title">Review Queue ({activeCards.length})</h2>

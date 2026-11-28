@@ -56,6 +56,19 @@ def build_activities(x_client, reply_agent, claim_checker, draft_mode=None) -> l
     ]
 
 
+def prepare_database() -> int:
+    """issue #49: store a reach score on cards stored without one (before
+    reach existed, or by an older worker). Here and not at API start:
+    removals run in the worker, so once this code runs, every later removal
+    also clears the score. Returns how many cards were scored."""
+    from backend.activities.store_activities import backfill_reach
+
+    scored = backfill_reach()
+    if scored:
+        logging.getLogger(__name__).info(f"Stored a reach score on {scored} cards")
+    return scored
+
+
 async def main():
     """Start the Temporal worker."""
     settings = get_settings()
@@ -120,6 +133,7 @@ async def main():
         namespace=settings.temporal_namespace,
     )
     
+    prepare_database()
     logger.info("Starting worker")
     
     worker = Worker(

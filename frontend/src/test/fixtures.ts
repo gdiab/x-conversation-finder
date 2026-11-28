@@ -182,3 +182,16 @@ export function makeCardBy(username: string, overrides: Partial<ReviewCard> = {}
     post: { ...card.post, author: { ...card.post.author!, username, name: `${username} (synthetic)` } },
   };
 }
+
+/** issue #49: a stored reach record. Defaults: a high-reach post. */
+export function makeReach(overrides: Partial<NonNullable<ReviewCard['reach']>> = {}): NonNullable<ReviewCard['reach']> {
+  return {
+    score: 0.92,
+    inputs: { like_count: 120, reply_count: 23, repost_count: 3, quote_count: 0, followers_count: 119000 },
+    engagement: 172,
+    engagement_score: 1.0,
+    audience_score: 0.77,
+    rule_version: '2026-11-27',
+    ...overrides,
+  };
+}

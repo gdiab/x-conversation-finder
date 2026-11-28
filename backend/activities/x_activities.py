@@ -18,6 +18,12 @@ from backend.budget import (
 )
 from backend.config import get_settings
 from backend.activities.store_activities import post_removal_recorded
+from backend.skipped_accounts import (
+    X_QUERY_MAX_CHARS,
+    drop_skipped_authors,
+    get_skipped_accounts,
+    query_with_skips,
+)
 from temporalio.exceptions import ApplicationError
 
 
@@ -154,7 +160,19 @@ class XActivities:
                 )
         
         settings = get_settings()
-        
+
+        # Issue #48: the founder's skipped accounts, read at each search, so
+        # an edit applies at the watch's next search. X leaves out their
+        # posts for each `-from:` operator that fits in the query; the
+        # filter below drops the rest.
+        skipped = get_skipped_accounts()
+        query, left_out = query_with_skips(input.query, skipped)
+        if left_out:
+            activity.logger.warning(
+                f"Skipped accounts left out of the X query ({X_QUERY_MAX_CHARS}-character "
+                f"limit); their posts are dropped after the search: {', '.join(left_out)}"
+            )
+
         # Reserve budget atomically (NB3: reserve-then-commit)
         # This raises BudgetExceeded if cap would be exceeded
         # Issue #8: reserve what the request can be billed for, which the HTTP
@@ -174,7 +192,7 @@ class XActivities:
         
         try:
             result = await self._x_client.search_recent(
-                query=input.query,
+                query=query,
                 since_id=input.since_id,
                 max_results=input.max_results,
             )
@@ -190,7 +208,14 @@ class XActivities:
                 )
             raise
         
-        posts = result.posts
+        # Issue #48: X billed these posts too (they stay in billable_reads);
+        # newest_id still advances past them, so the next search does not
+        # return them again
+        posts = drop_skipped_authors(result.posts, skipped)
+        if len(posts) != len(result.posts):
+            activity.logger.info(
+                f"Dropped {len(result.posts) - len(posts)} posts written by skipped accounts"
+            )
         # R5-B1: Reconcile budget to actual usage (two-way, idempotent).
         # Issue #17: X billed every post it returned, also the ones the
         # adapter dropped, so reconcile to the billable count, not len(posts).
