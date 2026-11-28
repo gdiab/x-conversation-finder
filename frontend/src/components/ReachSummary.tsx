@@ -8,13 +8,23 @@
 import { Tag } from '@outpost/ds';
 import type { ReviewCard } from '../api/client';
 
-/** The pending queue's order: the backend's queue_priority, else confidence. */
+/** A pending card's sort key: the backend's queue_priority, else confidence. */
 export function queueSortKey(card: ReviewCard): number {
   return typeof card.queue_priority === 'number' ? card.queue_priority : card.evidence.confidence_score;
 }
 
+/**
+ * The queue's order: pending cards first, by queue_priority (confidence plus
+ * reach); then every other card (expired, approved, ...), newest first. A
+ * card that can no longer be acted on must not bury one that can, however
+ * high its confidence.
+ */
 export function compareQueueOrder(a: ReviewCard, b: ReviewCard): number {
-  return queueSortKey(b) - queueSortKey(a);
+  const aPending = a.status === 'pending';
+  const bPending = b.status === 'pending';
+  if (aPending !== bPending) return aPending ? -1 : 1;
+  if (aPending) return queueSortKey(b) - queueSortKey(a);
+  return b.created_at.localeCompare(a.created_at);
 }
 
 export function HighReachBadge({ card }: { card: ReviewCard }) {

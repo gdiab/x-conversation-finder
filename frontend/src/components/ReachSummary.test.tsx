@@ -54,4 +54,26 @@ describe('Pending queue order (issue #49)', () => {
     expect(queueSortKey(c)).toBe(0.8);
     expect([a, b, c].sort(compareQueueOrder)).toEqual([b, a, c]);
   });
+
+  it('puts every pending card before the others, which go newest first', () => {
+    const pendingLow = makeCard({ evidence: makeEvidence({ confidence_score: 0.56 }), queue_priority: 0.56 });
+    const expiredHigh = makeCard({
+      status: 'expired',
+      created_at: '2026-11-25T10:00:00Z',
+      evidence: makeEvidence({ confidence_score: 0.96 }),
+      queue_priority: 0.99,
+    });
+    const approvedNewer = makeCard({
+      status: 'approved',
+      created_at: '2026-11-26T10:00:00Z',
+      evidence: makeEvidence({ confidence_score: 0.6 }),
+      queue_priority: 0.6,
+    });
+
+    expect([expiredHigh, approvedNewer, pendingLow].sort(compareQueueOrder)).toEqual([
+      pendingLow,
+      approvedNewer,
+      expiredHigh,
+    ]);
+  });
 });
